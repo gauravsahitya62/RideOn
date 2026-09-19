@@ -1,5 +1,6 @@
 -- RideOn PostgreSQL MVP schema. Apply with a migration tool in deployed environments.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
 CREATE TYPE vehicle_type AS ENUM ('car','bike');
 CREATE TYPE booking_status AS ENUM ('requested','confirmed','in_progress','completed','cancelled','rejected');
 CREATE TYPE payment_status AS ENUM ('unpaid','pending','paid','refunded','failed');
@@ -45,7 +46,12 @@ CREATE TABLE bookings (
   customer_notes TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK (end_at > start_at)
+  CHECK (end_at > start_at),
+  -- Enforced by PostgreSQL across concurrent requests and API instances.
+  EXCLUDE USING gist (
+    vehicle_id WITH =,
+    tstzrange(start_at, end_at, '[)') WITH &&
+  ) WHERE (status IN ('requested', 'confirmed', 'in_progress'))
 );
 CREATE INDEX bookings_vehicle_window_idx ON bookings(vehicle_id, start_at, end_at);
 CREATE INDEX bookings_customer_created_idx ON bookings(customer_id, created_at DESC);
