@@ -1,5 +1,4 @@
 import 'dotenv/config';
-import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -135,7 +134,7 @@ app.post('/api/v1/auth/register', async (req, res) => {
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid registration details.' } });
   const passwordHash = await auth.hashPassword(parsed.data.password);
-  const customer = await repository.createCustomer({ ...parsed.data, passwordHash });
+  const customer = await repository.createCustomer({ fullName: parsed.data.fullName, phone: parsed.data.phone, email: parsed.data.email, passwordHash });
   const accessToken = auth.sign({ sub: customer.id, role: 'customer' });
   res.status(201).json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
