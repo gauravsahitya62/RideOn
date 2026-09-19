@@ -72,6 +72,7 @@ test('concurrent requests using the same idempotency key replay the same booking
   assert.equal(firstPayload.booking.bookingId, secondPayload.booking.bookingId);
 });
 
+
 test('vehicle list preserves existing aliases and search contract', async () => {
   const response = await request('/api/v1/vehicles?q=CRETA');
   const payload = await response.json();
