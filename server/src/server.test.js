@@ -5,7 +5,6 @@ import crypto from 'node:crypto';
 import { createPaymentService } from './payments.js';
 
 process.env.NODE_ENV = 'test';
-delete process.env.DATABASE_URL;
 
 const { app, repository } = await import('./server.js');
 
