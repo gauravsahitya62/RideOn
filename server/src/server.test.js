@@ -42,10 +42,15 @@ async function register(phone = '+911234567890', fullName = 'Test User') {
 }
 
 
-test('health endpoint reports memory storage when DATABASE_URL is absent', async () => {
 
 
-
+test('health endpoint reports storage state', async () => {
+  const response = await request('/health');
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.status, 'ok');
+  assert.equal(payload.storage.persistent, Boolean(process.env.DATABASE_URL));
+});
 
 test('concurrent requests using the same idempotency key replay the same booking', async () => {
   const a = await register('+911234567884', 'Concurrent Idempotency User');
@@ -66,23 +71,6 @@ test('concurrent requests using the same idempotency key replay the same booking
   assert.deepEqual(statuses, [200, 201]);
   assert.equal(firstPayload.booking.bookingId, secondPayload.booking.bookingId);
 });
-
-
-
-
-
-
-
-
-
-
-  const response = await request('/health');
-  const payload = await response.json();
-  assert.equal(response.status, 200);
-  assert.equal(payload.status, 'ok');
-  assert.equal(payload.storage.persistent, false);
-});
-
 
 test('vehicle list preserves existing aliases and search contract', async () => {
   const response = await request('/api/v1/vehicles?q=CRETA');
