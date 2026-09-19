@@ -6,9 +6,9 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
-CREATE TYPE vehicle_type AS ENUM ('car','bike');
-CREATE TYPE booking_status AS ENUM ('requested','confirmed','in_progress','completed','cancelled','rejected');
-CREATE TYPE payment_status AS ENUM ('unpaid','pending','paid','refunded','failed');
+DO $ BEGIN CREATE TYPE vehicle_type AS ENUM ('car','bike'); EXCEPTION WHEN duplicate_object THEN NULL; END $;
+DO $ BEGIN CREATE TYPE booking_status AS ENUM ('requested','confirmed','in_progress','completed','cancelled','rejected'); EXCEPTION WHEN duplicate_object THEN NULL; END $;
+DO $ BEGIN CREATE TYPE payment_status AS ENUM ('unpaid','pending','paid','refunded','failed'); EXCEPTION WHEN duplicate_object THEN NULL; END $;
 
 CREATE TABLE IF NOT EXISTS customers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
