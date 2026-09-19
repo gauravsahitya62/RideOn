@@ -1,23 +1,4 @@
 import test from 'node:test';
-test('concurrent requests using the same idempotency key replay the same booking', async () => {
-  const a = await register('+911234567884', 'Concurrent Idempotency User');
-  const payload = {
-    vehicleId: 'baleno-01',
-    startDate: '2033-03-01',
-    durationDays: 1,
-    delivery: false,
-    address: '111 Concurrent Road, Jaipur',
-  };
-  const [first, second] = await Promise.all([
-    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
-    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
-  ]);
-  const statuses = [first.status, second.status].sort();
-  const firstPayload = await first.json();
-  const secondPayload = await second.json();
-  assert.deepEqual(statuses, [200, 201]);
-  assert.equal(firstPayload.booking.bookingId, secondPayload.booking.bookingId);
-});
 
 
 test('vehicle list preserves existing aliases and search contract', async () => {
@@ -407,6 +388,27 @@ async function register(phone = '+911234567890', fullName = 'Test User') {
 }
 
 
+
+
+test('concurrent requests using the same idempotency key replay the same booking', async () => {
+  const a = await register('+911234567884', 'Concurrent Idempotency User');
+  const payload = {
+    vehicleId: 'baleno-01',
+    startDate: '2033-03-01',
+    durationDays: 1,
+    delivery: false,
+    address: '111 Concurrent Road, Jaipur',
+  };
+  const [first, second] = await Promise.all([
+    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
+    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
+  ]);
+  const statuses = [first.status, second.status].sort();
+  const firstPayload = await first.json();
+  const secondPayload = await second.json();
+  assert.deepEqual(statuses, [200, 201]);
+  assert.equal(firstPayload.booking.bookingId, secondPayload.booking.bookingId);
+});
 
 
 test('health endpoint reports storage state', async () => {
