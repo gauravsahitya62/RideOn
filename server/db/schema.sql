@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS bookings (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (end_at > start_at),
-  EXCLUDE USING gist (
+  CONSTRAINT bookings_vehicle_window_excl EXCLUDE USING gist (
     vehicle_id WITH =,
     tstzrange(start_at, end_at, '[)') WITH &&
   ) WHERE (status IN ('requested','confirmed','in_progress'))
