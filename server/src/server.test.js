@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import crypto from 'node:crypto';
+import { createPaymentService } from './payments.js';
 
 process.env.NODE_ENV = 'test';
 delete process.env.DATABASE_URL;
@@ -270,4 +272,90 @@ test('concurrent memory booking attempts cannot both reserve the same interval',
   ]);
   const statuses = [first.status, second.status].sort();
   assert.deepEqual(statuses, [201, 409]);
+});
+
+test('valid vehicle IDs resolve and unknown vehicle IDs are rejected', async () => {
+  const a = await register('+911234567881', 'Vehicle ID User');
+  const valid = await jsonRequest('/api/v1/bookings/quote', 'POST', {
+    vehicleId: 'creta-01',
+    startDate: '2032-12-01',
+    durationDays: 1,
+    delivery: false,
+  }, a.accessToken);
+  const validPayload = await valid.json();
+  assert.equal(valid.status, 200);
+  assert.equal(validPayload.quote.vehicleId, 'creta-01');
+  assert.equal(validPayload.quote.rental, 2499);
+
+  const invalid = await jsonRequest('/api/v1/bookings/quote', 'POST', {
+    vehicleId: 'does-not-exist',
+    startDate: '2032-12-01',
+    durationDays: 1,
+    delivery: false,
+  }, a.accessToken);
+  assert.equal(invalid.status, 404);
+  assert.equal((await invalid.json()).error.code, 'VEHICLE_NOT_FOUND');
+});
+
+test('quote pricing keeps rupees at the API boundary', async () => {
+  const a = await register('+911234567882', 'Currency User');
+  const response = await jsonRequest('/api/v1/bookings/quote', 'POST', {
+    vehicleId: 'creta-01',
+    startDate: '2033-01-01',
+    durationDays: 2,
+    delivery: true,
+  }, a.accessToken);
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.quote, {
+    vehicleId: 'creta-01',
+    days: 2,
+    rental: 4998,
+    deliveryFee: 199,
+    platformFee: 250,
+    total: 5447,
+    currency: 'INR',
+    currencyUnit: 'rupees',
+  });
+});
+
+test('payment service validates event fields and ordering', () => {
+  const service = createPaymentService({ provider: 'stripe', webhookSecret: 'test-secret' });
+  const parsed = service.parseWebhook({
+    eventId: 'evt-1',
+    bookingId: 'booking-1',
+    status: 'paid',
+    providerReference: 'pay-1',
+    amountPaise: 544700,
+    currency: 'INR',
+  });
+  assert.deepEqual(parsed, {
+    eventId: 'evt-1',
+    bookingId: 'booking-1',
+    status: 'paid',
+    providerReference: 'pay-1',
+    amountPaise: 544700,
+    currency: 'INR',
+  });
+  assert.equal(service.canTransition('unpaid', 'pending'), true);
+  assert.equal(service.canTransition('pending', 'paid'), true);
+  assert.equal(service.canTransition('paid', 'pending'), false);
+  assert.equal(service.canTransition('paid', 'failed'), false);
+  assert.equal(service.canTransition('refunded', 'paid'), false);
+  assert.equal(service.parseWebhook({ ...parsed, currency: 'USD' }), null);
+});
+
+test('configured webhook rejects wrong signature and accepts a correctly signed request shape', async () => {
+  const service = createPaymentService({ provider: 'stripe', webhookSecret: 'test-secret' });
+  const body = JSON.stringify({
+    eventId: 'evt-signature',
+    bookingId: 'booking-1',
+    status: 'pending',
+    providerReference: 'pay-1',
+    amountPaise: 10000,
+    currency: 'INR',
+  });
+  const signature = crypto.createHmac('sha256', 'test-secret').update(body).digest('hex');
+  assert.equal(service.verifyWebhook(body, 'bad'), false);
+  assert.equal(service.verifyWebhook(body, signature), true);
 });
