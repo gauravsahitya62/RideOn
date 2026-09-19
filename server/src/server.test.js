@@ -48,3 +48,6 @@ test('cancelled booking cannot be cancelled again', async () => {
   assert.equal(second.status, 409);
   assert.equal(p.error.code, 'CANNOT_CANCEL');
 });
+
+
+test('booking success payload contains an explicit unpaid payment state and no transaction id', async () => {\n  const r = await post('/api/v1/bookings', { vehicleId: 'baleno-01', durationDays: 1, startDate: '2030-09-01', delivery: false, address: '12 Example Road, Jaipur' });\n  assert.equal(r.status, 201);\n  const p = await r.json();\n  assert.equal(p.booking.paymentStatus, 'unpaid');\n  assert.equal('transactionId' in p.booking, false);\n});\n\ntest('quote returns a server-calculated total and disclaimer', async () => {\n  const r = await post('/api/v1/bookings/quote', { vehicleId: 'activa-01', durationDays: 2, startDate: '2030-10-01', delivery: true });\n  assert.equal(r.status, 200);\n  const p = await r.json();\n  assert.equal(p.quote.rental, 499 * 2);\n  assert.equal(p.quote.deliveryFee, 199);\n  assert.equal(p.quote.total, 499 * 2 + 199 + Math.round(499 * 2 * 0.05));\n  assert.match(p.quote.disclaimer, /Demo estimate/);\n});\n\ntest('missing booking id is reported as a not-found error', async () => {\n  const r = await fetch(base + '/api/v1/bookings/does-not-exist');\n  assert.equal(r.status, 404);\n  const p = await r.json();\n  assert.equal(p.error.code, 'BOOKING_NOT_FOUND');\n});\n
