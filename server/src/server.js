@@ -170,6 +170,7 @@ app.post('/api/v1/bookings', requireAuth, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
   const vehicle = fleet.find((v) => v.id === parsed.data.vehicleId && v.active);
   if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND' } });
+  const pricingData = pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery);
 
   const idempotencyKey = req.get('Idempotency-Key')?.trim() || null;
   if (idempotencyKey && idempotencyKey.length > 128) return res.status(400).json({ error: { code: 'INVALID_IDEMPOTENCY_KEY' } });
@@ -183,7 +184,7 @@ app.post('/api/v1/bookings', requireAuth, async (req, res) => {
       delivery: parsed.data.delivery,
       address: parsed.data.address,
       notes: parsed.data.notes,
-      pricing: pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery),
+      pricing: pricingData,
       idempotencyKey,
     });
     res.status(201).json({ data: publicBooking(booking), booking: publicBooking(booking) });
