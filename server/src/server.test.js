@@ -7,7 +7,7 @@ import { createPaymentService } from './payments.js';
 process.env.NODE_ENV = 'test';
 delete process.env.DATABASE_URL;
 
-const { app } = await import('./server.js');
+const { app, repository } = await import('./server.js');
 
 let server;
 let base;
@@ -17,8 +17,29 @@ test.before(async () => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
+test('concurrent requests using the same idempotency key replay the same booking', async () => {
+  const a = await register('+911234567884', 'Concurrent Idempotency User');
+  const payload = {
+    vehicleId: 'baleno-01',
+    startDate: '2033-03-01',
+    durationDays: 1,
+    delivery: false,
+    address: '111 Concurrent Road, Jaipur',
+  };
+  const [first, second] = await Promise.all([
+    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
+    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
+  ]);
+  const statuses = [first.status, second.status].sort();
+  const firstPayload = await first.json();
+  const secondPayload = await second.json();
+  assert.deepEqual(statuses, [200, 201]);
+  assert.equal(firstPayload.booking.bookingId, secondPayload.booking.bookingId);
+});
 
-test.after(async () => new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())));
+
+
+test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
 
 const request = (path, options = {}) => fetch(`${base}${path}`, options);
 const jsonRequest = (path, method, payload, token, extraHeaders = {}) => request(path, {
@@ -254,6 +275,37 @@ test('valid payment lifecycle can only be advanced through a verified webhook', 
     providerReference: 'provider-ref-1',
   });
   assert.equal(webhook.status, 401);
+});
+
+
+
+test('booking round trip preserves API rupees after persistence', async () => {
+  const a = await register('+911234567883', 'Persistence Currency User');
+  const createResponse = await jsonRequest('/api/v1/bookings', 'POST', {
+    vehicleId: 'creta-01',
+    startDate: '2033-02-01',
+    durationDays: 2,
+    delivery: true,
+    address: '101 Persistence Road, Jaipur',
+  }, a.accessToken, { 'Idempotency-Key': 'persist-currency-1' });
+  assert.equal(createResponse.status, 201);
+  const created = await createResponse.json();
+  assert.deepEqual(created.booking.pricing, {
+    days: 2,
+    rental: 4998,
+    deliveryFee: 199,
+    platformFee: 250,
+    total: 5447,
+    currency: 'INR',
+  , currencyUnit: 'rupees'});
+  const detail = await request('/api/v1/bookings/' + created.booking.bookingId, {
+    headers: { authorization: 'Bearer ' + a.accessToken },
+  });
+  const detailPayload = await detail.json();
+  assert.equal(detail.status, 200);
+  assert.equal(detailPayload.booking.vehicleId, 'creta-01');
+  assert.equal(detailPayload.booking.pricing.rental, 4998);
+  assert.equal(detailPayload.booking.pricing.total, 5447);
 });
 
 
