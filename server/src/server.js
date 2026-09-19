@@ -22,6 +22,7 @@ const allowedOrigin = process.env.CLIENT_ORIGIN || '*';
 app.use(cors({ origin: allowedOrigin === '*' ? true : allowedOrigin }));
 app.use(express.json({ limit: '32kb' }));
 app.use(rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
+const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
@@ -48,7 +49,7 @@ function pricing(vehicle, startAt, endAt, delivery) {
   const rental = vehicle.pricePerDay * days;
   const deliveryFee = delivery ? 199 : 0;
   const platformFee = Math.round(rental * 0.05);
-  return { days, rental, deliveryFee, platformFee, total: rental + deliveryFee + platformFee, currency: 'INR' };
+  return { days, rental, deliveryFee, platformFee, total: rental + deliveryFee + platformFee, currency: 'INR', currencyUnit: 'rupees' };
 }
 
 const mobileVehicle = (v) => ({
@@ -64,7 +65,6 @@ function publicBooking(booking) {
   return {
     id: booking.id,
     bookingId: booking.id,
-    customerId: booking.customerId,
     vehicleId: booking.vehicleId,
     vehicleName: booking.vehicle?.name,
     vehicle: booking.vehicle,
@@ -78,22 +78,23 @@ function publicBooking(booking) {
     total: booking.pricing.total,
     status: booking.status,
     paymentStatus: booking.paymentStatus,
-    paymentProviderReference: booking.paymentProviderReference || null,
     createdAt: booking.createdAt,
     updatedAt: booking.updatedAt || booking.createdAt,
   };
 }
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
+const paymentProvider = process.env.PAYMENT_PROVIDER || 'unconfigured';
+if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
+if (process.env.NODE_ENV === 'production' && (!process.env.CLIENT_ORIGIN || process.env.CLIENT_ORIGIN === '*')) throw new Error('CLIENT_ORIGIN must be explicitly configured in production');
+if (process.env.NODE_ENV === 'production' && paymentProvider !== 'unconfigured') throw new Error('No production payment provider adapter is configured');
 const auth = createAuth({
   jwtSecret: process.env.JWT_SECRET,
   accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3600),
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS || 12),
 });
-if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
-
 const payments = createPaymentService({
-  provider: process.env.PAYMENT_PROVIDER || 'unconfigured',
+  provider: paymentProvider,
   webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET,
 });
 
@@ -127,7 +128,7 @@ app.get('/api/v1/vehicles/:id', (req, res) => {
   res.json({ data, vehicle: data });
 });
 
-app.post('/api/v1/auth/register', async (req, res) => {
+app.post('/api/v1/auth/register', authRateLimit, async (req, res) => {
   const parsed = z.object({
     fullName: z.string().trim().min(2).max(100),
     phone: z.string().trim().regex(/^\+?[0-9]{10,15}$/),
@@ -141,7 +142,7 @@ app.post('/api/v1/auth/register', async (req, res) => {
   res.status(201).json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
 
-app.post('/api/v1/auth/login', async (req, res) => {
+app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
   const parsed = z.object({ phone: z.string().trim().regex(/^\+?[0-9]{10,15}$/), password: z.string().min(1).max(128) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid login details.' } });
   const customer = await repository.findCustomerByPhone(parsed.data.phone);
