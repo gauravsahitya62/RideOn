@@ -19,6 +19,29 @@ test.before(async () => {
 test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
 
 
+const request = (path, options = {}) => fetch(`${base}${path}`, options);
+const jsonRequest = (path, method, payload, token, extraHeaders = {}) => request(path, {
+  method,
+  headers: {
+    'content-type': 'application/json',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...extraHeaders,
+  },
+  body: JSON.stringify(payload),
+});
+
+async function register(phone = '+911234567890', fullName = 'Test User') {
+  const response = await jsonRequest('/api/v1/auth/register', 'POST', {
+    fullName,
+    phone,
+    email: `${phone.replace(/\D/g, '')}@example.com`,
+    password: 'StrongPass123!',
+  });
+  assert.equal(response.status, 201);
+  return response.json();
+}
+
+test('health endpoint reports memory storage when DATABASE_URL is absent', async () => {
 test('concurrent requests using the same idempotency key replay the same booking', async () => {
   const a = await register('+911234567884', 'Concurrent Idempotency User');
   const payload = {
@@ -47,29 +70,7 @@ test('concurrent requests using the same idempotency key replay the same booking
 
 
 
-const request = (path, options = {}) => fetch(`${base}${path}`, options);
-const jsonRequest = (path, method, payload, token, extraHeaders = {}) => request(path, {
-  method,
-  headers: {
-    'content-type': 'application/json',
-    ...(token ? { authorization: `Bearer ${token}` } : {}),
-    ...extraHeaders,
-  },
-  body: JSON.stringify(payload),
-});
 
-async function register(phone = '+911234567890', fullName = 'Test User') {
-  const response = await jsonRequest('/api/v1/auth/register', 'POST', {
-    fullName,
-    phone,
-    email: `${phone.replace(/\D/g, '')}@example.com`,
-    password: 'StrongPass123!',
-  });
-  assert.equal(response.status, 201);
-  return response.json();
-}
-
-test('health endpoint reports memory storage when DATABASE_URL is absent', async () => {
   const response = await request('/health');
   const payload = await response.json();
   assert.equal(response.status, 200);
