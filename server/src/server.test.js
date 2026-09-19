@@ -41,7 +41,6 @@ async function register(phone = '+911234567890', fullName = 'Test User') {
   return response.json();
 }
 
-test('health endpoint reports memory storage when DATABASE_URL is absent', async () => {
 test('concurrent requests using the same idempotency key replay the same booking', async () => {
   const a = await register('+911234567884', 'Concurrent Idempotency User');
   const payload = {
@@ -419,3 +418,5 @@ test('configured webhook rejects wrong signature and accepts a correctly signed 
   assert.equal(service.verifyWebhook(body, 'bad'), false);
   assert.equal(service.verifyWebhook(body, signature), true);
 });
+test('health endpoint reports memory storage when DATABASE_URL is absent', async () => {
+
