@@ -5,6 +5,8 @@ import { Platform } from 'react-native';
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000';
 const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = 20000;
+let accessToken = null;
+export const setAccessToken = (token) => { accessToken = token ? String(token) : null; };
 
 async function request(path, options = {}) {
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -18,6 +20,7 @@ async function request(path, options = {}) {
       headers: {
         Accept: 'application/json',
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         ...options.headers,
       },
     });
@@ -58,4 +61,7 @@ export const rideOnApi = {
   createBooking: (payload) => request('/api/v1/bookings', { method: 'POST', body: JSON.stringify(payload) }),
   getBooking: (id) => request(`/api/v1/bookings/${encode(id)}`),
   cancelBooking: (id) => request(`/api/v1/bookings/${encode(id)}/cancel`, { method: 'PATCH' }),
+  register: (payload) => request('/api/v1/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
+  login: (payload) => request('/api/v1/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
+  listBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/bookings${query ? `?${query}` : ''}`); },
 };
