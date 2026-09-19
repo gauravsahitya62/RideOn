@@ -253,3 +253,21 @@ test('valid payment lifecycle can only be advanced through a verified webhook', 
   });
   assert.equal(webhook.status, 401);
 });
+
+
+test('concurrent memory booking attempts cannot both reserve the same interval', async () => {
+  const a = await register('+911234567880', 'Concurrent User');
+  const payload = {
+    vehicleId: 'creta-01',
+    durationDays: 1,
+    startDate: '2032-11-01',
+    delivery: false,
+    address: '99 Example Road, Jaipur',
+  };
+  const [first, second] = await Promise.all([
+    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'concurrent-a' }),
+    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'concurrent-b' }),
+  ]);
+  const statuses = [first.status, second.status].sort();
+  assert.deepEqual(statuses, [201, 409]);
+});
