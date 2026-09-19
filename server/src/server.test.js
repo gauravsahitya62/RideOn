@@ -69,24 +69,6 @@ test('quote returns a server-calculated total and disclaimer', async () => {
 });
 
 
-test('booking success payload contains an explicit unpaid payment state and no transaction id', async () => {
-  const r = await post('/api/v1/bookings', { vehicleId: 'baleno-01', durationDays: 1, startDate: '2030-09-01', delivery: false, address: '12 Example Road, Jaipur' });
-  assert.equal(r.status, 201);
-  const p = await r.json();
-  assert.equal(p.booking.paymentStatus, 'unpaid');
-  assert.equal('transactionId' in p.booking, false);
-});
-
-test('quote returns a server-calculated total and disclaimer', async () => {
-  const r = await post('/api/v1/bookings/quote', { vehicleId: 'activa-01', durationDays: 2, startDate: '2030-10-01', delivery: true });
-  assert.equal(r.status, 200);
-  const p = await r.json();
-  assert.equal(p.quote.rental, 499 * 2);
-  assert.equal(p.quote.deliveryFee, 199);
-  assert.equal(p.quote.total, 499 * 2 + 199 + Math.round(499 * 2 * 0.05));
-  assert.match(p.quote.disclaimer, /Demo estimate/);
-});
-
 test('missing booking id is reported as a not-found error', async () => {
   const r = await fetch(base + '/api/v1/bookings/does-not-exist');
   assert.equal(r.status, 404);
