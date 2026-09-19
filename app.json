@@ -13,6 +13,9 @@
     },
     "ios": {
       "bundleIdentifier": "com.rideon.app"
-    }
+    },
+    "plugins": [
+      "expo-status-bar"
+    ]
   }
 }
