@@ -98,3 +98,74 @@ No device/emulator end-to-end test is implied by this repository documentation. 
 - A previous mobile run on commit \`f41dc977a5477f2210b5bf5d371142c202196ff3\` completed with 20/21 Expo Doctor checks passing. The single failure was the Expo SDK 57 dependency-version mismatch; the repository dependencies have since been aligned to the versions reported by that run.
 - API workflow runs observed in GitHub Actions were successful on the commits where the API workflow was triggered. The repository still does not claim a device test or production build.
 
+
+
+## Backend production foundation
+
+The backend now has a production-oriented persistence/authentication boundary while retaining a memory fallback for local prototype use.
+
+### Database
+
+Set `DATABASE_URL` to a PostgreSQL connection string. Apply `server/db/schema.sql` against the target database before starting the API.
+
+The schema includes customers, vehicles, bookings, booking status events, idempotency keys, and payment events. Booking overlap protection uses PostgreSQL's exclusion constraint over `tstzrange`, which is the concurrency control relied upon for persistent reservations.
+
+The repository reports storage mode from `GET /health`. Without `DATABASE_URL`, it explicitly reports `persistent: false`; this is not a production persistence mode.
+
+### Authentication
+
+Customer registration and password login are available at:
+
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+
+Booking quote, create, history, detail, and cancellation routes require `Authorization: Bearer <token>`.
+
+Passwords are hashed with bcrypt. Production requires `JWT_SECRET`. Access tokens default to one hour; change `ACCESS_TOKEN_TTL_SECONDS` as appropriate for deployment.
+
+Authorization is customer-scoped: a customer can only retrieve, list, or cancel their own bookings.
+
+### Booking history
+
+`GET /api/v1/bookings?limit=20&offset=0` returns only the authenticated customer's bookings. Results are bounded to a maximum page size of 50.
+
+### Reservation safety
+
+Booking creation accepts an optional `Idempotency-Key` header. Persistent PostgreSQL bookings additionally use the database exclusion constraint to reject overlapping reservations under concurrent requests. The server still re-checks availability before quoting/creating, but the database constraint is the authoritative concurrency guard.
+
+### Payments
+
+No real payment provider is configured.
+
+The API contains a provider-neutral webhook verification boundary and an explicit payment lifecycle (`unpaid`, `pending`, `paid`, `failed`, `refunded`). Payment status changes are accepted only through a verified webhook when a provider and webhook secret are configured. Duplicate provider event IDs are ignored.
+
+Do not set `PAYMENT_PROVIDER` to a real provider until its credentials and provider-specific signature format have been implemented and tested.
+
+### Environment
+
+Server environment variables are documented in `server/.env.example`:
+
+```dotenv
+DATABASE_URL=
+DATABASE_SSL=false
+DATABASE_POOL_MAX=10
+JWT_SECRET=
+ACCESS_TOKEN_TTL_SECONDS=3600
+BCRYPT_ROUNDS=12
+PAYMENT_PROVIDER=unconfigured
+PAYMENT_WEBHOOK_SECRET=
+```
+
+Never place these server secrets in the Expo app or commit real credentials.
+
+### Running backend tests
+
+```bash
+cd server
+npm install
+npm test
+```
+
+The automated tests exercise the in-memory repository path, authentication/authorization behavior, booking ownership, idempotency, overlapping reservations, and the payment verification boundary.
+
+Database connectivity, PostgreSQL constraint behavior across multiple API instances, and real payment-provider webhook interoperability still require an environment with the relevant external services.
