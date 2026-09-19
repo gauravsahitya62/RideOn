@@ -82,6 +82,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const client=await pool.connect();
       try {
         await client.query('begin');
+        await client.query('select 1 from vehicles where id=$1 and active=true for share',[input.vehicle.id]);
         if(input.idempotencyKey){
           await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',[`${input.customerId}:${input.idempotencyKey}`]);
           const idem=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2 for share',[input.customerId,input.idempotencyKey]);
