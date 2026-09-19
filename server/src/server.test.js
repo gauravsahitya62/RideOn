@@ -16,7 +16,7 @@ test.before(async () => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
+
 
 
 const request = (path, options = {}) => fetch(`${base}${path}`, options);
@@ -398,6 +398,8 @@ test('payment service validates event fields and ordering', () => {
   assert.equal(service.canTransition('refunded', 'paid'), false);
   assert.equal(service.parseWebhook({ ...parsed, currency: 'USD' }), null);
 });
+
+test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
 
 test('configured webhook rejects wrong signature and accepts a correctly signed request shape', async () => {
   const service = createPaymentService({ provider: 'stripe', webhookSecret: 'test-secret' });
