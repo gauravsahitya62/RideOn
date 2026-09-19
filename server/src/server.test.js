@@ -399,7 +399,7 @@ test('payment service validates event fields and ordering', () => {
   assert.equal(service.parseWebhook({ ...parsed, currency: 'USD' }), null);
 });
 
-test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
+
 
 test('configured webhook rejects wrong signature and accepts a correctly signed request shape', async () => {
   const service = createPaymentService({ provider: 'stripe', webhookSecret: 'test-secret' });
@@ -416,3 +416,4 @@ test('configured webhook rejects wrong signature and accepts a correctly signed 
   assert.equal(service.verifyWebhook(body, signature), true);
 });
 
+test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
