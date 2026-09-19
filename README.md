@@ -9,8 +9,10 @@ RideOn is an Expo / React Native customer app concept for booking cars and bikes
 - `server/src/server.js`: REST API, validation, demo fleet and booking lifecycle endpoints.
 - `server/src/server.test.js`: Node test-runner API tests.
 - `server/db/schema.sql`: PostgreSQL starting schema (not connected to runtime yet).
+- `server/Dockerfile`: container build for the API demo.
 - `.env.example`, `server/.env.example`: configuration templates.
 - `.github/workflows/rideon-api.yml`: automated API test workflow.
+- `.github/workflows/rideon-mobile.yml`: Expo dependency/doctor check workflow.
 
 ## Mobile app
 
@@ -42,6 +44,13 @@ npm run dev
 
 Health check: `GET http://localhost:4000/health`
 
+Build and run the API container from `server/`:
+
+```bash
+docker build -t rideon-api .
+docker run --rm -p 4000:4000 rideon-api
+```
+
 ### Endpoints
 
 - `GET /api/v1/vehicles?type=car|bike|all&city=Jaipur&q=...`
@@ -65,7 +74,7 @@ Example mobile payload:
 }
 ```
 
-Run tests with `npm test` from `server/`. The GitHub Actions workflow runs the API suite on relevant pushes and pull requests; check the Actions tab for its actual result.
+Run tests with `npm test` from `server/`. GitHub Actions checks API tests and Expo project compatibility on relevant pushes/pull requests. Check the Actions tab for each run's actual result.
 
 ## MVP limitations — do not use for live rentals yet
 
