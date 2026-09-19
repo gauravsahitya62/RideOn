@@ -1,0 +1,107 @@
+openapi: 3.0.3
+info:
+  title: RideOn API
+  version: 1.0.0
+  description: Demo API contract for RideOn vehicle discovery and rental booking requests. Not production-ready.
+servers:
+  - url: http://localhost:4000
+paths:
+  /health:
+    get:
+      summary: API health check
+      responses:
+        '200':
+          description: Service is running
+  /api/v1/vehicles:
+    get:
+      summary: List available demo fleet
+      parameters:
+        - in: query
+          name: type
+          schema: { type: string, enum: [all, car, bike] }
+        - in: query
+          name: city
+          schema: { type: string, example: Jaipur }
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        '200':
+          description: Fleet listing
+  /api/v1/vehicles/{id}:
+    get:
+      summary: Get one vehicle
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Vehicle found }
+        '404': { description: Vehicle not found }
+  /api/v1/bookings/quote:
+    post:
+      summary: Calculate demo booking estimate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingInput'
+      responses:
+        '200': { description: Estimate calculated }
+        '400': { description: Invalid request }
+        '409': { description: Vehicle dates conflict with an active request }
+  /api/v1/bookings:
+    post:
+      summary: Create a booking request (not a confirmed reservation)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookingInput'
+      responses:
+        '201': { description: Request recorded }
+        '400': { description: Invalid request }
+        '404': { description: Vehicle not found }
+        '409': { description: Vehicle dates conflict with an active request }
+  /api/v1/bookings/{id}:
+    get:
+      summary: Retrieve a booking request
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Booking found }
+        '404': { description: Booking not found }
+  /api/v1/bookings/{id}/cancel:
+    patch:
+      summary: Cancel a requested or confirmed booking
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Booking cancelled }
+        '404': { description: Booking not found }
+        '409': { description: Booking cannot be cancelled }
+components:
+  schemas:
+    BookingInput:
+      type: object
+      required: [vehicleId, address]
+      properties:
+        vehicleId: { type: string, example: creta-01 }
+        customerName: { type: string, minLength: 2, maxLength: 100 }
+        phone: { type: string, pattern: '^\\+?[0-9]{10,15}$' }
+        startAt: { type: string, format: date-time }
+        endAt: { type: string, format: date-time }
+        startDate: { type: string, format: date, example: '2030-05-01' }
+        durationDays: { type: integer, minimum: 1, maximum: 30, example: 2 }
+        delivery: { type: boolean, default: true }
+        address: { type: string, minLength: 8, maxLength: 300 }
+        notes: { type: string, maxLength: 500 }
