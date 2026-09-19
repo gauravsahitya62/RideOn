@@ -146,6 +146,20 @@ test('duplicate booking submission with the same idempotency key is replayed', a
   assert.equal(firstPayload.booking.bookingId, secondPayload.booking.bookingId);
 });
 
+test('concurrent requests with the same idempotency key replay one booking', async () => {
+  const a = await register('+911234567884', 'Concurrent Idempotency User');
+  const payload = { vehicleId: 'baleno-01', startDate: '2033-03-01', durationDays: 1, delivery: false, address: '111 Concurrent Road, Jaipur' };
+  const [first, second] = await Promise.all([
+    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
+    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
+  ]);
+  const statuses = [first.status, second.status].sort();
+  const firstPayload = await first.json();
+  const secondPayload = await second.json();
+  assert.deepEqual(statuses, [200, 201]);
+  assert.equal(firstPayload.booking.bookingId, secondPayload.booking.bookingId);
+});
+
 test('overlapping booking attempts return unavailable and non-overlapping booking remains possible', async () => {
   const a = await register('+911234567896', 'Overlap User');
   const first = await jsonRequest('/api/v1/bookings', 'POST', {
