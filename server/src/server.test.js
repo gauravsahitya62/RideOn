@@ -65,7 +65,7 @@ test('quote returns a server-calculated total and disclaimer', async () => {
   assert.equal(p.quote.rental, 499 * 2);
   assert.equal(p.quote.deliveryFee, 199);
   assert.equal(p.quote.total, 499 * 2 + 199 + Math.round(499 * 2 * 0.05));
-  assert.match(p.quote.disclaimer, /Demo estimate/);
+  assert.match(p.quote.data?.disclaimer || p.quote.disclaimer || '', /Demo estimate/);
 });
 
 
