@@ -134,7 +134,8 @@ app.post('/api/v1/auth/register', async (req, res) => {
     password: z.string().min(8).max(128),
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid registration details.' } });
-  const customer = await repository.createCustomer(parsed.data);
+  const passwordHash = await auth.hashPassword(parsed.data.password);
+  const customer = await repository.createCustomer({ ...parsed.data, passwordHash });
   const accessToken = auth.sign({ sub: customer.id, role: 'customer' });
   res.status(201).json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
@@ -142,8 +143,8 @@ app.post('/api/v1/auth/register', async (req, res) => {
 app.post('/api/v1/auth/login', async (req, res) => {
   const parsed = z.object({ phone: z.string().trim().regex(/^\+?[0-9]{10,15}$/), password: z.string().min(1).max(128) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid login details.' } });
-  const customer = await repository.authenticateCustomer(parsed.data);
-  if (!customer) return res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'Phone or password is incorrect.' } });
+  const customer = await repository.findCustomerByPhone(parsed.data.phone);
+  if (!customer || !(await auth.verifyPassword(parsed.data.password, customer.passwordHash))) return res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'Phone or password is incorrect.' } });
   const accessToken = auth.sign({ sub: customer.id, role: 'customer' });
   res.json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
