@@ -31,10 +31,10 @@ export function createRepository({ databaseUrl, fleet }) {
       notes:row.customer_notes ?? row.notes,
       pricing:{
         days:row.days ?? Math.max(1, Math.ceil((new Date(endAt)-new Date(startAt))/86400000)),
-        rental:Number(row.rental_total ?? row.rental_total_paise ?? 0),
-        deliveryFee:Number(row.delivery_fee ?? row.delivery_fee_paise ?? 0),
-        platformFee:Number(row.platform_fee ?? row.platform_fee_paise ?? 0),
-        total:Number(row.total ?? row.total_paise ?? 0),
+        rental:Number(row.rental_total ?? ((row.rental_total_paise ?? 0) / 100)),
+        deliveryFee:Number(row.delivery_fee ?? ((row.delivery_fee_paise ?? 0) / 100)),
+        platformFee:Number(row.platform_fee ?? ((row.platform_fee_paise ?? 0) / 100)),
+        total:Number(row.total ?? ((row.total_paise ?? 0) / 100)),
         currency:'INR'
       },
       status:row.status,
