@@ -18,11 +18,12 @@ const fleet = [
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
+app.disable('x-powered-by');
 const allowedOrigin = process.env.CLIENT_ORIGIN || '*';
 app.use(cors({ origin: allowedOrigin === '*' ? true : allowedOrigin }));
 app.use(express.json({ limit: '32kb' }));
 app.use(rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
-const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false });
+const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
@@ -102,8 +103,9 @@ const requireAuth = auth.middleware();
 
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
-  res.json({
-    status: 'ok',
+  const healthy = storage.mode === 'memory' || storage.reachable !== false;
+  res.status(healthy ? 200 : 503).json({
+    status: healthy ? 'ok' : 'degraded',
     service: 'rideon-api',
     storage,
     paymentProvider: payments.name,
@@ -245,4 +247,4 @@ const port = Number(process.env.PORT) || 4000;
 if (process.env.NODE_ENV !== 'test') {
   app.listen(port, () => console.log(`RideOn API listening on :${port}`));
 }
-export { app };
+export { app, repository };
