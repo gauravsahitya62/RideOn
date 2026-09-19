@@ -58,7 +58,7 @@ export const rideOnApi = {
   },
   getVehicle: (id) => request(`/api/v1/vehicles/${encode(id)}`),
   quote: (payload) => request('/api/v1/bookings/quote', { method: 'POST', body: JSON.stringify(payload) }),
-  createBooking: (payload) => request('/api/v1/bookings', { method: 'POST', body: JSON.stringify(payload) }),
+  createBooking: (payload, idempotencyKey) => request('/api/v1/bookings', { method: 'POST', headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined, body: JSON.stringify(payload) }),
   getBooking: (id) => request(`/api/v1/bookings/${encode(id)}`),
   cancelBooking: (id) => request(`/api/v1/bookings/${encode(id)}/cancel`, { method: 'PATCH' }),
   register: (payload) => request('/api/v1/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
