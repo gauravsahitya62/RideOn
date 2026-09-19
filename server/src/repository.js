@@ -103,6 +103,56 @@ export function createRepository({ databaseUrl, fleet }) {
   async function getBooking(id){if(!useDatabase)return memory.bookings.get(id)||null;const {rows}=await pool.query('select * from bookings where id=$1',[id]);return rows[0]?mapBooking({...rows[0],vehicle:fleet.find(v=>v.id===rows[0].vehicle_id)}):null;}
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select * from bookings where customer_id=$1 order by created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,vehicle:fleet.find(v=>v.id===r.vehicle_id)}));}
   async function cancelBooking(id,customerId){if(!useDatabase){const b=memory.bookings.get(id);if(!b||b.customerId!==customerId||!['requested','confirmed'].includes(b.status))return null;b.status='cancelled';b.updatedAt=new Date().toISOString();return b;}const {rows}=await pool.query('update bookings set status=\'cancelled\',updated_at=now() where id=$1 and customer_id=$2 and status in (\'requested\',\'confirmed\') returning *',[id,customerId]);if(!rows[0])return null;await pool.query('insert into booking_status_events (booking_id,previous_status,next_status,actor_type,actor_id) values ($1,\'requested\',\'cancelled\',\'customer\',$2)',[id,customerId]);return mapBooking({...rows[0],vehicle:fleet.find(v=>v.id===rows[0].vehicle_id)});}
-  async function applyPaymentEvent(event){if(!useDatabase){if(memory.paymentEvents.has(event.eventId))return{applied:false,duplicate:true};memory.paymentEvents.set(event.eventId,event);const b=memory.bookings.get(event.bookingId);if(!b)return{applied:false,duplicate:false};b.paymentStatus=event.status;b.paymentProviderReference=event.providerReference;b.updatedAt=new Date().toISOString();return{applied:true,duplicate:false};}const client=await pool.connect();try{await client.query('begin');const ins=await client.query('insert into payment_events (provider_event_id,booking_id,status,provider_reference,received_at) values ($1,$2,$3,$4,now()) on conflict (provider_event_id) do nothing returning id',[event.eventId,event.bookingId,event.status,event.providerReference||null]);if(!ins.rows[0]){await client.query('commit');return{applied:false,duplicate:true};}const up=await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1 and $2 in (\'pending\',\'paid\',\'failed\',\'refunded\') returning id',[event.bookingId,event.status,event.providerReference||null]);await client.query('commit');return{applied:up.rows.length>0,duplicate:false};}catch(e){await client.query('rollback');throw e;}finally{client.release();}}
+  async function applyPaymentEvent(event){
+    const canTransition = (current, next) => {
+      if (current === next) return true;
+      if (current === 'unpaid') return next === 'pending' || next === 'failed';
+      if (current === 'pending') return next === 'paid' || next === 'failed';
+      if (current === 'failed') return next === 'pending';
+      if (current === 'paid') return next === 'refunded';
+      return false;
+    };
+    if (!useDatabase) {
+      if (memory.paymentEvents.has(event.eventId)) return { applied:false, duplicate:true };
+      const booking = memory.bookings.get(event.bookingId);
+      if (!booking) return { applied:false, duplicate:false, invalid:true };
+      const expectedPaise = Math.round(Number(booking.pricing?.total || 0) * 100);
+      if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedPaise || !event.providerReference || !canTransition(booking.paymentStatus || 'unpaid', event.status)) {
+        return { applied:false, duplicate:false, invalid:true };
+      }
+      memory.paymentEvents.set(event.eventId, event);
+      booking.paymentStatus = event.status;
+      booking.paymentProviderReference = event.providerReference;
+      booking.updatedAt = new Date().toISOString();
+      return { applied:true, duplicate:false };
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const bookingResult = await client.query('select id,payment_status,total_paise from bookings where id=$1 for update',[event.bookingId]);
+      if (!bookingResult.rows[0]) {
+        await client.query('rollback');
+        return { applied:false, duplicate:false, invalid:true };
+      }
+      const booking = bookingResult.rows[0];
+      if (event.currency !== 'INR' || Number(event.amountPaise) !== Number(booking.total_paise) || !event.providerReference || !canTransition(booking.payment_status, event.status)) {
+        await client.query('rollback');
+        return { applied:false, duplicate:false, invalid:true };
+      }
+      const inserted = await client.query('insert into payment_events (provider_event_id,booking_id,status,provider_reference,received_at) values ($1,$2,$3,$4,now()) on conflict (provider_event_id) do nothing returning id',[event.eventId,event.bookingId,event.status,event.providerReference]);
+      if (!inserted.rows[0]) {
+        await client.query('commit');
+        return { applied:false, duplicate:true };
+      }
+      await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[event.bookingId,event.status,event.providerReference]);
+      await client.query('commit');
+      return { applied:true, duplicate:false };
+    } catch(e) {
+      await client.query('rollback');
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
   return {health,createCustomer,findCustomerByPhone,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent};
 }
