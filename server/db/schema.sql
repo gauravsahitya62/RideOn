@@ -1,6 +1,7 @@
--- RideOn PostgreSQL production foundation migration.
--- Apply after creating the database. This migration is intentionally SQL-only so it
--- can be used by psql, CI, or a future migration runner.
+-- RideOn PostgreSQL schema/migration source of truth.
+-- Public vehicle IDs are stable text identifiers such as creta-01.
+-- API prices are represented in INR rupees; every *_paise column stores integer paise.
+-- The statements below are safe to re-run for fresh databases and seeded fleet rows.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
@@ -20,7 +21,7 @@ CREATE TABLE IF NOT EXISTS customers (
 );
 
 CREATE TABLE IF NOT EXISTS vehicles (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id VARCHAR(64) PRIMARY KEY,
   owner_id UUID,
   type vehicle_type NOT NULL,
   name VARCHAR(160),
@@ -28,8 +29,8 @@ CREATE TABLE IF NOT EXISTS vehicles (
   model VARCHAR(100),
   year SMALLINT,
   city VARCHAR(100) NOT NULL,
-  daily_rate_paise INTEGER NOT NULL CHECK (daily_rate_paise >= 0),
-  security_deposit_paise INTEGER NOT NULL DEFAULT 0 CHECK (security_deposit_paise >= 0),
+  daily_rate_paise BIGINT NOT NULL CHECK (daily_rate_paise >= 0),
+  security_deposit_paise BIGINT NOT NULL DEFAULT 0 CHECK (security_deposit_paise >= 0),
   transmission VARCHAR(30),
   fuel VARCHAR(30),
   seats SMALLINT,
@@ -41,15 +42,15 @@ CREATE TABLE IF NOT EXISTS vehicles (
 CREATE TABLE IF NOT EXISTS bookings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_id UUID NOT NULL REFERENCES customers(id),
-  vehicle_id UUID NOT NULL REFERENCES vehicles(id),
+  vehicle_id VARCHAR(64) NOT NULL REFERENCES vehicles(id),
   start_at TIMESTAMPTZ NOT NULL,
   end_at TIMESTAMPTZ NOT NULL,
   delivery_required BOOLEAN NOT NULL DEFAULT true,
   delivery_address TEXT NOT NULL,
-  delivery_fee_paise INTEGER NOT NULL DEFAULT 0 CHECK (delivery_fee_paise >= 0),
-  rental_total_paise INTEGER NOT NULL CHECK (rental_total_paise >= 0),
-  platform_fee_paise INTEGER NOT NULL DEFAULT 0 CHECK (platform_fee_paise >= 0),
-  total_paise INTEGER NOT NULL CHECK (total_paise >= 0),
+  delivery_fee_paise BIGINT NOT NULL DEFAULT 0 CHECK (delivery_fee_paise >= 0),
+  rental_total_paise BIGINT NOT NULL CHECK (rental_total_paise >= 0),
+  platform_fee_paise BIGINT NOT NULL DEFAULT 0 CHECK (platform_fee_paise >= 0),
+  total_paise BIGINT NOT NULL CHECK (total_paise >= 0),
   status booking_status NOT NULL DEFAULT 'requested',
   payment_status payment_status NOT NULL DEFAULT 'unpaid',
   payment_provider_reference TEXT,
@@ -94,3 +95,25 @@ CREATE TABLE IF NOT EXISTS payment_events (
   provider_reference TEXT,
   received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+
+-- Stable public IDs matching the mobile/API catalogue.
+INSERT INTO vehicles (
+  id, type, name, make, model, city, daily_rate_paise, active, transmission, fuel, seats
+)
+VALUES
+  ('creta-01', 'car', 'Hyundai Creta', 'Hyundai', 'Creta', 'Jaipur', 249900, true, 'Automatic', 'Petrol', 5),
+  ('baleno-01', 'car', 'Maruti Baleno', 'Maruti', 'Baleno', 'Jaipur', 149900, true, 'Manual', 'Petrol', 5),
+  ('classic-01', 'bike', 'Royal Enfield Classic 350', 'Royal Enfield', 'Classic 350', 'Jaipur', 99900, true, NULL, NULL, 2),
+  ('activa-01', 'bike', 'Honda Activa 6G', 'Honda', 'Activa 6G', 'Jaipur', 49900, true, 'Automatic', 'Petrol', 2)
+ON CONFLICT (id) DO UPDATE SET
+  type = EXCLUDED.type,
+  name = EXCLUDED.name,
+  make = EXCLUDED.make,
+  model = EXCLUDED.model,
+  city = EXCLUDED.city,
+  daily_rate_paise = EXCLUDED.daily_rate_paise,
+  active = EXCLUDED.active,
+  transmission = EXCLUDED.transmission,
+  fuel = EXCLUDED.fuel,
+  seats = EXCLUDED.seats;
