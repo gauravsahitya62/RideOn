@@ -16,7 +16,15 @@ From the repository root, connect to the intended database using `psql` and appl
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f server/db/schema.sql
 ```
 
-Apply only to a new/empty database for now. The schema is a bootstrap script, not yet a versioned migration system; rerunning it may fail because enum types and tables already exist. Back up production data and use reviewed, versioned migrations before upgrading an existing environment.
+For a local/demo environment, populate the four sample vehicles:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f server/db/seed-demo.sql
+```
+
+The seed uses deterministic UUIDs and `ON CONFLICT (id) DO UPDATE`, so rerunning it refreshes those demo rows. Do not run it against a production fleet: it intentionally overwrites the four fixed demo IDs.
+
+Apply the schema only to a new/empty database for now. It is a bootstrap script, not yet a versioned migration system; rerunning it may fail because enum types and tables already exist. Back up production data and use reviewed, versioned migrations before upgrading an existing environment.
 
 ## Booking overlap protection
 
