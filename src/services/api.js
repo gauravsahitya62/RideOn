@@ -4,26 +4,41 @@ import { Platform } from 'react-native';
 // iOS simulator uses localhost. A physical device needs your computer's LAN IP.
 const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000';
 const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
+const REQUEST_TIMEOUT_MS = 20000;
 
 async function request(path, options = {}) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  let timeoutId;
   let response;
   try {
+    if (controller) timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     response = await fetch(`${API_URL}${path}`, {
       ...options,
+      ...(controller ? { signal: controller.signal } : {}),
       headers: {
         Accept: 'application/json',
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
         ...options.headers,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`RideOn API request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds. Check your connection and retry.`);
+    }
     throw new Error(`RideOn API is unreachable at ${API_URL}. Start the server and check EXPO_PUBLIC_API_URL.`);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
 
-  const payload = await response.json().catch(() => ({}));
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
   if (!response.ok) {
-    const message = payload?.error?.message || payload?.error?.code || `Request failed (${response.status})`;
-    throw new Error(message);
+    const message = payload?.error?.message || payload?.message || payload?.error?.code || `Request failed (${response.status})`;
+    throw new Error(String(message));
   }
   return payload;
 }
