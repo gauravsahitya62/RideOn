@@ -5,7 +5,7 @@ RideOn is an Expo / React Native customer app concept for booking cars and bikes
 ## Repository map
 
 - `App.js`, `app.json`, `package.json`: Expo mobile app.
-- `src/services/api.js`: mobile HTTP client and configurable API base URL.
+- `src/services/api.js`: mobile HTTP client, configurable API base URL, and request timeout/error handling.
 - `server/src/server.js`: REST API, validation, demo fleet and booking lifecycle endpoints.
 - `server/src/server.test.js`: Node test-runner API tests.
 - `server/db/schema.sql`: PostgreSQL starting schema (not connected to runtime yet).
@@ -31,7 +31,7 @@ Example root `.env`:
 EXPO_PUBLIC_API_URL=http://192.168.1.10:4000
 ```
 
-Replace the example LAN IP with your computer's reachable local IP. Ensure the phone and computer share a network and your firewall allows port 4000.
+Replace the example LAN IP with your computer's reachable local IP. Ensure the phone and computer share a network and your firewall allows port 4000. The mobile HTTP client aborts requests after 20 seconds when `AbortController` is available and reports network, timeout, and HTTP errors to callers. This timeout is a client resilience measure, not a guarantee that the server stopped processing a timed-out mutation.
 
 ## API
 
@@ -74,12 +74,19 @@ Example mobile payload:
 }
 ```
 
-Run tests with `npm test` from `server/`. GitHub Actions checks API tests and Expo project compatibility on relevant pushes/pull requests. Check the Actions tab for each run's actual result.
+Run API tests with `npm test` from `server/`. Root `package.json` currently provides Expo start/platform scripts but no root test or build script. GitHub Actions checks API tests and Expo project compatibility on relevant pushes/pull requests; inspect the Actions tab for the actual run result. The Expo doctor workflow is not a device-level UI test.
+
+## QA and release checklist
+
+Before considering a release, run the API test suite and Expo doctor workflow, then exercise the customer journey on supported iOS/Android devices against the intended backend: launch, browse/search/filter, switch city, inspect a vehicle, set dates, select pickup/delivery and address, obtain a quote, review, submit, inspect Trips/detail, and cancel where the server allows it. Verify loading/error/retry states and accessibility with screen readers and larger text. Confirm that a booking only shows success after the server acknowledges it and that payment status is not inferred from booking status.
+
+No device/emulator end-to-end test is implied by this repository documentation. Record actual workflow and device results before release.
 
 ## MVP limitations — do not use for live rentals yet
 
 - Demo fleet and bookings are held in process memory and disappear on restart; PostgreSQL schema is a starting point, not wired to a runtime database adapter or migrations.
 - Overlap prevention is process-local and not concurrency-safe across multiple server instances; booking creation records a request, not a confirmed reservation.
 - Authentication, OTP, identity/license verification, owner and delivery-partner consoles, admin moderation, real payment/refund webhooks, push notifications, maps/geocoding, audit/monitoring, rate limiting, and production deployment remain to be integrated and security-reviewed.
+- No real payment provider is configured. The app's payment selection is a demo/unavailable state; no online payment, charge, refund, or transaction reference should be represented as completed.
 - Prices and delivery fee are demo values; configure verified city-specific rates and taxes before launch.
 - Never put payment secrets or server credentials in the mobile bundle.
