@@ -1,4 +1,5 @@
 import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 
 // Set EXPO_PUBLIC_API_URL in your local .env. Android emulator uses 10.0.2.2;
 // iOS simulator uses localhost. A physical device needs your computer's LAN IP.
@@ -6,7 +7,34 @@ const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'ht
 const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = 20000;
 let accessToken = null;
+const ACCESS_TOKEN_KEY = 'rideon_access_token';
+
 export const setAccessToken = (token) => { accessToken = token ? String(token) : null; };
+
+export async function restoreAccessToken() {
+  try {
+    accessToken = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
+  } catch {
+    accessToken = null;
+  }
+  return accessToken;
+}
+
+export async function persistAccessToken(token) {
+  accessToken = token ? String(token) : null;
+  try {
+    if (accessToken) await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, accessToken, { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
+    else await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
+  } catch (error) {
+    accessToken = null;
+    throw new Error('Could not securely store the RideOn session on this device.');
+  }
+}
+
+export async function clearStoredAccessToken() {
+  accessToken = null;
+  try { await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY); } catch {}
+}
 
 async function request(path, options = {}) {
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
