@@ -118,6 +118,7 @@ export default function RideOnApp() {
        : await rideOnApi.login({phone:profileInput.phone.replace(/\s/g,''),password:profileInput.password});
      await persistAccessToken(result.accessToken);
      setAuthToken(result.accessToken);
+     if(!result?.accessToken)throw new Error('Authentication response did not include an access token.');
      const customer=result.customer||{};
      const nextProfile={name:customer.fullName||profileInput.name,phone:customer.phone||profileInput.phone,email:customer.email||profileInput.email};
      setProfile(nextProfile);setName(nextProfile.name);setPhone(nextProfile.phone);setEmail(nextProfile.email);
