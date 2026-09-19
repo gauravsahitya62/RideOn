@@ -199,3 +199,57 @@ test('expired bearer tokens are rejected', async () => {
   assert.equal(response.status, 401);
   assert.equal(payload.error.code, 'INVALID_TOKEN');
 });
+
+
+test('quote and booking both require authentication', async () => {
+  const quote = await jsonRequest('/api/v1/bookings/quote', 'POST', {
+    vehicleId: 'creta-01',
+    durationDays: 1,
+    startDate: '2032-08-01',
+    delivery: false,
+  });
+  const booking = await jsonRequest('/api/v1/bookings', 'POST', {
+    vehicleId: 'creta-01',
+    durationDays: 1,
+    startDate: '2032-08-01',
+    delivery: false,
+    address: '12 Example Road, Jaipur',
+  });
+  assert.equal(quote.status, 401);
+  assert.equal(booking.status, 401);
+});
+
+test('duplicate booking submissions without an idempotency key are not treated as the same request', async () => {
+  const a = await register('+911234567898', 'No Key User');
+  const payload = {
+    vehicleId: 'activa-01',
+    durationDays: 1,
+    startDate: '2032-09-01',
+    delivery: false,
+    address: '20 Example Road, Jaipur',
+  };
+  const first = await jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken);
+  const second = await jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken);
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 409);
+  assert.equal((await second.json()).error.code, 'VEHICLE_UNAVAILABLE');
+});
+
+test('valid payment lifecycle can only be advanced through a verified webhook', async () => {
+  const a = await register('+911234567899', 'Payment User');
+  const bookingResponse = await jsonRequest('/api/v1/bookings', 'POST', {
+    vehicleId: 'baleno-01',
+    durationDays: 1,
+    startDate: '2032-10-01',
+    delivery: false,
+    address: '30 Example Road, Jaipur',
+  }, a.accessToken);
+  const created = await bookingResponse.json();
+  const webhook = await jsonRequest('/api/v1/payments/webhook', 'POST', {
+    eventId: 'evt-payment-1',
+    bookingId: created.booking.bookingId,
+    status: 'paid',
+    providerReference: 'provider-ref-1',
+  });
+  assert.equal(webhook.status, 401);
+});
