@@ -15,3 +15,35 @@ test('booking rejects missing address and vehicle details', async () => { assert
 test('invalid mobile date returns validation error instead of crashing', async () => { const r = await post('/api/v1/bookings', { vehicleId: 'creta-01', durationDays: 1, startDate: '2030-02-31', delivery: true, address: '12 Example Road, Jaipur' }); assert.equal(r.status, 400); });
 test('mobile-shaped booking request is accepted and exposes aliases', async () => { const r = await post('/api/v1/bookings', { vehicleId: 'creta-01', durationDays: 2, startDate: '2030-05-01', delivery: true, address: '12 Example Road, Jaipur' }); const p = await r.json(); assert.equal(r.status, 201); assert.equal(p.booking.id, p.booking.bookingId); assert.equal(p.booking.vehicleName, 'Hyundai Creta'); assert.equal(p.booking.totalPrice, 2499 * 2 + 199 + Math.round(2499 * 2 * 0.05)); });
 test('overlapping active booking requests are rejected', async () => { const r = await post('/api/v1/bookings', { vehicleId: 'creta-01', durationDays: 1, startDate: '2030-05-01', delivery: false, address: '12 Example Road, Jaipur' }); assert.equal(r.status, 409); assert.equal((await r.json()).error.code, 'VEHICLE_UNAVAILABLE'); });
+
+test('get booking returns a booking with status and payment state', async () => {
+  const r = await post('/api/v1/bookings', { vehicleId: 'baleno-01', durationDays: 1, startDate: '2030-06-01', delivery: false, address: '12 Example Road, Jaipur' });
+  assert.equal(r.status, 201);
+  const created = await r.json();
+  const detail = await fetch(`${base}/api/v1/bookings/${created.booking.bookingId}`);
+  const p = await detail.json();
+  assert.equal(detail.status, 200);
+  assert.equal(p.booking.bookingId, created.booking.bookingId);
+  assert.equal(p.booking.status, 'requested');
+  assert.equal(p.booking.paymentStatus, 'unpaid');
+});
+
+test('eligible booking can be cancelled and returns cancelled status', async () => {
+  const r = await post('/api/v1/bookings', { vehicleId: 'activa-01', durationDays: 1, startDate: '2030-07-01', delivery: false, address: '12 Example Road, Jaipur' });
+  assert.equal(r.status, 201);
+  const created = await r.json();
+  const cancelled = await fetch(`${base}/api/v1/bookings/${created.booking.bookingId}/cancel`, { method: 'PATCH' });
+  const p = await cancelled.json();
+  assert.equal(cancelled.status, 200);
+  assert.equal(p.booking.status, 'cancelled');
+});
+
+test('cancelled booking cannot be cancelled again', async () => {
+  const r = await post('/api/v1/bookings', { vehicleId: 'classic-01', durationDays: 1, startDate: '2030-08-01', delivery: false, address: '12 Example Road, Jaipur' });
+  const created = await r.json();
+  await fetch(`${base}/api/v1/bookings/${created.booking.bookingId}/cancel`, { method: 'PATCH' });
+  const second = await fetch(`${base}/api/v1/bookings/${created.booking.bookingId}/cancel`, { method: 'PATCH' });
+  const p = await second.json();
+  assert.equal(second.status, 409);
+  assert.equal(p.error.code, 'CANNOT_CANCEL');
+});
