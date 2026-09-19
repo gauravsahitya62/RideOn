@@ -13,7 +13,12 @@
     "expo": "~57.0.0",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
+<<<<<<< HEAD
     "react-native": "0.86.3"
+=======
+    "react-native": "0.86.3",
+    "expo-secure-store": "~15.2.0"
+>>>>>>> 8bbead744222a69a06d4db99142004165777666d
   },
   "devDependencies": {}
 }
