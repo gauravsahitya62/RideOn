@@ -16,8 +16,6 @@ test.before(async () => {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
-
 test('concurrent requests using the same idempotency key replay the same booking', async () => {
   const a = await register('+911234567884', 'Concurrent Idempotency User');
   const payload = {
@@ -39,6 +37,10 @@ test('concurrent requests using the same idempotency key replay the same booking
 });
 
 
+
+
+
+test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
 
 
 const request = (path, options = {}) => fetch(`${base}${path}`, options);
