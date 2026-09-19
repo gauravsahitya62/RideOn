@@ -90,6 +90,8 @@ const auth = createAuth({
   accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3600),
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS || 12),
 });
+if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
+
 const payments = createPaymentService({
   provider: process.env.PAYMENT_PROVIDER || 'unconfigured',
   webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET,
