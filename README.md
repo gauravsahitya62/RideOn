@@ -90,3 +90,11 @@ No device/emulator end-to-end test is implied by this repository documentation. 
 - No real payment provider is configured. The app's payment selection is a demo/unavailable state; no online payment, charge, refund, or transaction reference should be represented as completed.
 - Prices and delivery fee are demo values; configure verified city-specific rates and taxes before launch.
 - Never put payment secrets or server credentials in the mobile bundle.
+
+
+## Verified CI status
+
+- The mobile workflow runs dependency installation and \`npx expo-doctor\`; it is not an Android/iOS build and cannot prove device UI behavior.
+- A previous mobile run on commit \`f41dc977a5477f2210b5bf5d371142c202196ff3\` completed with 20/21 Expo Doctor checks passing. The single failure was the Expo SDK 57 dependency-version mismatch; the repository dependencies have since been aligned to the versions reported by that run.
+- API workflow runs observed in GitHub Actions were successful on the commits where the API workflow was triggered. The repository still does not claim a device test or production build.
+
