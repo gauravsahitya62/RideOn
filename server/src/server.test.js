@@ -1,57 +1,4 @@
 import test from 'node:test';
-import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import crypto from 'node:crypto';
-import { createPaymentService } from './payments.js';
-
-process.env.NODE_ENV = 'test';
-
-const { app, repository } = await import('./server.js');
-
-let server;
-let base;
-
-test.before(async () => {
-  server = createServer(app);
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  base = `http://127.0.0.1:${server.address().port}`;
-});
-
-
-
-const request = (path, options = {}) => fetch(`${base}${path}`, options);
-const jsonRequest = (path, method, payload, token, extraHeaders = {}) => request(path, {
-  method,
-  headers: {
-    'content-type': 'application/json',
-    ...(token ? { authorization: `Bearer ${token}` } : {}),
-    ...extraHeaders,
-  },
-  body: JSON.stringify(payload),
-});
-
-async function register(phone = '+911234567890', fullName = 'Test User') {
-  const response = await jsonRequest('/api/v1/auth/register', 'POST', {
-    fullName,
-    phone,
-    email: `${phone.replace(/\D/g, '')}@example.com`,
-    password: 'StrongPass123!',
-  });
-  assert.equal(response.status, 201);
-  return response.json();
-}
-
-
-
-
-test('health endpoint reports storage state', async () => {
-  const response = await request('/health');
-  const payload = await response.json();
-  assert.equal(response.status, 200);
-  assert.equal(payload.status, 'ok');
-  assert.equal(payload.storage.persistent, Boolean(process.env.DATABASE_URL));
-});
-
 test('concurrent requests using the same idempotency key replay the same booking', async () => {
   const a = await register('+911234567884', 'Concurrent Idempotency User');
   const payload = {
@@ -416,5 +363,59 @@ test('configured webhook rejects wrong signature and accepts a correctly signed 
   assert.equal(service.verifyWebhook(body, 'bad'), false);
   assert.equal(service.verifyWebhook(body, signature), true);
 });
+
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import crypto from 'node:crypto';
+import { createPaymentService } from './payments.js';
+
+process.env.NODE_ENV = 'test';
+
+const { app, repository } = await import('./server.js');
+
+let server;
+let base;
+
+test.before(async () => {
+  server = createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  base = `http://127.0.0.1:${server.address().port}`;
+});
+
+
+
+const request = (path, options = {}) => fetch(`${base}${path}`, options);
+const jsonRequest = (path, method, payload, token, extraHeaders = {}) => request(path, {
+  method,
+  headers: {
+    'content-type': 'application/json',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...extraHeaders,
+  },
+  body: JSON.stringify(payload),
+});
+
+async function register(phone = '+911234567890', fullName = 'Test User') {
+  const response = await jsonRequest('/api/v1/auth/register', 'POST', {
+    fullName,
+    phone,
+    email: `${phone.replace(/\D/g, '')}@example.com`,
+    password: 'StrongPass123!',
+  });
+  assert.equal(response.status, 201);
+  return response.json();
+}
+
+
+
+
+test('health endpoint reports storage state', async () => {
+  const response = await request('/health');
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.status, 'ok');
+  assert.equal(payload.storage.persistent, Boolean(process.env.DATABASE_URL));
+});
+
 
 test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
