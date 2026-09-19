@@ -51,6 +51,10 @@ export function createRepository({ databaseUrl, fleet }) {
     catch { return { mode:'postgres', persistent:false, reachable:false }; }
   }
 
+  async function close() {
+    if (pool) await pool.end();
+  }
+
   async function createCustomer({fullName,phone,email,passwordHash}) {
     if (useDatabase) {
       try {
@@ -79,6 +83,7 @@ export function createRepository({ databaseUrl, fleet }) {
       try {
         await client.query('begin');
         if(input.idempotencyKey){
+          await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',[`${input.customerId}:${input.idempotencyKey}`]);
           const idem=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2 for share',[input.customerId,input.idempotencyKey]);
           if(idem.rows[0]){await client.query('commit');const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=mapBooking({...idem.rows[0],vehicle:fleet.find(v=>v.id===idem.rows[0].vehicle_id)});throw x;}
         }
@@ -154,5 +159,5 @@ export function createRepository({ databaseUrl, fleet }) {
       client.release();
     }
   }
-  return {health,createCustomer,findCustomerByPhone,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent};
+  return {health,close,createCustomer,findCustomerByPhone,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent};
 }
