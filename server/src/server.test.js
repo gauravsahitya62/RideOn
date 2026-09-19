@@ -297,7 +297,8 @@ test('booking round trip preserves API rupees after persistence', async () => {
     platformFee: 250,
     total: 5447,
     currency: 'INR',
-  , currencyUnit: 'rupees'});
+    currencyUnit: 'rupees',
+  });
   const detail = await request('/api/v1/bookings/' + created.booking.bookingId, {
     headers: { authorization: 'Bearer ' + a.accessToken },
   });
