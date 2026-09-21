@@ -179,7 +179,19 @@ export function createRepository({ databaseUrl, fleet }) {
     const id=crypto.randomUUID();const booking={id,customerId:input.customerId,vehicleId:input.vehicle.id,vehicle:input.vehicle,startAt:input.startAt,endAt:input.endAt,delivery:input.delivery,address:input.address,notes:input.notes,pricing:input.pricing,status:'requested',paymentStatus:'unpaid',createdAt:new Date().toISOString()};memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
   }
 
-  async function getBooking(id){if(!useDatabase)return memory.bookings.get(id)||null;const {rows}=await pool.query('select * from bookings where id=$1',[id]);return rows[0]?mapBooking({...rows[0],vehicle:fleet.find(v=>v.id===rows[0].vehicle_id)}):null;}
+  async function getBooking(id, customerId = null){
+    if(!useDatabase){
+      const booking=memory.bookings.get(id);
+      return booking && (!customerId || booking.customerId===customerId) ? booking : null;
+    }
+    const {rows}=await pool.query(
+      'select b.*, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join vehicles v on v.id=b.vehicle_id where b.id=$1 and ($2::uuid is null or b.customer_id=$2)',
+      [id, customerId]
+    );
+    if(!rows[0]) return null;
+    const r=rows[0];
+    return mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
+  }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select * from bookings where customer_id=$1 order by created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,vehicle:fleet.find(v=>v.id===r.vehicle_id)}));}
   async function cancelBooking(id,customerId){if(!useDatabase){const b=memory.bookings.get(id);if(!b||b.customerId!==customerId||!['requested','confirmed'].includes(b.status))return null;b.status='cancelled';b.updatedAt=new Date().toISOString();return b;}const {rows}=await pool.query('update bookings set status=\'cancelled\',updated_at=now() where id=$1 and customer_id=$2 and status in (\'requested\',\'confirmed\') returning *',[id,customerId]);if(!rows[0])return null;await pool.query('insert into booking_status_events (booking_id,previous_status,next_status,actor_type,actor_id) values ($1,\'requested\',\'cancelled\',\'customer\',$2)',[id,customerId]);return mapBooking({...rows[0],vehicle:fleet.find(v=>v.id===rows[0].vehicle_id)});}
   async function applyPaymentEvent(event){
@@ -233,5 +245,5 @@ export function createRepository({ databaseUrl, fleet }) {
       client.release();
     }
   }
-  return {health,close,createCustomer,findCustomerByPhone,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent};
+  return {health,close,listVehicles,getVehicle,createCustomer,findCustomerByPhone,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent};
 }
