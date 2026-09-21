@@ -245,5 +245,50 @@ export function createRepository({ databaseUrl, fleet }) {
       client.release();
     }
   }
-  return {health,close,listVehicles,getVehicle,createCustomer,findCustomerByPhone,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent};
+
+  async function findCustomerByEmail(email) {
+    if (useDatabase) {
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where lower(email)=lower($1)', [email]);
+      return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
+    }
+    const c = [...memory.customers.values()].find(v => String(v.email || '').toLowerCase() === String(email).toLowerCase());
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash } : null;
+  }
+
+  async function findCustomerById(id) {
+    if (useDatabase) {
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where id=$1', [id]);
+      return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
+    }
+    const c = memory.customers.get(id);
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash } : null;
+  }
+
+  async function createOtp({ customerId = null, channel, destination, codeHash, expiresAt }) {
+    if (!useDatabase) return { id:crypto.randomUUID(), customerId, channel, destination, codeHash, expiresAt, attempts:0, consumedAt:null };
+    await pool.query("update auth_otps set consumed_at=coalesce(consumed_at, now()) where destination=$1 and channel=$2 and consumed_at is null", [destination, channel]);
+    const { rows } = await pool.query('insert into auth_otps(customer_id,channel,destination,code_hash,expires_at) values($1,$2,$3,$4,$5) returning id,expires_at', [customerId, channel, destination, codeHash, expiresAt]);
+    return rows[0];
+  }
+
+  async function consumeLatestOtp({ channel, destination }) {
+    if (!useDatabase) return null;
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const { rows } = await client.query("select * from auth_otps where channel=$1 and destination=$2 and consumed_at is null order by created_at desc limit 1 for update", [channel, destination]);
+      if (!rows[0]) { await client.query('commit'); return null; }
+      const row=rows[0];
+      if (new Date(row.expires_at) <= new Date() || Number(row.attempts)>=5) { await client.query('update auth_otps set consumed_at=coalesce(consumed_at,now()) where id=$1',[row.id]); await client.query('commit'); return null; }
+      await client.query('update auth_otps set consumed_at=now() where id=$1',[row.id]);
+      await client.query('commit');
+      return row;
+    } catch(e){ await client.query('rollback'); throw e; } finally { client.release(); }
+  }
+
+  async function incrementOtpAttempt(id) {
+    if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
+  }
+
+  return {health,close,listVehicles,getVehicle,createCustomer,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt};
 }
