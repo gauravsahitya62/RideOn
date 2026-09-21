@@ -1,0 +1,45 @@
+name: Publish Expo OTA Update
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'server/**'
+      - '.github/workflows/**'
+      - 'README.md'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish production OTA update
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install EAS CLI
+        run: npm install --global eas-cli
+
+      - name: Publish update
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "Missing GitHub Actions secret EXPO_TOKEN" >&2
+            exit 1
+          fi
+          if [ -z "$EAS_PROJECT_ID" ]; then
+            echo "Missing GitHub Actions variable EAS_PROJECT_ID" >&2
+            exit 1
+          fi
+          eas update --branch production --message "GitHub ${GITHUB_SHA}" --non-interactive
