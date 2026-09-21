@@ -260,6 +260,56 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
   res.json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
 
+app.get('/api/v1/vendor/me', supabaseRequireAuth, async (req,res)=>{
+  const vendor=await repository.findVendorByOwnerCustomerId(req.user.id);
+  if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor profile not found.'}});
+  res.json({vendor});
+});
+app.get('/api/v1/vendor/vehicles', supabaseRequireAuth, async (req,res)=>{
+  const vendor=await repository.findVendorByOwnerCustomerId(req.user.id);
+  if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND'}});
+  const data=await repository.listVendorVehicles({vendorId:vendor.id});
+  res.json({data,vehicles:data});
+});
+app.post('/api/v1/vendor/vehicles', supabaseRequireAuth, async (req,res)=>{
+  const vendor=await repository.findVendorByOwnerCustomerId(req.user.id);
+  if(!vendor || vendor.status!=='approved') return res.status(403).json({error:{code:'VENDOR_NOT_APPROVED',message:'An approved vendor account is required.'}});
+  const parsed=z.object({
+    name:z.string().trim().min(2).max(160),
+    type:z.enum(['car','bike']),
+    city:z.string().trim().min(2).max(100),
+    pricePerDay:z.coerce.number().positive().max(1000000),
+    registrationNumber:z.string().trim().min(3).max(30),
+    transmission:z.string().trim().max(30).optional(),
+    fuel:z.string().trim().max(30).optional(),
+    seats:z.coerce.number().int().positive().max(20).optional(),
+    description:z.string().trim().max(1000).optional()
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid vehicle details.'}});
+  const vehicle=await repository.createVendorVehicle({vendorId:vendor.id,input:parsed.data});
+  res.status(201).json({data:vehicle,vehicle});
+});
+app.get('/api/v1/vendor/bookings', supabaseRequireAuth, async (req,res)=>{
+  const vendor=await repository.findVendorByOwnerCustomerId(req.user.id);
+  if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND'}});
+  const data=await repository.listVendorBookings({vendorId:vendor.id});
+  res.json({data,bookings:data});
+});
+app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, async (req,res)=>{
+  const vendor=await repository.findVendorByOwnerCustomerId(req.user.id);
+  if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND'}});
+  const parsed=z.object({status:z.string().min(1)}).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR'}});
+  try{
+    const booking=await repository.updateVendorBookingStatus({vendorId:vendor.id,bookingId:req.params.id,status:parsed.data.status});
+    if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND'}});
+    res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+  }catch(error){
+    if(error.code==='INVALID_STATUS') return res.status(400).json({error:{code:error.code,message:error.message}});
+    throw error;
+  }
+});
+
 app.post('/api/v1/bookings/quote', supabaseRequireAuth, async (req, res) => {
   const normalized = normalizeBookingInput(req.body);
   const schema = z.object({ vehicleId: z.string(), startAt: z.string().datetime(), endAt: z.string().datetime(), delivery: z.boolean().default(true) })
