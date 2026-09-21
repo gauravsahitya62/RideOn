@@ -8,12 +8,7 @@ import { createRepository } from './repository.js';
 import { createAuth } from './auth.js';
 import { createPaymentService } from './payments.js';
 
-const fleet = [
-  { id: 'creta-01', type: 'car', name: 'Hyundai Creta', subtitle: 'Automatic · 5 seats · Petrol', pricePerDay: 2499, city: 'Jaipur', seats: 5, transmission: 'Automatic', fuel: 'Petrol', active: true },
-  { id: 'baleno-01', type: 'car', name: 'Maruti Baleno', subtitle: 'Manual · 5 seats · Petrol', pricePerDay: 1499, city: 'Jaipur', seats: 5, transmission: 'Manual', fuel: 'Petrol', active: true },
-  { id: 'classic-01', type: 'bike', name: 'Royal Enfield Classic 350', subtitle: '349 cc · 2 helmets included', pricePerDay: 999, city: 'Jaipur', active: true },
-  { id: 'activa-01', type: 'bike', name: 'Honda Activa 6G', subtitle: 'Automatic · 2 seats · Petrol', pricePerDay: 499, city: 'Jaipur', active: true },
-];
+const fleet = [];
 
 const app = express();
 app.set('trust proxy', 1);
@@ -113,18 +108,17 @@ app.get('/health', async (_req, res) => {
   });
 });
 
-app.get('/api/v1/vehicles', (req, res) => {
+app.get('/api/v1/vehicles', async (req, res) => {
   const type = req.query.type?.toString().toLowerCase();
-  const city = req.query.city?.toString().toLowerCase();
-  const q = req.query.q?.toString().toLowerCase();
-  const data = fleet
-    .filter((v) => v.active && (!type || type === 'all' || v.type === type) && (!city || v.city.toLowerCase() === city) && (!q || `${v.name} ${v.subtitle}`.toLowerCase().includes(q)))
-    .map(mobileVehicle);
+  const city = req.query.city?.toString();
+  const q = req.query.q?.toString();
+  const vehicles = await repository.listVehicles({ type, city, q });
+  const data = vehicles.map(mobileVehicle);
   res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
 });
 
-app.get('/api/v1/vehicles/:id', (req, res) => {
-  const vehicle = fleet.find((v) => v.id === req.params.id && v.active);
+app.get('/api/v1/vehicles/:id', async (req, res) => {
+  const vehicle = await repository.getVehicle(req.params.id);
   if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND', message: 'Vehicle not found' } });
   const data = mobileVehicle(vehicle);
   res.json({ data, vehicle: data });
@@ -159,7 +153,7 @@ app.post('/api/v1/bookings/quote', requireAuth, async (req, res) => {
     .refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt' });
   const parsed = schema.safeParse(normalized);
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', details: parsed.error.flatten() } });
-  const vehicle = fleet.find((v) => v.id === parsed.data.vehicleId && v.active);
+  const vehicle = await repository.getVehicle(parsed.data.vehicleId);
   if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND' } });
   const unavailable = await repository.isVehicleUnavailable(vehicle.id, parsed.data.startAt, parsed.data.endAt);
   if (unavailable) return res.status(409).json({ error: { code: 'VEHICLE_UNAVAILABLE', message: 'This vehicle already has a booking request for part of those dates.' } });
@@ -170,7 +164,7 @@ app.post('/api/v1/bookings/quote', requireAuth, async (req, res) => {
 app.post('/api/v1/bookings', requireAuth, async (req, res) => {
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
-  const vehicle = fleet.find((v) => v.id === parsed.data.vehicleId && v.active);
+  const vehicle = await repository.getVehicle(parsed.data.vehicleId);
   if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND' } });
   const pricingData = pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery);
 
@@ -205,9 +199,8 @@ app.get('/api/v1/bookings', requireAuth, async (req, res) => {
 });
 
 app.get('/api/v1/bookings/:id', requireAuth, async (req, res) => {
-  const booking = await repository.getBooking(req.params.id);
+  const booking = await repository.getBooking(req.params.id, req.user.id);
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
-  if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   res.json({ data: publicBooking(booking), booking: publicBooking(booking) });
 });
 
