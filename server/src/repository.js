@@ -14,7 +14,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }) : null;
   const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map() };
 
-  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined });
+  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
     if (!row) return null;
     const vehicle = row.vehicle || fleet.find((v) => v.id === row.vehicle_id);
@@ -125,6 +125,28 @@ export function createRepository({ databaseUrl, fleet }) {
       fuel: row.fuel || null,
       active: Boolean(row.active),
     };
+  }
+
+  async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName}) {
+    if (useDatabase) {
+      const existingByEmail = await findCustomerByEmail(email);
+      if (existingByEmail) {
+        await pool.query('update customers set supabase_user_id=$2, email=coalesce(email,$3), full_name=coalesce(full_name,$4), updated_at=now() where id=$1',[existingByEmail.id,supabaseUserId,email,fullName]);
+        return { ...existingByEmail, supabaseUserId };
+      }
+      const phone = 'supabase-' + supabaseUserId;
+      const { rows } = await pool.query('insert into customers(full_name,phone,email,password_hash,supabase_user_id) values($1,$2,$3,$4,$5) returning id,full_name,phone,email,supabase_user_id',[fullName,phone,email,'supabase-auth-managed',supabaseUserId]);
+      return mapCustomer(rows[0]);
+    }
+    const existing=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(supabaseUserId)||String(v.email||'').toLowerCase()===String(email).toLowerCase());
+    if(existing){existing.supabaseUserId=supabaseUserId;existing.email=email;existing.fullName=existing.fullName||fullName;return {id:existing.id,fullName:existing.fullName,phone:existing.phone,email:existing.email,supabaseUserId};}
+    const id=crypto.randomUUID(); const phone='supabase-'+supabaseUserId; memory.customers.set(id,{id,fullName,phone,email,passwordHash:'supabase-auth-managed',supabaseUserId}); return {id,fullName,phone,email,supabaseUserId};
+  }
+
+  async function findCustomerBySupabaseUserId(id) {
+    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,supabaseUserId:c.supabaseUserId}:null; }
+    const { rows } = await pool.query('select id,full_name,phone,email,supabase_user_id from customers where supabase_user_id=$1',[id]);
+    return rows[0]?mapCustomer(rows[0]):null;
   }
 
   async function createCustomer({fullName,phone,email,passwordHash}) {
@@ -290,5 +312,5 @@ export function createRepository({ databaseUrl, fleet }) {
     if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
   }
 
-  return {health,close,listVehicles,getVehicle,createCustomer,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt};
+  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt};
 }
