@@ -94,5 +94,10 @@ export const rideOnApi = {
   register: (payload) => request('/api/v1/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
   login: (payload) => request('/api/v1/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
   me: () => request('/api/v1/me'),
+  vendorMe: () => request('/api/v1/vendor/me'),
+  listVendorVehicles: () => request('/api/v1/vendor/vehicles'),
+  createVendorVehicle: (payload) => request('/api/v1/vendor/vehicles', { method:'POST', body:JSON.stringify(payload) }),
+  listVendorBookings: () => request('/api/v1/vendor/bookings'),
+  updateVendorBookingStatus: (id,status) => request(`/api/v1/vendor/bookings/${encode(id)}/status`, { method:'PATCH', body:JSON.stringify({status}) }),
   listBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/bookings${query ? `?${query}` : ''}`); },
 };
