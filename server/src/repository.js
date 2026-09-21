@@ -159,7 +159,7 @@ export function createRepository({ databaseUrl, fleet }) {
         if(input.idempotencyKey){
           await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',[`${input.customerId}:${input.idempotencyKey}`]);
           const idem=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2 for share',[input.customerId,input.idempotencyKey]);
-          if(idem.rows[0]){await client.query('commit');const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=mapBooking({...idem.rows[0],vehicle:fleet.find(v=>v.id===idem.rows[0].vehicle_id)});throw x;}
+          if(idem.rows[0]){await client.query('commit');const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=mapBooking({...idem.rows[0],vehicle:input.vehicle});throw x;}
         }
         const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,start_at,end_at,delivery_required,delivery_address,delivery_fee_paise,rental_total_paise,platform_fee_paise,total_paise,status,payment_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,\'requested\',\'unpaid\',$11) returning *',[input.customerId,input.vehicle.id,input.startAt,input.endAt,input.delivery,input.address,Math.round(input.pricing.deliveryFee * 100),Math.round(input.pricing.rental * 100),Math.round(input.pricing.platformFee * 100),Math.round(input.pricing.total * 100),input.notes||null]);
         if(input.idempotencyKey) await client.query('insert into booking_idempotency_keys (customer_id,idempotency_key,booking_id) values ($1,$2,$3)',[input.customerId,input.idempotencyKey,rows[0].id]);
@@ -169,7 +169,7 @@ export function createRepository({ databaseUrl, fleet }) {
       } catch(e) {
         try{await client.query('rollback');}catch{}
         if(e.code==='23P01'){const x=new Error('vehicle unavailable');x.code='VEHICLE_UNAVAILABLE';throw x;}
-        if(e.code==='23505'&&input.idempotencyKey){const {rows}=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2',[input.customerId,input.idempotencyKey]);if(rows[0]){const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=mapBooking({...rows[0],vehicle:fleet.find(v=>v.id===rows[0].vehicle_id)});throw x;}}
+        if(e.code==='23505'&&input.idempotencyKey){const {rows}=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2',[input.customerId,input.idempotencyKey]);if(rows[0]){const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=mapBooking({...rows[0],vehicle:input.vehicle});throw x;}}
         throw e;
       } finally { client.release(); }
     }
@@ -192,8 +192,8 @@ export function createRepository({ databaseUrl, fleet }) {
     const r=rows[0];
     return mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
-  async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select * from bookings where customer_id=$1 order by created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,vehicle:fleet.find(v=>v.id===r.vehicle_id)}));}
-  async function cancelBooking(id,customerId){if(!useDatabase){const b=memory.bookings.get(id);if(!b||b.customerId!==customerId||!['requested','confirmed'].includes(b.status))return null;b.status='cancelled';b.updatedAt=new Date().toISOString();return b;}const {rows}=await pool.query('update bookings set status=\'cancelled\',updated_at=now() where id=$1 and customer_id=$2 and status in (\'requested\',\'confirmed\') returning *',[id,customerId]);if(!rows[0])return null;await pool.query('insert into booking_status_events (booking_id,previous_status,next_status,actor_type,actor_id) values ($1,\'requested\',\'cancelled\',\'customer\',$2)',[id,customerId]);return mapBooking({...rows[0],vehicle:fleet.find(v=>v.id===rows[0].vehicle_id)});}
+  async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
+  async function cancelBooking(id,customerId){if(!useDatabase){const b=memory.bookings.get(id);if(!b||b.customerId!==customerId||!['requested','confirmed'].includes(b.status))return null;b.status='cancelled';b.updatedAt=new Date().toISOString();return b;}const {rows}=await pool.query('update bookings set status=\'cancelled\',updated_at=now() where id=$1 and customer_id=$2 and status in (\'requested\',\'confirmed\') returning *',[id,customerId]);if(!rows[0])return null;await pool.query('insert into booking_status_events (booking_id,previous_status,next_status,actor_type,actor_id) values ($1,\'requested\',\'cancelled\',\'customer\',$2)',[id,customerId]);return mapBooking({...rows[0],vehicle:undefined});}
   async function applyPaymentEvent(event){
     const canTransition = (current, next) => {
       if (current === next) return true;
