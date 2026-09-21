@@ -55,6 +55,78 @@ export function createRepository({ databaseUrl, fleet }) {
     if (pool) await pool.end();
   }
 
+  async function listVehicles({ type, city, q } = {}) {
+    if (!useDatabase) {
+      const typeValue = type?.toLowerCase();
+      const cityValue = city?.toLowerCase();
+      const qValue = q?.toLowerCase();
+      return fleet.filter((v) =>
+        v.active &&
+        (!typeValue || typeValue === 'all' || String(v.type).toLowerCase() === typeValue) &&
+        (!cityValue || String(v.city).toLowerCase() === cityValue) &&
+        (!qValue || `${v.name} ${v.subtitle || ''}`.toLowerCase().includes(qValue))
+      );
+    }
+
+    const params = [];
+    const where = ['active = true'];
+    if (type && type.toLowerCase() !== 'all') {
+      params.push(type.toLowerCase());
+      where.push(`type = ${params.length}`);
+    }
+    if (city) {
+      params.push(city);
+      where.push(`lower(city) = lower(${params.length})`);
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      where.push(`(name ilike ${params.length} or coalesce(make, '') ilike ${params.length} or coalesce(model, '') ilike ${params.length})`);
+    }
+
+    const { rows } = await pool.query(
+      `select id, type, name, city, daily_rate_paise, active, transmission, fuel, seats
+       from vehicles
+       where ${where.join(' and ')}
+       order by name asc`,
+      params
+    );
+
+    return rows.map((row) => ({
+      id: String(row.id),
+      type: String(row.type),
+      name: row.name,
+      subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
+      pricePerDay: Number(row.daily_rate_paise || 0) / 100,
+      city: row.city,
+      seats: row.seats == null ? null : Number(row.seats),
+      transmission: row.transmission || null,
+      fuel: row.fuel || null,
+      active: Boolean(row.active),
+    }));
+  }
+
+  async function getVehicle(id) {
+    if (!useDatabase) return fleet.find((v) => v.id === id && v.active) || null;
+    const { rows } = await pool.query(
+      'select id, type, name, city, daily_rate_paise, active, transmission, fuel, seats from vehicles where id = $1 and active = true',
+      [id]
+    );
+    if (!rows[0]) return null;
+    const row = rows[0];
+    return {
+      id: String(row.id),
+      type: String(row.type),
+      name: row.name,
+      subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
+      pricePerDay: Number(row.daily_rate_paise || 0) / 100,
+      city: row.city,
+      seats: row.seats == null ? null : Number(row.seats),
+      transmission: row.transmission || null,
+      fuel: row.fuel || null,
+      active: Boolean(row.active),
+    };
+  }
+
   async function createCustomer({fullName,phone,email,passwordHash}) {
     if (useDatabase) {
       try {
