@@ -147,7 +147,40 @@ const payments = createPaymentService({
   webhookSecret: process.env.PAYMENT_WEBHOOK_SECRET,
 });
 
-const requireAuth = auth.middleware();
+
+async function verifySupabaseAccessToken(token) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+  if (!supabaseUrl || !publishableKey) throw new Error('Supabase Auth is not configured');
+  const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+    headers: { Authorization: `Bearer ${token}`, apikey: publishableKey },
+  });
+  if (!response.ok) return null;
+  return response.json();
+}
+
+const supabaseRequireAuth = async (req, res, next) => {
+  const header = req.get('Authorization') || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!token) return res.status(401).json({ error:{ code:'AUTH_REQUIRED', message:'Authentication required.' } });
+  try {
+    const user = await verifySupabaseAccessToken(token);
+    if (!user?.id || !user?.email) return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+    const metadata = user.user_metadata || {};
+    const customer = await repository.findCustomerBySupabaseUserId(user.id);
+    const ensured = customer || await repository.createOrLinkCustomerFromSupabase({
+      supabaseUserId: user.id,
+      email: user.email,
+      fullName: metadata.full_name || metadata.name || user.email.split('@')[0],
+    });
+    req.user = { id: ensured.id, role:'customer', supabaseUserId:user.id, email:user.email };
+    next();
+  } catch {
+    return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+  }
+};
+
+const requireAuth = supabaseRequireAuth;
 
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
@@ -170,6 +203,8 @@ app.get('/api/v1/vehicles', async (req, res) => {
   res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
 });
 
+app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => { const customer = await repository.findCustomerById(req.user.id); if (!customer) return res.status(404).json({ error:{ code:'CUSTOMER_NOT_FOUND' } }); res.json({ customer }); });
+
 app.get('/api/v1/vehicles/:id', async (req, res) => {
   const vehicle = await repository.getVehicle(req.params.id);
   if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND', message: 'Vehicle not found' } });
@@ -179,69 +214,27 @@ app.get('/api/v1/vehicles/:id', async (req, res) => {
 
 
 app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
-  const parsed = z.object({
-    channel: z.enum(['phone','email']),
-    value: z.string().trim().min(3).max(254),
-    fullName: z.string().trim().min(2).max(100).optional(),
-  }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Provide a valid email or phone number.' } });
-  const destination=normalizeOtpDestination(parsed.data);
-  if (!destination) return res.status(400).json({ error:{ code:'INVALID_DESTINATION', message:'Provide a valid email or phone number.' } });
-  const existing=parsed.data.channel==='email'
-    ? await repository.findCustomerByEmail(destination)
-    : await repository.findCustomerByPhone(destination);
-  const code=generateOtpCode();
-  const codeHash=await hashOtpCode(code);
-  await repository.createOtp({
-    customerId:existing?.id||null,
-    channel:parsed.data.channel,
-    destination,
-    codeHash,
-    expiresAt:new Date(Date.now()+10*60*1000).toISOString()
-  });
+  const parsed = z.object({ email:z.string().trim().email().max(254), fullName:z.string().trim().min(2).max(100).optional() }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Provide a valid email address.' } });
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+  if (!supabaseUrl || !publishableKey) return res.status(503).json({ error:{ code:'AUTH_NOT_CONFIGURED', message:'Supabase authentication is not configured.' } });
+  const email = parsed.data.email.toLowerCase();
   try {
-    const delivery=await deliverOtp({channel:parsed.data.channel,destination,code});
-    res.json({
-      data:{challenge:true,channel:parsed.data.channel,destination,existingCustomer:Boolean(existing),expiresInSeconds:600},
-      developmentCode:delivery.developmentCode
+    const response = await fetch(`${supabaseUrl}/auth/v1/otp`, {
+      method:'POST',
+      headers:{ apikey:publishableKey, Authorization:`Bearer ${publishableKey}`, 'Content-Type':'application/json' },
+      body:JSON.stringify({ email, create_user:true, data: parsed.data.fullName ? { full_name: parsed.data.fullName } : undefined })
     });
-  } catch(error) {
-    return res.status(503).json({ error:{ code:'OTP_DELIVERY_UNAVAILABLE', message:error.message } });
+    if (!response.ok) return res.status(response.status===429?429:502).json({ error:{ code:'OTP_REQUEST_FAILED', message:'Unable to send the RideOn verification email right now.' } });
+    return res.json({ data:{ challenge:true, channel:'email', destination:email, expiresInSeconds:600 } });
+  } catch {
+    return res.status(502).json({ error:{ code:'OTP_REQUEST_FAILED', message:'Unable to send the RideOn verification email right now.' } });
   }
 });
 
 app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
-  const parsed = z.object({
-    channel: z.enum(['phone','email']),
-    value:z.string().trim().min(3).max(254),
-    code:z.string().regex(/^\d{6}$/),
-    fullName:z.string().trim().min(2).max(100).optional(),
-  }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Enter the 6-digit verification code.' } });
-  const destination=normalizeOtpDestination(parsed.data);
-  if(!destination) return res.status(400).json({error:{code:'INVALID_DESTINATION'}});
-  const row=await repository.consumeLatestOtp({channel:parsed.data.channel,destination});
-  if(!row) return res.status(401).json({error:{code:'OTP_INVALID_OR_EXPIRED',message:'The verification code is invalid or expired.'}});
-  const valid=await auth.verifyPassword(parsed.data.code,row.code_hash);
-  if(!valid) return res.status(401).json({error:{code:'OTP_INVALID',message:'The verification code is incorrect.'}});
-  let customer=parsed.data.channel==='email' ? await repository.findCustomerByEmail(destination) : await repository.findCustomerByPhone(destination);
-  if(!customer) {
-    const fullName=parsed.data.fullName?.trim();
-    if(!fullName) return res.status(400).json({error:{code:'NAME_REQUIRED',message:'Full name is required for a new account.'}});
-    const generatedPhone=parsed.data.channel==='phone'?destination:'otp-' + crypto.randomUUID();
-    customer=await repository.createCustomer({
-      fullName,
-      phone:generatedPhone,
-      email:parsed.data.channel==='email'?destination:undefined,
-      passwordHash:await auth.hashPassword(crypto.randomUUID())
-    });
-  }
-  const accessToken=auth.sign({sub:customer.id,role:'customer'});
-  res.json({
-    customer:{id:customer.id,fullName:customer.fullName,phone:customer.phone,email:customer.email},
-    accessToken,
-    expiresIn:auth.accessTokenTtlSeconds
-  });
+  return res.status(410).json({ error:{ code:'OTP_FLOW_RETIRED', message:'RideOn now verifies email OTPs with Supabase Auth. Update the app to use the Supabase session.' } });
 });
 
 app.post('/api/v1/auth/register', authRateLimit, async (req, res) => {
@@ -267,7 +260,7 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
   res.json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
 
-app.post('/api/v1/bookings/quote', requireAuth, async (req, res) => {
+app.post('/api/v1/bookings/quote', supabaseRequireAuth, async (req, res) => {
   const normalized = normalizeBookingInput(req.body);
   const schema = z.object({ vehicleId: z.string(), startAt: z.string().datetime(), endAt: z.string().datetime(), delivery: z.boolean().default(true) })
     .refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt' });
@@ -281,7 +274,7 @@ app.post('/api/v1/bookings/quote', requireAuth, async (req, res) => {
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
 });
 
-app.post('/api/v1/bookings', requireAuth, async (req, res) => {
+app.post('/api/v1/bookings', supabaseRequireAuth, async (req, res) => {
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
   const vehicle = await repository.getVehicle(parsed.data.vehicleId);
@@ -311,20 +304,20 @@ app.post('/api/v1/bookings', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/v1/bookings', requireAuth, async (req, res) => {
+app.get('/api/v1/bookings', supabaseRequireAuth, async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const data = await repository.listCustomerBookings({ customerId: req.user.id, limit, offset });
   res.json({ data: data.map(publicBooking), bookings: data.map(publicBooking), pagination: { limit, offset, count: data.length } });
 });
 
-app.get('/api/v1/bookings/:id', requireAuth, async (req, res) => {
+app.get('/api/v1/bookings/:id', supabaseRequireAuth, async (req, res) => {
   const booking = await repository.getBooking(req.params.id, req.user.id);
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   res.json({ data: publicBooking(booking), booking: publicBooking(booking) });
 });
 
-app.patch('/api/v1/bookings/:id/cancel', requireAuth, async (req, res) => {
+app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, async (req, res) => {
   const booking = await repository.getBooking(req.params.id);
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
