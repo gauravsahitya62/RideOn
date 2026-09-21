@@ -84,6 +84,59 @@ const paymentProvider = process.env.PAYMENT_PROVIDER || 'unconfigured';
 if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (process.env.NODE_ENV === 'production' && (!process.env.CLIENT_ORIGIN || process.env.CLIENT_ORIGIN === '*')) throw new Error('CLIENT_ORIGIN must be explicitly configured in production');
 if (process.env.NODE_ENV === 'production' && paymentProvider !== 'unconfigured') throw new Error('No production payment provider adapter is configured');
+
+function normalizeOtpDestination({ channel, value }) {
+  const raw = String(value || '').trim();
+  if (channel === 'email') return raw.toLowerCase();
+  const compact = raw.replace(/\s+/g, '');
+  if (!/^\+?[0-9]{10,15}$/.test(compact)) return null;
+  return compact;
+}
+
+function generateOtpCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+function hashOtpCode(code) {
+  return auth.hashPassword(code);
+}
+
+async function deliverOtp({ channel, destination, code }) {
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[rideon-otp] ' + channel + ' ' + destination + ': ' + code);
+    return { delivered: true, developmentCode: code };
+  }
+  if (channel === 'email' && process.env.RESEND_API_KEY && process.env.OTP_FROM_EMAIL) {
+    const response = await fetch('https://api.resend.com/emails', {
+      method:'POST',
+      headers:{Authorization:'Bearer ' + process.env.RESEND_API_KEY,'Content-Type':'application/json'},
+      body:JSON.stringify({
+        from:process.env.OTP_FROM_EMAIL,
+        to:[destination],
+        subject:'Your RideOn verification code',
+        text:'Your RideOn verification code is ' + code + '. It expires in 10 minutes.'
+      })
+    });
+    if (!response.ok) throw new Error('OTP delivery failed');
+    return { delivered:true };
+  }
+  if (channel === 'phone' && process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_PHONE) {
+    const body=new URLSearchParams({
+      To:destination,
+      From:process.env.TWILIO_FROM_PHONE,
+      Body:'Your RideOn verification code is ' + code + '. It expires in 10 minutes.'
+    });
+    const basic=Buffer.from(process.env.TWILIO_ACCOUNT_SID + ':' + process.env.TWILIO_AUTH_TOKEN).toString('base64');
+    const response=await fetch(
+      'https://api.twilio.com/2010-04-01/Accounts/' + process.env.TWILIO_ACCOUNT_SID + '/Messages.json',
+      {method:'POST',headers:{Authorization:'Basic ' + basic,'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()}
+    );
+    if(!response.ok) throw new Error('OTP delivery failed');
+    return { delivered:true };
+  }
+  throw new Error('OTP delivery service is not configured for this channel.');
+}
+
 const auth = createAuth({
   jwtSecret: process.env.JWT_SECRET,
   accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3600),
@@ -122,6 +175,73 @@ app.get('/api/v1/vehicles/:id', async (req, res) => {
   if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND', message: 'Vehicle not found' } });
   const data = mobileVehicle(vehicle);
   res.json({ data, vehicle: data });
+});
+
+
+app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
+  const parsed = z.object({
+    channel: z.enum(['phone','email']),
+    value: z.string().trim().min(3).max(254),
+    fullName: z.string().trim().min(2).max(100).optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Provide a valid email or phone number.' } });
+  const destination=normalizeOtpDestination(parsed.data);
+  if (!destination) return res.status(400).json({ error:{ code:'INVALID_DESTINATION', message:'Provide a valid email or phone number.' } });
+  const existing=parsed.data.channel==='email'
+    ? await repository.findCustomerByEmail(destination)
+    : await repository.findCustomerByPhone(destination);
+  const code=generateOtpCode();
+  const codeHash=await hashOtpCode(code);
+  await repository.createOtp({
+    customerId:existing?.id||null,
+    channel:parsed.data.channel,
+    destination,
+    codeHash,
+    expiresAt:new Date(Date.now()+10*60*1000).toISOString()
+  });
+  try {
+    const delivery=await deliverOtp({channel:parsed.data.channel,destination,code});
+    res.json({
+      data:{challenge:true,channel:parsed.data.channel,destination,existingCustomer:Boolean(existing),expiresInSeconds:600},
+      developmentCode:delivery.developmentCode
+    });
+  } catch(error) {
+    return res.status(503).json({ error:{ code:'OTP_DELIVERY_UNAVAILABLE', message:error.message } });
+  }
+});
+
+app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
+  const parsed = z.object({
+    channel: z.enum(['phone','email']),
+    value:z.string().trim().min(3).max(254),
+    code:z.string().regex(/^\d{6}$/),
+    fullName:z.string().trim().min(2).max(100).optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Enter the 6-digit verification code.' } });
+  const destination=normalizeOtpDestination(parsed.data);
+  if(!destination) return res.status(400).json({error:{code:'INVALID_DESTINATION'}});
+  const row=await repository.consumeLatestOtp({channel:parsed.data.channel,destination});
+  if(!row) return res.status(401).json({error:{code:'OTP_INVALID_OR_EXPIRED',message:'The verification code is invalid or expired.'}});
+  const valid=await auth.verifyPassword(parsed.data.code,row.code_hash);
+  if(!valid) return res.status(401).json({error:{code:'OTP_INVALID',message:'The verification code is incorrect.'}});
+  let customer=parsed.data.channel==='email' ? await repository.findCustomerByEmail(destination) : await repository.findCustomerByPhone(destination);
+  if(!customer) {
+    const fullName=parsed.data.fullName?.trim();
+    if(!fullName) return res.status(400).json({error:{code:'NAME_REQUIRED',message:'Full name is required for a new account.'}});
+    const generatedPhone=parsed.data.channel==='phone'?destination:'otp-' + crypto.randomUUID();
+    customer=await repository.createCustomer({
+      fullName,
+      phone:generatedPhone,
+      email:parsed.data.channel==='email'?destination:undefined,
+      passwordHash:await auth.hashPassword(crypto.randomUUID())
+    });
+  }
+  const accessToken=auth.sign({sub:customer.id,role:'customer'});
+  res.json({
+    customer:{id:customer.id,fullName:customer.fullName,phone:customer.phone,email:customer.email},
+    accessToken,
+    expiresIn:auth.accessTokenTtlSeconds
+  });
 });
 
 app.post('/api/v1/auth/register', authRateLimit, async (req, res) => {
