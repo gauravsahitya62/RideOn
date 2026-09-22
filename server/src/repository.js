@@ -533,6 +533,15 @@ export function createRepository({ databaseUrl, fleet }) {
     return mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
+  const canTransition = (current, next) => {
+    if (current === next) return true;
+    if (current === 'unpaid') return next === 'pending' || next === 'failed';
+    if (current === 'pending') return next === 'paid' || next === 'failed';
+    if (current === 'failed') return next === 'pending';
+    if (current === 'paid') return next === 'refunded';
+    return false;
+  };
+
   async function cancelBooking(id,customerId){
     if(!useDatabase){
       const b=memory.bookings.get(id);
