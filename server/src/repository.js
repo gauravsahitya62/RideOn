@@ -346,5 +346,45 @@ export function createRepository({ databaseUrl, fleet }) {
     if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
   }
 
-  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt,listVendorBookings,findVendorByOwnerCustomerId,updateVendorBookingStatus,listVendorVehicles,createVendorVehicle};
+  async function updateCustomerProfile({customerId,fullName,phone}) {
+    if(!useDatabase) return null;
+    const sets=[], values=[]; let n=1;
+    if(fullName!==undefined){sets.push(`full_name=$${n++}`);values.push(fullName);}
+    if(phone!==undefined){sets.push(`phone=$${n++}`);values.push(phone);}
+    if(!sets.length)return findCustomerById(customerId);
+    values.push(customerId);
+    try {
+      const {rows}=await pool.query(`update customers set ${sets.join(',')},updated_at=now() where id=$${n} returning id,full_name,phone,email,supabase_user_id`,values);
+      return rows[0]?mapCustomer(rows[0]):null;
+    } catch(e){ if(e.code==='23505'){const x=new Error('phone already in use');x.code='PHONE_EXISTS';throw x;} throw e; }
+  }
+  async function listCustomerAddresses({customerId}) {
+    if(!useDatabase)return [];
+    const {rows}=await pool.query('select id,label,recipient,phone,street,area,city,postal_code as "postalCode",is_default as "isDefault" from customer_addresses where customer_id=$1 order by is_default desc,created_at desc',[customerId]);
+    return rows.map(r=>({...r,id:String(r.id),isDefault:Boolean(r.isDefault)}));
+  }
+  async function createCustomerAddress(input) {
+    if(!useDatabase)return null;
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      if(input.isDefault) await client.query('update customer_addresses set is_default=false where customer_id=$1',[input.customerId]);
+      const {rows}=await client.query('insert into customer_addresses(customer_id,label,recipient,phone,street,area,city,postal_code,is_default) values($1,$2,$3,$4,$5,$6,$7,$8,$9) returning id,label,recipient,phone,street,area,city,postal_code as "postalCode",is_default as "isDefault"',[
+        input.customerId,input.label,input.recipient,input.phone,input.street,input.area,input.city,input.postalCode,Boolean(input.isDefault)
+      ]);
+      await client.query('commit'); const r=rows[0]; return r?{...r,id:String(r.id),isDefault:Boolean(r.isDefault)}:null;
+    }catch(e){await client.query('rollback');throw e;}finally{client.release();}
+  }
+  async function updateCustomerAddress({customerId,addressId,...patch}) {
+    if(!useDatabase)return null;
+    const allowed={label:'label',recipient:'recipient',phone:'phone',street:'street',area:'area',city:'city',postalCode:'postal_code',isDefault:'is_default'};
+    const sets=[],values=[];let n=1;for(const [k,v] of Object.entries(patch)){if(v===undefined)continue;sets.push(`${allowed[k]}=$${n++}`);values.push(k==='isDefault'?Boolean(v):v);}
+    if(!sets.length)return null;values.push(customerId,addressId);
+    const client=await pool.connect();try{await client.query('begin');if(patch.isDefault)await client.query('update customer_addresses set is_default=false where customer_id=$1',[customerId]);const {rows}=await client.query(`update customer_addresses set ${sets.join(',')},updated_at=now() where customer_id=$${n} and id=$${n+1} returning id,label,recipient,phone,street,area,city,postal_code as "postalCode",is_default as "isDefault"`,values);await client.query('commit');const r=rows[0];return r?{...r,id:String(r.id),isDefault:Boolean(r.isDefault)}:null;}catch(e){await client.query('rollback');throw e;}finally{client.release();}
+  }
+  async function deleteCustomerAddress({customerId,addressId}) {
+    if(!useDatabase)return false;
+    const client=await pool.connect();try{await client.query('begin');const before=await client.query('select is_default from customer_addresses where id=$1 and customer_id=$2',[addressId,customerId]);if(!before.rows[0]){await client.query('rollback');return false;}const wasDefault=before.rows[0].is_default;await client.query('delete from customer_addresses where id=$1 and customer_id=$2',[addressId,customerId]);if(wasDefault)await client.query('update customer_addresses set is_default=true where id=(select id from customer_addresses where customer_id=$1 order by created_at desc limit 1)',[customerId]);await client.query('commit');return true;}catch(e){await client.query('rollback');throw e;}finally{client.release();}
+  }
+  return {health,close,listVehicles,getVehicle,createCustomer,updateCustomerProfile,listCustomerAddresses,createCustomerAddress,updateCustomerAddress,deleteCustomerAddress,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt,listVendorBookings,findVendorByOwnerCustomerId,updateVendorBookingStatus,listVendorVehicles,createVendorVehicle};
 }
