@@ -234,7 +234,28 @@ app.get('/api/v1/vehicles', async (req, res) => {
   res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
 });
 
-app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => { const customer = await repository.findCustomerById(req.user.id); if (!customer) return res.status(404).json({ error:{ code:'CUSTOMER_NOT_FOUND' } }); res.json({ customer }); });
+app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
+  const customer = await repository.findCustomerById(req.user.id);
+  if (!customer) return res.status(404).json({ error:{ code:'USER_NOT_FOUND' } });
+  const user = {
+    id: customer.id,
+    name: customer.fullName,
+    email: customer.email || req.user.email,
+    role: customer.role,
+  };
+  res.json({ user, customer });
+});
+
+app.get('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
+  const customer = await repository.findCustomerById(req.user.id);
+  if (!customer || customer.role !== 'vendor' || !req.vendor) {
+    return res.status(403).json({ error:{ code:'VENDOR_NOT_CONFIGURED', message:'No vendor profile is configured for this account.' } });
+  }
+  res.json({
+    user: { id:customer.id, name:customer.fullName, email:customer.email || req.user.email, role:'vendor' },
+    vendor: req.vendor,
+  });
+});
 
 app.get('/api/v1/vehicles/:id', async (req, res) => {
   const vehicle = await repository.getVehicle(req.params.id);
@@ -291,7 +312,7 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
   res.json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
 
-app.post('/api/v1/bookings/quote', supabaseRequireAuth, async (req, res) => {
+app.post('/api/v1/bookings/quote', requireCustomer, async (req, res) => {
   const normalized = normalizeBookingInput(req.body);
   const schema = z.object({ vehicleId: z.string(), startAt: z.string().datetime(), endAt: z.string().datetime(), delivery: z.boolean().default(true) })
     .refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt' });
@@ -305,7 +326,7 @@ app.post('/api/v1/bookings/quote', supabaseRequireAuth, async (req, res) => {
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
 });
 
-app.post('/api/v1/bookings', supabaseRequireAuth, async (req, res) => {
+app.post('/api/v1/bookings', requireCustomer, async (req, res) => {
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
   const vehicle = await repository.getVehicle(parsed.data.vehicleId);
@@ -335,20 +356,20 @@ app.post('/api/v1/bookings', supabaseRequireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/v1/bookings', supabaseRequireAuth, async (req, res) => {
+app.get('/api/v1/bookings', requireCustomer, async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const data = await repository.listCustomerBookings({ customerId: req.user.id, limit, offset });
   res.json({ data: data.map(publicBooking), bookings: data.map(publicBooking), pagination: { limit, offset, count: data.length } });
 });
 
-app.get('/api/v1/bookings/:id', supabaseRequireAuth, async (req, res) => {
+app.get('/api/v1/bookings/:id', requireCustomer, async (req, res) => {
   const booking = await repository.getBooking(req.params.id, req.user.id);
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   res.json({ data: publicBooking(booking), booking: publicBooking(booking) });
 });
 
-app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, async (req, res) => {
+app.patch('/api/v1/bookings/:id/cancel', requireCustomer, async (req, res) => {
   const booking = await repository.getBooking(req.params.id);
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
