@@ -51,10 +51,11 @@ function pricing(vehicle, startAt, endAt, delivery) {
 const mobileVehicle = (v) => ({
   ...v,
   price: v.pricePerDay,
-  detail: v.subtitle,
+  detail: v.description || v.subtitle,
   emoji: v.type === 'car' ? '🚘' : '🏍️',
   color: v.type === 'car' ? '#E7E9EF' : '#F2E7DA',
   tag: 'Available',
+  images: Array.isArray(v.imageUrls) ? v.imageUrls : [],
 });
 
 function publicBooking(booking) {
