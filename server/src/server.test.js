@@ -65,19 +65,6 @@ test('protected booking routes reject anonymous callers', async () => {
   assert.equal(payload.error.code, 'AUTH_REQUIRED');
 });
 
-
-test('vendor-only endpoint rejects anonymous callers', async () => {
-  const response = await request('/api/v1/vendor/me');
-  const payload = await response.json();
-  assert.equal(response.status, 401);
-  assert.equal(payload.error.code, 'AUTH_REQUIRED');
-});
-
-test('customer-only booking APIs expose explicit role denial for non-customer identities', async () => {
-  const response = await request('/api/v1/bookings');
-  assert.equal(response.status, 401);
-});
-
 test('registration hashes credentials and login returns a bearer token', async () => {
   const registered = await register('+911234567891', 'Auth User');
   assert.ok(registered.accessToken);
@@ -346,6 +333,43 @@ test('quote pricing keeps rupees at the API boundary', async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(payload.quote, { vehicleId: 'creta-01', days: 2, rental: 4998, deliveryFee: 199, platformFee: 250, total: 5447, currency: 'INR', currencyUnit: 'rupees' });
 });
+
+
+test('vendor APIs reject anonymous callers', async () => {
+  const response = await request('/api/v1/vendor/vehicles');
+  const payload = await response.json();
+  assert.equal(response.status, 401);
+  assert.equal(payload.error.code, 'AUTH_REQUIRED');
+});
+
+test('customer identity exposes the existing current-user contract', async () => {
+  const customer = await register('+911234567901', 'Current User Contract');
+  const response = await request('/api/v1/me', { headers:{ authorization:'Bearer ' + customer.accessToken } });
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.ok(payload.customer);
+  assert.ok(payload.customer.id);
+});
+
+test('vendor endpoints reject legacy customer credentials', async () => {
+  const customer = await register('+911234567900', 'Vendor API Customer');
+  const profile = await request('/api/v1/vendor/me', {
+    headers: { authorization: 'Bearer ' + customer.accessToken },
+  });
+  assert.equal(profile.status, 403);
+  const fleet = await request('/api/v1/vendor/vehicles', {
+    headers: { authorization: 'Bearer ' + customer.accessToken },
+  });
+  assert.equal(fleet.status, 403);
+});
+
+test('customer booking APIs remain customer-role protected', async () => {
+  const anonymous = await request('/api/v1/bookings');
+  assert.equal(anonymous.status, 401);
+  const vehicle = await request('/api/v1/vehicles');
+  assert.equal(vehicle.status, 200);
+});
+
 
 test('payment service validates amount, currency, signature, and ordering', () => {
   const service = createPaymentService({ provider: 'test-provider', webhookSecret: 'test-secret' });
