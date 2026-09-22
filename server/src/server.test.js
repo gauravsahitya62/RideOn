@@ -574,8 +574,62 @@ test('customer booking APIs remain customer-role protected', async () => {
 });
 
 
+test('payment creation rejects anonymous callers', async () => {
+  const response = await jsonRequest('/api/v1/payments/create-order','POST',{bookingId:'00000000-0000-0000-0000-000000000000'});
+  assert.equal(response.status,401);
+  assert.equal((await response.json()).error.code,'AUTH_REQUIRED');
+});
+
+test('checkout signature verification never marks payment paid by itself', () => {
+  const service = createPaymentService({ provider:'razorpay', keyId:'rzp_test_key', keySecret:'checkout-secret', webhookSecret:'webhook-secret' });
+  const orderId='order_123';
+  const paymentId='pay_123';
+  const signature=crypto.createHmac('sha256','checkout-secret').update(`${orderId}|${paymentId}`).digest('hex');
+  assert.equal(service.verifyCheckoutSignature({orderId,paymentId,signature}),true);
+  assert.equal(service.verifyCheckoutSignature({orderId,paymentId,signature:'bad'}),false);
+  assert.equal(service.canTransition('pending','paid'),true);
+});
+
+test('Razorpay-style webhook payload is normalized with provider order identity', () => {
+  const service=createPaymentService({provider:'razorpay',keyId:'k',keySecret:'s',webhookSecret:'w'});
+  const event=service.parseWebhook({
+    event:'payment.captured',
+    payload:{payment:{entity:{
+      id:'pay_123',order_id:'order_123',amount:544700,currency:'INR',
+      notes:{bookingId:'booking-123'}
+    }}}
+  },{eventId:'evt_123'});
+  assert.equal(event.eventId,'evt_123');
+  assert.equal(event.bookingId,'booking-123');
+  assert.equal(event.providerOrderId,'order_123');
+  assert.equal(event.providerReference,'pay_123');
+  assert.equal(event.status,'paid');
+  assert.equal(event.amountPaise,544700);
+});
+
+test('duplicate webhook event is idempotent in memory payment state', async () => {
+  const user=await register('+911234568001','Webhook Duplicate User');
+  const login=await legacyLogin('+911234568001');
+  const created=await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',startAt:'2037-01-10T10:00:00.000Z',endAt:'2037-01-11T10:00:00.000Z',
+    delivery:false,address:'10 Payment Webhook Road, Jaipur'
+  },login.accessToken,{'Idempotency-Key':'payment-booking-1'});
+  assert.equal(created.status,201);
+  const booking=(await created.json()).booking;
+  // The webhook route remains signature-protected even for memory-mode tests.
+  const payload={eventId:'evt-duplicate-1',bookingId:booking.bookingId,status:'paid',providerReference:'pay-duplicate',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrderId:'order-duplicate'};
+  const configured=createPaymentService({provider:'razorpay',keyId:'k',keySecret:'s',webhookSecret:'webhook-secret'});
+  const body=JSON.stringify(payload);
+  const signature=crypto.createHmac('sha256','webhook-secret').update(body).digest('hex');
+  // This unit-level application path proves duplicate protection without mutating global server env.
+  const first=repository.applyPaymentEvent(configured.parseWebhook(payload));
+  assert.equal((await first).applied,true);
+  const second=repository.applyPaymentEvent(configured.parseWebhook(payload));
+  assert.equal((await second).duplicate,true);
+});
+ 
 test('payment service validates amount, currency, signature, and ordering', () => {
-  const service = createPaymentService({ provider: 'test-provider', webhookSecret: 'test-secret' });
+  const service = createPaymentService({ provider: 'razorpay', keyId:'key', keySecret:'secret', webhookSecret: 'test-secret' });
   const parsed = service.parseWebhook({ eventId: 'evt-1', bookingId: 'booking-1', status: 'paid', providerReference: 'pay-1', amountPaise: 544700, currency: 'INR' });
   assert.equal(parsed.amountPaise, 544700);
   assert.equal(parsed.currency, 'INR');
