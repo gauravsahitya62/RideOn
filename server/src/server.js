@@ -203,6 +203,48 @@ app.get('/api/v1/vehicles', async (req, res) => {
   res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
 });
 
+app.patch('/api/v1/me', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({
+    fullName:z.string().trim().min(2).max(100).optional(),
+    phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional().or(z.literal('')),
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid profile details.'}});
+  const customer=await repository.updateCustomerProfile({customerId:req.user.id,fullName:parsed.data.fullName,phone:parsed.data.phone||null});
+  if(!customer) return res.status(404).json({error:{code:'CUSTOMER_NOT_FOUND'}});
+  res.json({customer});
+});
+app.get('/api/v1/me/addresses', supabaseRequireAuth, async (req,res)=>{
+  res.json({data:await repository.listCustomerAddresses({customerId:req.user.id})});
+});
+app.post('/api/v1/me/addresses', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({
+    label:z.string().trim().min(1).max(50), recipient:z.string().trim().min(2).max(100),
+    phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/), street:z.string().trim().min(2).max(160),
+    area:z.string().trim().max(120), city:z.string().trim().min(2).max(100),
+    postalCode:z.string().trim().regex(/^\d{6}$/), isDefault:z.boolean().optional()
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid address details.'}});
+  const address=await repository.createCustomerAddress({customerId:req.user.id,...parsed.data});
+  res.status(201).json({data:address,address});
+});
+app.patch('/api/v1/me/addresses/:id', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({
+    label:z.string().trim().min(1).max(50).optional(), recipient:z.string().trim().min(2).max(100).optional(),
+    phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(), street:z.string().trim().min(2).max(160).optional(),
+    area:z.string().trim().max(120).optional(), city:z.string().trim().min(2).max(100).optional(),
+    postalCode:z.string().trim().regex(/^\d{6}$/).optional(), isDefault:z.boolean().optional()
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid address details.'}});
+  const address=await repository.updateCustomerAddress({customerId:req.user.id,addressId:req.params.id,...parsed.data});
+  if(!address) return res.status(404).json({error:{code:'ADDRESS_NOT_FOUND'}});
+  res.json({data:address,address});
+});
+app.delete('/api/v1/me/addresses/:id', supabaseRequireAuth, async (req,res)=>{
+  const deleted=await repository.deleteCustomerAddress({customerId:req.user.id,addressId:req.params.id});
+  if(!deleted) return res.status(404).json({error:{code:'ADDRESS_NOT_FOUND'}});
+  res.json({deleted:true});
+});
+
 app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => { const customer = await repository.findCustomerById(req.user.id); if (!customer) return res.status(404).json({ error:{ code:'CUSTOMER_NOT_FOUND' } }); res.json({ customer }); });
 
 app.get('/api/v1/vehicles/:id', async (req, res) => {
