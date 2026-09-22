@@ -132,6 +132,7 @@ export default function RideOnApp({ authenticatedUser, onLogout }) {
        order_id:payment.orderId,
        prefill:{name:name||undefined,email:email||undefined,contact:phone||undefined},
        theme:{color:C.orange},
+       method:{[paymentMethod]:1},
      };
      let callback;
      try{
