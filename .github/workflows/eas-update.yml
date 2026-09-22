@@ -34,12 +34,8 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
         run: |
-          if [ -z "$EXPO_TOKEN" ]; then
-            echo "Missing GitHub Actions secret EXPO_TOKEN" >&2
-            exit 1
-          fi
-          if [ -z "$EAS_PROJECT_ID" ]; then
-            echo "Missing GitHub Actions variable EAS_PROJECT_ID" >&2
-            exit 1
+          if [ -z "$EXPO_TOKEN" ] || [ -z "$EAS_PROJECT_ID" ]; then
+            echo "EAS OTA update skipped: EXPO_TOKEN and EAS_PROJECT_ID are not configured in GitHub Actions." >&2
+            exit 0
           fi
           eas update --branch production --message "GitHub ${GITHUB_SHA}" --non-interactive
