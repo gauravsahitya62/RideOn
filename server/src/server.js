@@ -16,7 +16,7 @@ app.use(helmet());
 app.disable('x-powered-by');
 const allowedOrigin = process.env.CLIENT_ORIGIN || '*';
 app.use(cors({ origin: allowedOrigin === '*' ? true : allowedOrigin }));
-app.use(express.json({ limit: '32kb' }));
+app.use(express.json({ limit: '64kb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
 app.use(rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
@@ -599,10 +599,10 @@ app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req
 });
 
 app.post('/api/v1/payments/webhook', async (req, res) => {
-  const signature = req.get('X-Payment-Signature');
-  const body = JSON.stringify(req.body);
+  const signature = req.get('X-Razorpay-Signature') || req.get('X-Payment-Signature');
+  const body = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
   if (!payments.verifyWebhook(body, signature)) return res.status(401).json({ error: { code: 'INVALID_WEBHOOK_SIGNATURE' } });
-  const event = payments.parseWebhook(req.body);
+  const event = payments.parseWebhook(req.body, { eventId: req.get('X-Razorpay-Event-Id') || undefined });
   if (!event) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT' } });
   const result = await repository.applyPaymentEvent(event);
   if (result.invalid) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT', message: 'Payment event does not match the booking payment.' } });
