@@ -144,6 +144,15 @@ export function createRepository({ databaseUrl, fleet }) {
     };
   }
 
+  async function getVehicleState(id) {
+    if (!useDatabase) {
+      const vehicle = [...fleet, ...memory.vehicles.values()].find((v) => v.id === id);
+      return vehicle ? { exists:true, active:vehicle.active !== false } : { exists:false, active:false };
+    }
+    const { rows } = await pool.query('select id, active from vehicles where id=$1',[id]);
+    return rows[0] ? { exists:true, active:Boolean(rows[0].active) } : { exists:false, active:false };
+  }
+
   const mapVendor = (row) => row && ({
     id: String(row.id),
     ownerCustomerId: String(row.owner_customer_id),
@@ -642,5 +651,5 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
+  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
 }
