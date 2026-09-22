@@ -441,6 +441,30 @@ test('cancellation records the actual previous status', async () => {
   assert.equal((await cancelled.json()).booking.status, 'cancelled');
 });
 
+test('inactive vehicle cannot be checked or booked', async () => {
+  await repository.seedMemoryVehicles([
+    { id:'inactive-01', type:'car', name:'Inactive Car', city:'Jaipur', pricePerDay:1000, active:false, transmission:'Manual', fuel:'Petrol', seats:5, securityDeposit:0 },
+  ]);
+  const user = await register('+911234567914', 'Inactive Vehicle User');
+  const login = await legacyLogin('+911234567914');
+
+  const availability = await request('/api/v1/vehicles/inactive-01/availability?startAt=2036-01-10T10:00:00.000Z&endAt=2036-01-11T10:00:00.000Z', {
+    headers:{authorization:'Bearer '+login.accessToken},
+  });
+  assert.equal(availability.status, 409);
+  assert.equal((await availability.json()).error.code, 'VEHICLE_INACTIVE');
+
+  const booking = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'inactive-01',
+    startAt:'2036-01-10T10:00:00.000Z',
+    endAt:'2036-01-11T10:00:00.000Z',
+    delivery:false,
+    address:'14 Inactive Road, Jaipur',
+  },login.accessToken,{ 'Idempotency-Key':'inactive-booking-1' });
+  assert.equal(booking.status,409);
+  assert.equal((await booking.json()).error.code,'VEHICLE_INACTIVE');
+});
+
 test('vendor APIs reject anonymous callers', async () => {
   const response = await request('/api/v1/vendor/vehicles');
   const payload = await response.json();
