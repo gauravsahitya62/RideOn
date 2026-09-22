@@ -621,6 +621,31 @@ export function createRepository({ databaseUrl, fleet }) {
     }
   }
 
+  const paymentLocks = new Map();
+
+  async function withPaymentLock(key, fn) {
+    const lockKey = String(key);
+    if (!useDatabase) {
+      const previous = paymentLocks.get(lockKey) || Promise.resolve();
+      let release;
+      const current = new Promise(resolve => { release = resolve; });
+      paymentLocks.set(lockKey, previous.then(() => current));
+      await previous;
+      try { return await fn(); }
+      finally {
+        release();
+        if (paymentLocks.get(lockKey) === current) paymentLocks.delete(lockKey);
+      }
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('select pg_advisory_lock(hashtextextended($1, 0))', [lockKey]);
+      return await fn();
+    } finally {
+      try { await client.query('select pg_advisory_unlock(hashtextextended($1, 0))', [lockKey]); } finally { client.release(); }
+    }
+  }
+
   async function findPaymentById(paymentId, customerId) {
     if (!useDatabase) {
       const payment=memory.payments.get(String(paymentId));
@@ -794,5 +819,5 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
+  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
 }
