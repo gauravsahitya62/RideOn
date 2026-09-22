@@ -245,6 +245,23 @@ app.delete('/api/v1/me/addresses/:id', supabaseRequireAuth, async (req,res)=>{
   res.json({deleted:true});
 });
 
+
+app.get('/api/v1/me/preferences', supabaseRequireAuth, async (req,res)=>{
+  const preferences=await repository.getCustomerPreferences({customerId:req.user.id});
+  res.json({preferences});
+});
+app.patch('/api/v1/me/preferences', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({bookingUpdates:z.boolean().optional(),reminders:z.boolean().optional(),offers:z.boolean().optional(),marketing:z.boolean().optional()}).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid notification preferences.'}});
+  const preferences=await repository.updateCustomerPreferences({customerId:req.user.id,...parsed.data});
+  res.json({preferences});
+});
+app.post('/api/v1/support/requests', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({name:z.string().trim().min(2).max(100),contact:z.string().trim().min(3).max(254),topic:z.string().trim().min(2).max(80),message:z.string().trim().min(10).max(2000)}).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please complete the support request.'}});
+  const ticket=await repository.createSupportRequest({customerId:req.user.id,...parsed.data});
+  res.status(201).json({ticket});
+});
 app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => { const customer = await repository.findCustomerById(req.user.id); if (!customer) return res.status(404).json({ error:{ code:'CUSTOMER_NOT_FOUND' } }); res.json({ customer }); });
 
 app.get('/api/v1/vehicles/:id', async (req, res) => {
