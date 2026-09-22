@@ -605,6 +605,99 @@ export function createRepository({ databaseUrl, fleet }) {
     }
   }
 
+  async function findPaymentByBooking(bookingId) {
+    if (!useDatabase) return memory.payments?.get(String(bookingId)) || null;
+    const { rows } = await pool.query(
+      'select id,booking_id,provider,provider_order_id,provider_payment_id,provider_reference,amount_paise,currency,status,idempotency_key,created_at,updated_at from payments where booking_id=$1 order by created_at desc limit 1',
+      [bookingId]
+    );
+    return rows[0] ? {
+      id:String(rows[0].id), bookingId:String(rows[0].booking_id), provider:rows[0].provider,
+      providerOrderId:rows[0].provider_order_id || undefined, providerPaymentId:rows[0].provider_payment_id || undefined,
+      providerReference:rows[0].provider_reference || undefined, amountPaise:Number(rows[0].amount_paise),
+      currency:rows[0].currency, status:rows[0].status, idempotencyKey:rows[0].idempotency_key || undefined,
+      createdAt:iso(rows[0].created_at), updatedAt:iso(rows[0].updated_at || rows[0].created_at),
+    } : null;
+  }
+
+  async function createOrGetPaymentOrder({ bookingId, customerId, provider, amountPaise, currency='INR', idempotencyKey, providerOrder }) {
+    if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
+      const e=new Error('Invalid payment amount or currency.'); e.code='PAYMENT_CREATION_FAILED'; throw e;
+    }
+    if (!useDatabase) {
+      if (!memory.payments) memory.payments = new Map();
+      const existing=memory.payments.get(String(bookingId));
+      if (existing && ['unpaid','pending'].includes(existing.status) && existing.amountPaise===Number(amountPaise)) return { payment:existing, created:false };
+      const payment={id:crypto.randomUUID(),bookingId:String(bookingId),customerId:String(customerId),provider,providerOrderId:providerOrder.id,amountPaise:Number(amountPaise),currency,status:'pending',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      memory.payments.set(String(bookingId),payment);
+      return {payment,created:true};
+    }
+    const client=await pool.connect();
+    try {
+      await client.query('begin');
+      const bookingResult=await client.query('select id,customer_id,total_paise,payment_status from bookings where id=$1 for update',[bookingId]);
+      if(!bookingResult.rows[0]){const e=new Error('Payment not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const b=bookingResult.rows[0];
+      if(String(b.customer_id)!==String(customerId)){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
+      if(Number(b.total_paise)!==Number(amountPaise)){const e=new Error('Booking amount changed.');e.code='PAYMENT_CREATION_FAILED';throw e;}
+      if(b.payment_status==='paid'){const e=new Error('Booking is already paid.');e.code='PAYMENT_ALREADY_PAID';throw e;}
+      const existing=await client.query("select id,booking_id,provider,provider_order_id,provider_payment_id,provider_reference,amount_paise,currency,status,idempotency_key,created_at,updated_at from payments where booking_id=$1 and status in ('unpaid','pending') order by created_at desc limit 1 for update",[bookingId]);
+      if(existing.rows[0]){
+        const row=existing.rows[0];
+        await client.query('commit');
+        return {created:false,payment:{id:String(row.id),bookingId:String(row.booking_id),provider:row.provider,providerOrderId:row.provider_order_id,providerPaymentId:row.provider_payment_id,providerReference:row.provider_reference||undefined,amountPaise:Number(row.amount_paise),currency:row.currency,status:row.status,idempotencyKey:row.idempotency_key||undefined,createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)}};
+      }
+      const inserted=await client.query(
+        "insert into payments(booking_id,provider,provider_order_id,amount_paise,currency,status,idempotency_key) values($1,$2,$3,$4,$5,'pending',$6) returning id,booking_id,provider,provider_order_id,amount_paise,currency,status,idempotency_key,created_at,updated_at",
+        [bookingId,provider,providerOrder.id,Number(amountPaise),currency,idempotencyKey||null]
+      );
+      await client.query("update bookings set payment_status='pending',payment_provider_reference=$2,updated_at=now() where id=$1 and payment_status='unpaid'",[bookingId,providerOrder.id]);
+      await client.query('commit');
+      const row=inserted.rows[0];
+      return {created:true,payment:{id:String(row.id),bookingId:String(row.booking_id),provider:row.provider,providerOrderId:row.provider_order_id,amountPaise:Number(row.amount_paise),currency:row.currency,status:row.status,idempotencyKey:row.idempotency_key||undefined,createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)}};
+    }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
+  }
+
+  async function verifyPayment({ paymentId, bookingId, customerId, providerPaymentId, providerOrderId, providerSignature }) {
+    if (!useDatabase) {
+      const p=memory.payments?.get(String(bookingId));
+      if(!p || p.id!==String(paymentId) || p.providerOrderId!==String(providerOrderId)) {const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
+      p.providerPaymentId=String(providerPaymentId);p.providerReference=String(providerPaymentId);p.status='pending';p.updatedAt=new Date().toISOString();
+      return p;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query('select p.*,b.customer_id,b.total_paise from payments p join bookings b on b.id=p.booking_id where p.id=$1 and p.booking_id=$2 and b.customer_id=$3 for update',[paymentId,bookingId,customerId]);
+      if(!rows[0]){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
+      const p=rows[0];
+      if(Number(p.amount_paise)!==Number(p.total_paise)) {const e=new Error('Payment amount mismatch.');e.code='PAYMENT_VERIFICATION_FAILED';throw e;}
+      if(p.provider_order_id!==String(providerOrderId)) {const e=new Error('Payment order mismatch.');e.code='PAYMENT_VERIFICATION_FAILED';throw e;}
+      await client.query('update payments set provider_payment_id=$2,provider_reference=$2,updated_at=now() where id=$1',[paymentId,providerPaymentId]);
+      await client.query('commit');
+      return {id:String(p.id),bookingId:String(p.booking_id),provider:p.provider,providerOrderId:p.provider_order_id,providerPaymentId:String(providerPaymentId),providerReference:String(providerPaymentId),amountPaise:Number(p.amount_paise),currency:p.currency,status:p.status};
+    }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
+  }
+
+  async function refundPayment({ paymentId, customerId, providerReference, amountPaise, status='refunded' }) {
+    if (!useDatabase) {
+      const p=[...(memory.payments?.values()||[])].find(x=>x.id===String(paymentId));
+      if(!p){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
+      p.status=status;p.updatedAt=new Date().toISOString();return p;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query('select p.*,b.customer_id from payments p join bookings b on b.id=p.booking_id where p.id=$1 and b.customer_id=$2 for update',[paymentId,customerId||null]);
+      if(!rows[0]){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
+      if(rows[0].status!=='paid'){const e=new Error('Payment is not refundable in its current state.');e.code='INVALID_PAYMENT_STATE';throw e;}
+      await client.query("update payments set status='refunded',provider_reference=$2,updated_at=now() where id=$1",[paymentId,providerReference]);
+      await client.query("update bookings set payment_status='refunded',updated_at=now() where id=$1",[rows[0].booking_id]);
+      await client.query('commit');
+      return {id:String(rows[0].id),bookingId:String(rows[0].booking_id),provider:rows[0].provider,providerOrderId:rows[0].provider_order_id,providerPaymentId:rows[0].provider_payment_id,providerReference:providerReference,amountPaise:Number(rows[0].amount_paise),currency:rows[0].currency,status:'refunded'};
+    }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
+  }
+
   async function findCustomerByEmail(email) {
     if (useDatabase) {
       const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where lower(email)=lower($1)', [email]);
