@@ -358,6 +358,82 @@ test('quote pricing keeps rupees at the API boundary', async () => {
 });
 
 
+
+test('availability endpoint reports available and unavailable windows', async () => {
+  const a = await register('+911234567910', 'Availability User');
+  const login = await legacyLogin('+911234567910');
+  const available = await request('/api/v1/vehicles/creta-01/availability?startAt=2034-01-10T10:00:00.000Z&endAt=2034-01-12T10:00:00.000Z', {
+    headers: { authorization: 'Bearer ' + login.accessToken },
+  });
+  const availablePayload = await available.json();
+  assert.equal(available.status, 200);
+  assert.equal(availablePayload.available, true);
+
+  const created = await jsonRequest('/api/v1/bookings', 'POST', {
+    vehicleId: 'creta-01',
+    startAt: '2034-02-10T10:00:00.000Z',
+    endAt: '2034-02-12T10:00:00.000Z',
+    delivery: false,
+    address: '10 Availability Road, Jaipur',
+  }, login.accessToken, { 'Idempotency-Key': 'availability-seed-1' });
+  assert.equal(created.status, 201);
+
+  const busy = await request('/api/v1/vehicles/creta-01/availability?startAt=2034-02-10T10:00:00.000Z&endAt=2034-02-11T10:00:00.000Z', {
+    headers: { authorization: 'Bearer ' + login.accessToken },
+  });
+  const busyPayload = await busy.json();
+  assert.equal(busy.status, 200);
+  assert.equal(busyPayload.available, false);
+});
+
+test('availability rejects invalid windows', async () => {
+  await register('+911234567911', 'Invalid Window User');
+  const login = await legacyLogin('+911234567911');
+  const response = await request('/api/v1/vehicles/creta-01/availability?startAt=not-a-date&endAt=2034-03-02T10:00:00.000Z', {
+    headers: { authorization: 'Bearer ' + login.accessToken },
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 400);
+  assert.equal(payload.error.code, 'INVALID_BOOKING_WINDOW');
+});
+
+test('different idempotency keys cannot reserve an overlapping interval twice', async () => {
+  const a = await register('+911234567912', 'Conflict User');
+  const login = await legacyLogin('+911234567912');
+  const payload = {
+    vehicleId: 'baleno-01',
+    startAt: '2034-04-10T10:00:00.000Z',
+    endAt: '2034-04-12T10:00:00.000Z',
+    delivery: false,
+    address: '12 Conflict Road, Jaipur',
+  };
+  const first = await jsonRequest('/api/v1/bookings', 'POST', payload, login.accessToken, { 'Idempotency-Key': 'conflict-a' });
+  const second = await jsonRequest('/api/v1/bookings', 'POST', payload, login.accessToken, { 'Idempotency-Key': 'conflict-b' });
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 409);
+  assert.equal((await second.json()).error.code, 'VEHICLE_UNAVAILABLE');
+});
+
+test('cancellation records the actual previous status', async () => {
+  const a = await register('+911234567913', 'Cancellation User');
+  const login = await legacyLogin('+911234567913');
+  const created = await jsonRequest('/api/v1/bookings', 'POST', {
+    vehicleId: 'activa-01',
+    startAt: '2034-05-10T10:00:00.000Z',
+    endAt: '2034-05-11T10:00:00.000Z',
+    delivery: false,
+    address: '13 Cancel Road, Jaipur',
+  }, login.accessToken, { 'Idempotency-Key': 'cancel-event-1' });
+  assert.equal(created.status, 201);
+  const bookingId = (await created.json()).booking.bookingId;
+  const cancelled = await request('/api/v1/bookings/' + bookingId + '/cancel', {
+    method: 'PATCH',
+    headers: { authorization: 'Bearer ' + login.accessToken },
+  });
+  assert.equal(cancelled.status, 200);
+  assert.equal((await cancelled.json()).booking.status, 'cancelled');
+});
+
 test('vendor APIs reject anonymous callers', async () => {
   const response = await request('/api/v1/vendor/vehicles');
   const payload = await response.json();
