@@ -19,9 +19,6 @@ SET phone = coalesce(phone, support_phone),
     email = coalesce(email, support_email),
     address = coalesce(address, service_city);
 
-UPDATE vendors
-SET status = 'active'
-WHERE status = 'approved';
 
 CREATE INDEX IF NOT EXISTS vendors_owner_status_idx
   ON vendors(owner_customer_id, status);

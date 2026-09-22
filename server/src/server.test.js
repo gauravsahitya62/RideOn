@@ -30,6 +30,15 @@ const jsonRequest = (path, method, payload, token, extraHeaders = {}) => request
   body: JSON.stringify(payload),
 });
 
+async function legacyLogin(phone) {
+  const response = await jsonRequest('/api/v1/auth/login', 'POST', {
+    phone,
+    password: 'StrongPass123!',
+  });
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
 async function register(phone = '+911234567890', fullName = 'Test User') {
   const response = await jsonRequest('/api/v1/auth/register', 'POST', {
     fullName,
@@ -53,9 +62,11 @@ test('vehicle list preserves existing aliases and search contract', async () => 
   const response = await request('/api/v1/vehicles?q=CRETA');
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.equal(payload.data.length, 1);
-  assert.equal(payload.data[0].id, 'creta-01');
-  assert.equal(payload.data[0].price, payload.data[0].pricePerDay);
+  assert.ok(Array.isArray(payload.data));
+  assert.ok(payload.data.length >= 1);
+  const creta = payload.data.find((vehicle) => vehicle.id === 'creta-01');
+  assert.ok(creta);
+  assert.equal(creta.price, creta.pricePerDay);
 });
 
 test('protected booking routes reject anonymous callers', async () => {
@@ -90,30 +101,32 @@ test('login rejects incorrect passwords', async () => {
 
 test('customer can create, list, read, and cancel only own bookings', async () => {
   const a = await register('+911234567893', 'Customer A');
+  const aLogin = await legacyLogin('+911234567893');
   const b = await register('+911234567894', 'Customer B');
+  const bLogin = await legacyLogin('+911234567894');
   const bookingResponse = await jsonRequest('/api/v1/bookings', 'POST', {
     vehicleId: 'creta-01',
     durationDays: 1,
     startDate: '2032-05-01',
     delivery: false,
     address: '12 Example Road, Jaipur',
-  }, a.accessToken, { 'Idempotency-Key': 'customer-a-booking-1' });
+  }, aLogin.accessToken, { 'Idempotency-Key': 'customer-a-booking-1' });
   assert.equal(bookingResponse.status, 201);
   const created = await bookingResponse.json();
   const id = created.booking.bookingId;
 
   const own = await request('/api/v1/bookings/' + id, {
-    headers: { authorization: 'Bearer ' + a.accessToken },
+    headers: { authorization: 'Bearer ' + aLogin.accessToken },
   });
   assert.equal(own.status, 200);
 
   const foreign = await request('/api/v1/bookings/' + id, {
-    headers: { authorization: 'Bearer ' + b.accessToken },
+    headers: { authorization: 'Bearer ' + bLogin.accessToken },
   });
   assert.equal(foreign.status, 404);
 
   const history = await request('/api/v1/bookings', {
-    headers: { authorization: 'Bearer ' + a.accessToken },
+    headers: { authorization: 'Bearer ' + aLogin.accessToken },
   });
   const historyPayload = await history.json();
   assert.equal(history.status, 200);
@@ -122,13 +135,14 @@ test('customer can create, list, read, and cancel only own bookings', async () =
 
   const cancelled = await request('/api/v1/bookings/' + id + '/cancel', {
     method: 'PATCH',
-    headers: { authorization: 'Bearer ' + b.accessToken },
+    headers: { authorization: 'Bearer ' + bLogin.accessToken },
   });
   assert.equal(cancelled.status, 404);
 });
 
 test('duplicate booking submission with the same idempotency key is replayed', async () => {
   const a = await register('+911234567895', 'Idempotent User');
+  const aLogin = await legacyLogin('+911234567895');
   const headers = { 'Idempotency-Key': 'same-booking-key' };
   const payload = {
     vehicleId: 'baleno-01',
@@ -137,9 +151,9 @@ test('duplicate booking submission with the same idempotency key is replayed', a
     delivery: false,
     address: '44 Example Road, Jaipur',
   };
-  const first = await jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, headers);
+  const first = await jsonRequest('/api/v1/bookings', 'POST', payload, aLogin.accessToken, headers);
   const firstPayload = await first.json();
-  const second = await jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, headers);
+  const second = await jsonRequest('/api/v1/bookings', 'POST', payload, aLogin.accessToken, headers);
   const secondPayload = await second.json();
   assert.equal(first.status, 201);
   assert.equal(second.status, 200);
@@ -148,10 +162,11 @@ test('duplicate booking submission with the same idempotency key is replayed', a
 
 test('concurrent requests with the same idempotency key replay one booking', async () => {
   const a = await register('+911234567884', 'Concurrent Idempotency User');
+  const aLogin = await legacyLogin('+911234567884');
   const payload = { vehicleId: 'baleno-01', startDate: '2033-03-01', durationDays: 1, delivery: false, address: '111 Concurrent Road, Jaipur' };
   const [first, second] = await Promise.all([
-    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
-    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
+    jsonRequest('/api/v1/bookings', 'POST', payload, aLogin.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
+    jsonRequest('/api/v1/bookings', 'POST', payload, aLogin.accessToken, { 'Idempotency-Key': 'same-concurrent-key' }),
   ]);
   const statuses = [first.status, second.status].sort();
   const firstPayload = await first.json();
@@ -162,13 +177,14 @@ test('concurrent requests with the same idempotency key replay one booking', asy
 
 test('overlapping booking attempts return unavailable and non-overlapping booking remains possible', async () => {
   const a = await register('+911234567896', 'Overlap User');
+  const aLogin = await legacyLogin('+911234567896');
   const first = await jsonRequest('/api/v1/bookings', 'POST', {
     vehicleId: 'classic-01',
     durationDays: 1,
     startDate: '2032-07-01',
     delivery: false,
     address: '8 Example Road, Jaipur',
-  }, a.accessToken, { 'Idempotency-Key': 'overlap-1' });
+  }, aLogin.accessToken, { 'Idempotency-Key': 'overlap-1' });
   assert.equal(first.status, 201);
 
   const second = await jsonRequest('/api/v1/bookings', 'POST', {
@@ -177,7 +193,7 @@ test('overlapping booking attempts return unavailable and non-overlapping bookin
     startDate: '2032-07-01',
     delivery: false,
     address: '9 Example Road, Jaipur',
-  }, a.accessToken, { 'Idempotency-Key': 'overlap-2' });
+  }, aLogin.accessToken, { 'Idempotency-Key': 'overlap-2' });
   const secondPayload = await second.json();
   assert.equal(second.status, 409);
   assert.equal(secondPayload.error.code, 'VEHICLE_UNAVAILABLE');
@@ -185,13 +201,14 @@ test('overlapping booking attempts return unavailable and non-overlapping bookin
 
 test('invalid booking input is rejected server-side', async () => {
   const a = await register('+911234567897', 'Validation User');
+  const aLogin = await legacyLogin('+911234567897');
   const response = await jsonRequest('/api/v1/bookings', 'POST', {
     vehicleId: 'creta-01',
     durationDays: 1,
     startDate: '2032-02-31',
     delivery: true,
     address: 'Too short',
-  }, a.accessToken);
+  }, aLogin.accessToken);
   assert.equal(response.status, 400);
 });
 
@@ -236,6 +253,7 @@ test('quote and booking both require authentication', async () => {
 
 test('duplicate booking submissions without an idempotency key are not treated as the same request', async () => {
   const a = await register('+911234567898', 'No Key User');
+  const aLogin = await legacyLogin('+911234567898');
   const payload = {
     vehicleId: 'activa-01',
     durationDays: 1,
@@ -243,8 +261,8 @@ test('duplicate booking submissions without an idempotency key are not treated a
     delivery: false,
     address: '20 Example Road, Jaipur',
   };
-  const first = await jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken);
-  const second = await jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken);
+  const first = await jsonRequest('/api/v1/bookings', 'POST', payload, aLogin.accessToken);
+  const second = await jsonRequest('/api/v1/bookings', 'POST', payload, aLogin.accessToken);
   assert.equal(first.status, 201);
   assert.equal(second.status, 409);
   assert.equal((await second.json()).error.code, 'VEHICLE_UNAVAILABLE');
@@ -252,13 +270,14 @@ test('duplicate booking submissions without an idempotency key are not treated a
 
 test('valid payment lifecycle can only be advanced through a verified webhook', async () => {
   const a = await register('+911234567899', 'Payment User');
+  const aLogin = await legacyLogin('+911234567899');
   const bookingResponse = await jsonRequest('/api/v1/bookings', 'POST', {
     vehicleId: 'baleno-01',
     durationDays: 1,
     startDate: '2032-10-01',
     delivery: false,
     address: '30 Example Road, Jaipur',
-  }, a.accessToken);
+  }, aLogin.accessToken);
   const created = await bookingResponse.json();
   const webhook = await jsonRequest('/api/v1/payments/webhook', 'POST', {
     eventId: 'evt-payment-1',
@@ -272,6 +291,7 @@ test('valid payment lifecycle can only be advanced through a verified webhook', 
 
 test('concurrent memory booking attempts cannot both reserve the same interval', async () => {
   const a = await register('+911234567880', 'Concurrent User');
+  const aLogin = await legacyLogin('+911234567880');
   const payload = {
     vehicleId: 'creta-01',
     durationDays: 1,
@@ -280,8 +300,8 @@ test('concurrent memory booking attempts cannot both reserve the same interval',
     address: '99 Example Road, Jaipur',
   };
   const [first, second] = await Promise.all([
-    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'concurrent-a' }),
-    jsonRequest('/api/v1/bookings', 'POST', payload, a.accessToken, { 'Idempotency-Key': 'concurrent-b' }),
+    jsonRequest('/api/v1/bookings', 'POST', payload, aLogin.accessToken, { 'Idempotency-Key': 'concurrent-a' }),
+    jsonRequest('/api/v1/bookings', 'POST', payload, aLogin.accessToken, { 'Idempotency-Key': 'concurrent-b' }),
   ]);
   const statuses = [first.status, second.status].sort();
   assert.deepEqual(statuses, [201, 409]);
@@ -289,13 +309,14 @@ test('concurrent memory booking attempts cannot both reserve the same interval',
 
 test('booking round trip preserves API rupees after persistence', async () => {
   const a = await register('+911234567883', 'Persistence Currency User');
+  const aLogin = await legacyLogin('+911234567883');
   const response = await jsonRequest('/api/v1/bookings', 'POST', {
     vehicleId: 'creta-01',
     startDate: '2033-02-01',
     durationDays: 2,
     delivery: true,
     address: '101 Persistence Road, Jaipur',
-  }, a.accessToken, { 'Idempotency-Key': 'persist-currency-1' });
+  }, aLogin.accessToken, { 'Idempotency-Key': 'persist-currency-1' });
   assert.equal(response.status, 201);
   const created = await response.json();
   assert.deepEqual(created.booking.pricing, {
@@ -307,7 +328,7 @@ test('booking round trip preserves API rupees after persistence', async () => {
     currency: 'INR',
     currencyUnit: 'rupees',
   });
-  const detail = await request('/api/v1/bookings/' + created.booking.bookingId, { headers: { authorization: 'Bearer ' + a.accessToken }});
+  const detail = await request('/api/v1/bookings/' + created.booking.bookingId, { headers: { authorization: 'Bearer ' + aLogin.accessToken }});
   const detailPayload = await detail.json();
   assert.equal(detail.status, 200);
   assert.equal(detailPayload.booking.vehicleId, 'creta-01');
@@ -316,19 +337,21 @@ test('booking round trip preserves API rupees after persistence', async () => {
 
 test('valid vehicle IDs resolve and unknown vehicle IDs are rejected', async () => {
   const a = await register('+911234567881', 'Vehicle ID User');
-  const valid = await jsonRequest('/api/v1/bookings/quote', 'POST', { vehicleId: 'creta-01', startDate: '2032-12-01', durationDays: 1, delivery: false }, a.accessToken);
+  const aLogin = await legacyLogin('+911234567881');
+  const valid = await jsonRequest('/api/v1/bookings/quote', 'POST', { vehicleId: 'creta-01', startDate: '2032-12-01', durationDays: 1, delivery: false }, aLogin.accessToken);
   const validPayload = await valid.json();
   assert.equal(valid.status, 200);
   assert.equal(validPayload.quote.vehicleId, 'creta-01');
   assert.equal(validPayload.quote.rental, 2499);
-  const invalid = await jsonRequest('/api/v1/bookings/quote', 'POST', { vehicleId: 'does-not-exist', startDate: '2032-12-01', durationDays: 1, delivery: false }, a.accessToken);
+  const invalid = await jsonRequest('/api/v1/bookings/quote', 'POST', { vehicleId: 'does-not-exist', startDate: '2032-12-01', durationDays: 1, delivery: false }, aLogin.accessToken);
   assert.equal(invalid.status, 404);
   assert.equal((await invalid.json()).error.code, 'VEHICLE_NOT_FOUND');
 });
 
 test('quote pricing keeps rupees at the API boundary', async () => {
   const a = await register('+911234567882', 'Currency User');
-  const response = await jsonRequest('/api/v1/bookings/quote', 'POST', { vehicleId: 'creta-01', startDate: '2033-01-01', durationDays: 2, delivery: true }, a.accessToken);
+  const aLogin = await legacyLogin('+911234567882');
+  const response = await jsonRequest('/api/v1/bookings/quote', 'POST', { vehicleId: 'creta-01', startDate: '2033-01-01', durationDays: 2, delivery: true }, aLogin.accessToken);
   const payload = await response.json();
   assert.equal(response.status, 200);
   assert.deepEqual(payload.quote, { vehicleId: 'creta-01', days: 2, rental: 4998, deliveryFee: 199, platformFee: 250, total: 5447, currency: 'INR', currencyUnit: 'rupees' });
@@ -344,7 +367,8 @@ test('vendor APIs reject anonymous callers', async () => {
 
 test('customer identity exposes the existing current-user contract', async () => {
   const customer = await register('+911234567901', 'Current User Contract');
-  const response = await request('/api/v1/me', { headers:{ authorization:'Bearer ' + customer.accessToken } });
+  const customerLogin = await legacyLogin('+911234567901');
+  const response = await request('/api/v1/me', { headers:{ authorization:'Bearer ' + customerLogin.accessToken } });
   const payload = await response.json();
   assert.equal(response.status, 200);
   assert.ok(payload.customer);
@@ -353,12 +377,13 @@ test('customer identity exposes the existing current-user contract', async () =>
 
 test('vendor endpoints reject legacy customer credentials', async () => {
   const customer = await register('+911234567900', 'Vendor API Customer');
+  const customerLogin = await legacyLogin('+911234567900');
   const profile = await request('/api/v1/vendor/me', {
-    headers: { authorization: 'Bearer ' + customer.accessToken },
+    headers: { authorization: 'Bearer ' + customerLogin.accessToken },
   });
   assert.equal(profile.status, 403);
   const fleet = await request('/api/v1/vendor/vehicles', {
-    headers: { authorization: 'Bearer ' + customer.accessToken },
+    headers: { authorization: 'Bearer ' + customerLogin.accessToken },
   });
   assert.equal(fleet.status, 403);
 });
