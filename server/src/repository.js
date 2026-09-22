@@ -483,8 +483,9 @@ export function createRepository({ databaseUrl, fleet }) {
       const client=await pool.connect();
       try {
         await client.query('begin');
-        const vehicleCheck = await client.query('select id, owner_id from vehicles where id=$1 and active=true for share',[input.vehicle.id]);
-        if (!vehicleCheck.rows[0]) { const x=new Error('vehicle unavailable'); x.code='VEHICLE_UNAVAILABLE'; throw x; }
+        const vehicleCheck = await client.query('select id, owner_id, active from vehicles where id=$1 for share',[input.vehicle.id]);
+        if (!vehicleCheck.rows[0]) { const x=new Error('vehicle not found'); x.code='VEHICLE_NOT_FOUND'; throw x; }
+        if (!vehicleCheck.rows[0].active) { const x=new Error('vehicle inactive'); x.code='VEHICLE_INACTIVE'; throw x; }
         if(input.idempotencyKey){
           await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',[`${input.customerId}:${input.idempotencyKey}`]);
           const idem=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2 for share',[input.customerId,input.idempotencyKey]);
