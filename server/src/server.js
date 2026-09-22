@@ -479,6 +479,8 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
   } catch (error) {
     if (error.code === 'IDEMPOTENCY_REPLAY') return res.status(200).json({ data: publicBooking(error.booking), booking: publicBooking(error.booking) });
     if (error.code === 'VEHICLE_UNAVAILABLE') return res.status(409).json({ error: { code: 'VEHICLE_UNAVAILABLE', message: 'This vehicle is unavailable for part of those dates.' } });
+    if (error.code === 'VEHICLE_INACTIVE') return res.status(409).json({ error:{code:'VEHICLE_INACTIVE',message:'This vehicle is not currently available for booking.'} });
+    if (error.code === 'VEHICLE_NOT_FOUND') return res.status(404).json({ error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'} });
     throw error;
   }
 });
