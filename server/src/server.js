@@ -173,10 +173,41 @@ const supabaseRequireAuth = async (req, res, next) => {
       email: user.email,
       fullName: metadata.full_name || metadata.name || user.email.split('@')[0],
     });
-    req.user = { id: ensured.id, role:'customer', supabaseUserId:user.id, email:user.email };
+    const identity = await repository.findCustomerById(ensured.id);
+    if (!identity?.id || !['customer', 'vendor'].includes(identity.role)) {
+      return res.status(403).json({ error:{ code:'ROLE_NOT_CONFIGURED', message:'Your RideOn account does not have a valid role.' } });
+    }
+    req.user = { id: identity.id, name: identity.fullName, email:identity.email || user.email, role:identity.role, supabaseUserId:user.id, vendor:identity.vendor };
+    next();
+  } catch (error) {
+    if (error?.statusCode) return res.status(error.statusCode).json({ error:{ code:error.code, message:error.message } });
+    return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+  }
+};
+
+const requireRole = (...roles) => (req, res, next) => {
+  if (!req.user || !roles.includes(req.user.role)) {
+    return res.status(403).json({ error:{ code:'ROLE_FORBIDDEN', message:'You do not have access to this resource.' } });
+  }
+  next();
+};
+
+const requireCustomer = requireRole('customer');
+
+const requireVendor = async (req, res, next) => {
+  if (!req.user || req.user.role !== 'vendor') {
+    return res.status(403).json({ error:{ code:'ROLE_FORBIDDEN', message:'Vendor access is required.' } });
+  }
+  try {
+    const vendor = req.vendor || await repository.findVendorByCustomerId(req.user.id);
+    if (!vendor) return res.status(403).json({ error:{ code:'VENDOR_NOT_CONFIGURED', message:'No vendor profile is configured for this account.' } });
+    if (['suspended', 'rejected'].includes(vendor.status)) {
+      return res.status(403).json({ error:{ code:'VENDOR_ACCESS_BLOCKED', message:'This vendor account is not currently allowed to access the partner portal.' } });
+    }
+    req.vendor = vendor;
     next();
   } catch {
-    return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+    return res.status(403).json({ error:{ code:'VENDOR_NOT_CONFIGURED', message:'No vendor profile is configured for this account.' } });
   }
 };
 
