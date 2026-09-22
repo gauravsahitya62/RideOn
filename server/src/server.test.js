@@ -334,6 +334,34 @@ test('quote pricing keeps rupees at the API boundary', async () => {
   assert.deepEqual(payload.quote, { vehicleId: 'creta-01', days: 2, rental: 4998, deliveryFee: 199, platformFee: 250, total: 5447, currency: 'INR', currencyUnit: 'rupees' });
 });
 
+
+test('vendor APIs reject anonymous callers', async () => {
+  const response = await request('/api/v1/vendor/vehicles');
+  const payload = await response.json();
+  assert.equal(response.status, 401);
+  assert.equal(payload.error.code, 'AUTH_REQUIRED');
+});
+
+test('vendor endpoints reject legacy customer credentials', async () => {
+  const customer = await register('+911234567900', 'Vendor API Customer');
+  const profile = await request('/api/v1/vendor/me', {
+    headers: { authorization: 'Bearer ' + customer.accessToken },
+  });
+  assert.equal(profile.status, 403);
+  const fleet = await request('/api/v1/vendor/vehicles', {
+    headers: { authorization: 'Bearer ' + customer.accessToken },
+  });
+  assert.equal(fleet.status, 403);
+});
+
+test('customer booking APIs remain customer-role protected', async () => {
+  const anonymous = await request('/api/v1/bookings');
+  assert.equal(anonymous.status, 401);
+  const vehicle = await request('/api/v1/vehicles');
+  assert.equal(vehicle.status, 200);
+});
+
+
 test('payment service validates amount, currency, signature, and ordering', () => {
   const service = createPaymentService({ provider: 'test-provider', webhookSecret: 'test-secret' });
   const parsed = service.parseWebhook({ eventId: 'evt-1', bookingId: 'booking-1', status: 'paid', providerReference: 'pay-1', amountPaise: 544700, currency: 'INR' });
