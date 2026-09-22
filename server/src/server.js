@@ -591,7 +591,7 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, as
 });
 
 app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req,res) => {
-  const payment=await repository.findPaymentByBooking(req.params.id);
+  const payment=await repository.findPaymentById(req.params.id, req.user.id);
   if(!payment) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
   const booking=await repository.getBooking(payment.bookingId, req.user.id);
   if(!booking) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
@@ -604,6 +604,11 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
   if (!payments.verifyWebhook(body, signature)) return res.status(401).json({ error: { code: 'INVALID_WEBHOOK_SIGNATURE' } });
   const event = payments.parseWebhook(req.body, { eventId: req.get('X-Razorpay-Event-Id') || undefined });
   if (!event) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT' } });
+  if (!event.bookingId && event.providerOrderId) {
+    const payment = await repository.findPaymentByProviderOrder(event.providerOrderId);
+    if (payment) event.bookingId = payment.bookingId;
+  }
+  if (!event.bookingId) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT' } });
   const result = await repository.applyPaymentEvent(event);
   if (result.invalid) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT', message: 'Payment event does not match the booking payment.' } });
   res.json({ received: true, applied: result.applied, duplicate: result.duplicate });
