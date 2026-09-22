@@ -543,6 +543,7 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   if (booking.paymentStatus === 'paid') return res.status(409).json({ error: { code: 'REFUND_POLICY_REQUIRED', message: 'This paid booking requires an approved refund policy before cancellation.' } });
+  if (booking.paymentStatus === 'refunded') return res.status(409).json({ error: { code: 'INVALID_PAYMENT_STATE', message: 'A refunded booking cannot be cancelled again.' } });
   try {
     const updated = await repository.cancelBooking(req.params.id, req.user.id);
     if (!updated) return res.status(409).json({ error: { code: 'CANNOT_CANCEL', message: 'This booking can no longer be cancelled.' } });
@@ -587,6 +588,23 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, as
   }catch(error){
     if(error.code==='PAYMENT_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Payment not found.'}});
     if(error.code==='PAYMENT_VERIFICATION_FAILED') return res.status(400).json({error:{code:error.code,message:error.message}});
+    throw error;
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:bookingId/refund', supabaseRequireAuth, requireVendor, async (req,res) => {
+  const payment=await repository.findPaymentByBooking(req.params.bookingId);
+  if(!payment || payment.status!=='paid') return res.status(409).json({error:{code:'INVALID_PAYMENT_STATE',message:'Only a paid booking can enter the refund flow.'}});
+  const booking=await repository.getBooking(req.params.bookingId);
+  if(!booking || String(booking.vendorId||'')!==String(req.vendor.id)) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+  try{
+    const refund=await payments.refundPayment({paymentId:payment.providerPaymentId,amountPaise:payment.amountPaise});
+    const updated=await repository.refundPayment({paymentId:payment.id,providerReference:refund.providerReference,status:'refunded'});
+    return res.json({payment:updated,refund:{id:refund.id,status:'refunded'}});
+  }catch(error){
+    if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:error.code,message:'Payment provider is not configured.'}});
+    if(error.code==='REFUND_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
+    if(error.code==='INVALID_PAYMENT_STATE') return res.status(409).json({error:{code:error.code,message:error.message}});
     throw error;
   }
 });
