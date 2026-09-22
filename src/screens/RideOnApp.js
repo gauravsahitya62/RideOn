@@ -5,18 +5,6 @@ import { rideOnApi, clearStoredAccessToken, persistAccessToken, restoreAccessTok
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const SUPABASE_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
 
-async function supabaseVerifyEmailOtp(email, token) {
-  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) throw new Error('Supabase authentication is not configured in this build.');
-  const response = await fetch(SUPABASE_URL + '/auth/v1/verify', {
-    method:'POST',
-    headers:{apikey:SUPABASE_PUBLISHABLE_KEY, Authorization:'Bearer ' + SUPABASE_PUBLISHABLE_KEY, 'Content-Type':'application/json'},
-    body:JSON.stringify({email, token, type:'email'})
-  });
-  const payload=await response.json().catch(()=>({}));
-  if(!response.ok) throw new Error(payload?.msg||payload?.error_description||'The verification code is invalid or expired.');
-  return payload;
-}
-
 import VehicleDetailScreen from './VehicleDetailScreen';
 import { LocationSelector, AddressForm, SavedAddressPicker, DeliverySelector, CheckoutSummary, PaymentMethodSelector, BookingConfirmation } from '../components';
 
@@ -100,7 +88,7 @@ useEffect(()=>{if(!authenticatedUser)return;setAccessToken(authenticatedUser.tok
  const [accountMode,setAccountMode]=useState('signedIn');
  const [profile,setProfile]=useState({name:'',phone:'',email:''});
  const [draftProfile,setDraftProfile]=useState({name:'',phone:'',email:'',password:''});
- const [authMode,setAuthMode]=useState('login'); const [licence,setLicence]=useState({number:'',expiry:'',attachment:'',status:'Not added'});
+ const [licence,setLicence]=useState({number:'',expiry:'',attachment:'',status:'Not added'});
  const [draftLicence,setDraftLicence]=useState({number:'',expiry:'',attachment:'',status:'Not added'});
  const [addresses,setAddresses]=useState([]);
  const [draftAddress,setDraftAddress]=useState({label:'',recipient:'',phone:'',street:'',area:'',city:'Jaipur',postalCode:''});
