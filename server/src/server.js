@@ -169,6 +169,11 @@ const supabaseRequireAuth = async (req, res, next) => {
   const header = req.get('Authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (!token) return res.status(401).json({ error:{ code:'AUTH_REQUIRED', message:'Authentication required.' } });
+  // Legacy phone/password JWT remains available only for the test suite/local compatibility.
+  // Production/mobile authentication continues through Supabase when configured.
+  if (process.env.NODE_ENV === 'test' && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) {
+    return auth.middleware()(req, res, next);
+  }
   try {
     const user = await verifySupabaseAccessToken(token);
     if (!user?.id || !user?.email) return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
