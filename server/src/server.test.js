@@ -631,6 +631,18 @@ test('duplicate webhook event is idempotent in memory payment state', async () =
   assert.equal((await second).duplicate,true);
 });
  
+test('mock payment provider creates deterministic orders without network access', async () => {
+  const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
+  const order=await service.createOrder({receipt:'booking-1',amountPaise:544700,currency:'INR'});
+  assert.equal(order.id,'mock_order_booking-1');
+  assert.equal(order.amountPaise,544700);
+  const refund=await service.refundPayment({paymentId:'pay-1',amountPaise:544700});
+  assert.equal(refund.providerReference,'pay-1');
+  const body=JSON.stringify({eventId:'evt-mock'});
+  const signature=crypto.createHmac('sha256','mock-secret').update(body).digest('hex');
+  assert.equal(service.verifyWebhook(body,signature),true);
+});
+
 test('payment service validates amount, currency, signature, and ordering', () => {
   const service = createPaymentService({ provider: 'razorpay', keyId:'key', keySecret:'secret', webhookSecret: 'test-secret' });
   const parsed = service.parseWebhook({ eventId: 'evt-1', bookingId: 'booking-1', status: 'paid', providerReference: 'pay-1', amountPaise: 544700, currency: 'INR' });
