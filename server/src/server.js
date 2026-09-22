@@ -41,11 +41,16 @@ function normalizeBookingInput(body = {}) {
 }
 
 function pricing(vehicle, startAt, endAt, delivery) {
-  const days = Math.max(1, Math.ceil((new Date(endAt) - new Date(startAt)) / 86400000));
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  const durationMs = end.getTime() - start.getTime();
+  const days = Math.max(1, Math.ceil(durationMs / 86400000));
   const rental = vehicle.pricePerDay * days;
   const deliveryFee = delivery ? 199 : 0;
   const platformFee = Math.round(rental * 0.05);
-  return { days, rental, deliveryFee, platformFee, total: rental + deliveryFee + platformFee, currency: 'INR', currencyUnit: 'rupees' };
+  const securityDeposit = Number(vehicle.securityDeposit || 0);
+  const total = rental + deliveryFee + platformFee + securityDeposit;
+  return { days, rental, deliveryFee, platformFee, securityDeposit, total, currency: 'INR', currencyUnit: 'rupees' };
 }
 
 const mobileVehicle = (v) => ({
@@ -411,16 +416,39 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
   res.json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
 
+app.get('/api/v1/vehicles/:id/availability', supabaseRequireAuth, requireCustomer, async (req, res) => {
+  const schema = z.object({
+    startAt: z.string().datetime(),
+    endAt: z.string().datetime(),
+  }).refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt' });
+  const parsed = schema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ error:{ code:'INVALID_BOOKING_WINDOW', message:'Provide valid ISO startAt and endAt timestamps.', details:parsed.error.flatten() } });
+  const vehicle = await repository.getVehicle(req.params.id);
+  if (!vehicle) return res.status(404).json({ error:{ code:'VEHICLE_NOT_FOUND', message:'Vehicle not found.' } });
+  try {
+    const availability = await repository.checkVehicleAvailability(vehicle.id, parsed.data.startAt, parsed.data.endAt);
+    res.json(availability);
+  } catch (error) {
+    if(error.code==='INVALID_BOOKING_WINDOW') return res.status(400).json({ error:{code:error.code,message:'The booking window is invalid.'} });
+    throw error;
+  }
+});
+
 app.post('/api/v1/bookings/quote', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const normalized = normalizeBookingInput(req.body);
   const schema = z.object({ vehicleId: z.string(), startAt: z.string().datetime(), endAt: z.string().datetime(), delivery: z.boolean().default(true) })
     .refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt' });
   const parsed = schema.safeParse(normalized);
-  if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', details: parsed.error.flatten() } });
+  if (!parsed.success) return res.status(400).json({ error: { code: 'INVALID_BOOKING_WINDOW', message:'Please check the booking window.', details: parsed.error.flatten() } });
   const vehicle = await repository.getVehicle(parsed.data.vehicleId);
   if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND' } });
-  const unavailable = await repository.isVehicleUnavailable(vehicle.id, parsed.data.startAt, parsed.data.endAt);
-  if (unavailable) return res.status(409).json({ error: { code: 'VEHICLE_UNAVAILABLE', message: 'This vehicle already has a booking request for part of those dates.' } });
+  try {
+    const availability = await repository.checkVehicleAvailability(vehicle.id, parsed.data.startAt, parsed.data.endAt);
+    if (!availability.available) return res.status(409).json({ error:{ code:'VEHICLE_UNAVAILABLE', message:'This vehicle is unavailable for the selected dates.' } });
+  } catch (error) {
+    if(error.code==='INVALID_BOOKING_WINDOW') return res.status(400).json({ error:{code:error.code,message:'The booking window is invalid.'} });
+    throw error;
+  }
   const quote = { vehicleId: vehicle.id, ...pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery) };
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
 });
