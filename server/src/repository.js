@@ -453,9 +453,29 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function isVehicleUnavailable(vehicleId,startAt,endAt) {
-    if (!useDatabase) return [...memory.bookings.values()].some(b=>b.vehicleId===vehicleId&&['requested','confirmed','in_progress'].includes(b.status)&&new Date(startAt)<new Date(b.endAt)&&new Date(endAt)>new Date(b.startAt));
-    const {rows}=await pool.query('select 1 from bookings where vehicle_id=$1 and status in (\'requested\',\'confirmed\',\'in_progress\') and start_at<$3 and end_at>$2 limit 1',[vehicleId,startAt,endAt]);
-    return rows.length>0;
+    return !(await checkVehicleAvailability(vehicleId,startAt,endAt)).available;
+  }
+
+  async function checkVehicleAvailability(vehicleId,startAt,endAt) {
+    const start = new Date(startAt);
+    const end = new Date(endAt);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+      const e = new Error('invalid booking window');
+      e.code = 'INVALID_BOOKING_WINDOW';
+      throw e;
+    }
+    if (!useDatabase) {
+      const vehicle = memory.vehicles.get(vehicleId) || fleet.find(v => v.id === vehicleId);
+      if (!vehicle) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
+      if (vehicle.active === false) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
+      const overlap = [...memory.bookings.values()].some(b => b.vehicleId===vehicleId && ['requested','confirmed','in_progress'].includes(b.status) && start < new Date(b.endAt) && end > new Date(b.startAt));
+      return { vehicleId:String(vehicleId), exists:true, active:true, available:!overlap };
+    }
+    const vehicleResult = await pool.query('select id,active from vehicles where id=$1',[vehicleId]);
+    if (!vehicleResult.rows[0]) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
+    if (!vehicleResult.rows[0].active) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
+    const bookingResult = await pool.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",[vehicleId,startAt,endAt]);
+    return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0 };
   }
 
   async function createBooking(input) {
