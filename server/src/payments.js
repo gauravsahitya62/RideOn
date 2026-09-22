@@ -28,7 +28,7 @@ export function createPaymentService({
   const razorpayConfigured = razorpayPaymentConfigured && Boolean(webhookSecret);
 
   function verifyWebhook(body, signature) {
-    if (!configured || !webhookSecret || !signature) return false;
+    if (selectedProvider !== 'razorpay' || !webhookSecret || !signature) return false;
     const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
     const given = String(signature).trim();
     const a = Buffer.from(expected, 'utf8');
