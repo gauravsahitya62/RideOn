@@ -342,6 +342,15 @@ test('vendor APIs reject anonymous callers', async () => {
   assert.equal(payload.error.code, 'AUTH_REQUIRED');
 });
 
+test('customer identity exposes the existing current-user contract', async () => {
+  const customer = await register('+911234567901', 'Current User Contract');
+  const response = await request('/api/v1/me', { headers:{ authorization:'Bearer ' + customer.accessToken } });
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.ok(payload.customer);
+  assert.ok(payload.customer.id);
+});
+
 test('vendor endpoints reject legacy customer credentials', async () => {
   const customer = await register('+911234567900', 'Vendor API Customer');
   const profile = await request('/api/v1/vendor/me', {
