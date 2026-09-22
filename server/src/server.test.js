@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import crypto from 'node:crypto';
+import jwt from 'jsonwebtoken';
 import { createPaymentService } from './payments.js';
 
 process.env.NODE_ENV = 'test';
@@ -463,6 +464,76 @@ test('inactive vehicle cannot be checked or booked', async () => {
   },login.accessToken,{ 'Idempotency-Key':'inactive-booking-1' });
   assert.equal(booking.status,409);
   assert.equal((await booking.json()).error.code,'VEHICLE_INACTIVE');
+});
+
+test('vendor booking lifecycle is isolated and customer-visible', async () => {
+  const customer = await register('+911234567915', 'Lifecycle Customer');
+  const customerLogin = await legacyLogin('+911234567915');
+  const vendorCustomer = await register('+911234567916', 'Vendor A User');
+  const otherVendorCustomer = await register('+911234567917', 'Vendor B User');
+
+  const vendorA = await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const vendorB = await repository.ensureVendorForCustomer(otherVendorCustomer.customer.id);
+  const vehicleA = await repository.createVendorVehicle(vendorA.id, {
+    type:'car', name:'Vendor A Car', make:'Test', model:'A', year:2034, city:'Jaipur',
+    dailyRate:1200, securityDeposit:500, transmission:'Manual', fuel:'Petrol', seats:5,
+    registrationNumber:'RJ14LIFE001', description:'Lifecycle test vehicle', imageUrls:[], deliveryAvailable:true, active:true,
+  });
+  await repository.createVendorVehicle(vendorB.id, {
+    type:'car', name:'Vendor B Car', make:'Test', model:'B', year:2034, city:'Jaipur',
+    dailyRate:1300, securityDeposit:500, transmission:'Manual', fuel:'Petrol', seats:5,
+    registrationNumber:'RJ14LIFE002', description:'Other lifecycle vehicle', imageUrls:[], deliveryAvailable:true, active:true,
+  });
+
+  const bookingResponse = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:vehicleA.id,
+    startAt:'2036-06-10T10:00:00.000Z',
+    endAt:'2036-06-11T10:00:00.000Z',
+    delivery:false,
+    address:'15 Vendor Lifecycle Road, Jaipur',
+  },customerLogin.accessToken,{ 'Idempotency-Key':'vendor-lifecycle-1' });
+  assert.equal(bookingResponse.status,201);
+  const bookingId = (await bookingResponse.json()).booking.bookingId;
+
+  const vendorAToken = jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorBToken = jwt.sign({sub:otherVendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+
+  const ownList = await request('/api/v1/vendor/bookings',{headers:{authorization:'Bearer '+vendorAToken}});
+  assert.equal(ownList.status,200);
+  assert.equal((await ownList.json()).bookings.length,1);
+
+  const foreignDetail = await request('/api/v1/vendor/bookings/'+bookingId,{headers:{authorization:'Bearer '+vendorBToken}});
+  assert.equal(foreignDetail.status,404);
+
+  const customerTransition = await request('/api/v1/vendor/bookings/'+bookingId+'/status',{
+    method:'PATCH',
+    headers:{authorization:'Bearer '+customerLogin.accessToken,'content-type':'application/json'},
+    body:JSON.stringify({status:'confirmed'}),
+  });
+  assert.equal(customerTransition.status,403);
+
+  const confirm = await jsonRequest('/api/v1/vendor/bookings/'+bookingId+'/status','PATCH',{status:'confirmed'},vendorAToken);
+  assert.equal(confirm.status,200);
+  assert.equal((await confirm.json()).booking.status,'confirmed');
+
+  const customerDetail = await request('/api/v1/bookings/'+bookingId,{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  assert.equal(customerDetail.status,200);
+  assert.equal((await customerDetail.json()).booking.status,'confirmed');
+
+  const invalidTransition = await jsonRequest('/api/v1/vendor/bookings/'+bookingId+'/status','PATCH',{status:'rejected'},vendorAToken);
+  assert.equal(invalidTransition.status,409);
+
+  const start = await jsonRequest('/api/v1/vendor/bookings/'+bookingId+'/status','PATCH',{status:'in_progress'},vendorAToken);
+  assert.equal(start.status,200);
+  const complete = await jsonRequest('/api/v1/vendor/bookings/'+bookingId+'/status','PATCH',{status:'completed'},vendorAToken);
+  assert.equal(complete.status,200);
+  assert.equal((await complete.json()).booking.status,'completed');
+
+  const cancelled = await request('/api/v1/bookings/'+bookingId+'/cancel',{
+    method:'PATCH',
+    headers:{authorization:'Bearer '+customerLogin.accessToken},
+  });
+  assert.equal(cancelled.status,409);
 });
 
 test('vendor APIs reject anonymous callers', async () => {
