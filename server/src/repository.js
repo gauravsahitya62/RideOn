@@ -12,7 +12,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), vendors:new Map(), vehicles:new Map() };
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map() };
 
   const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
@@ -554,14 +554,6 @@ export function createRepository({ databaseUrl, fleet }) {
     }catch(e){await client.query('rollback');throw e;}finally{client.release();}
   }
   async function applyPaymentEvent(event){
-    const canTransition = (current, next) => {
-      if (current === next) return true;
-      if (current === 'unpaid') return next === 'pending' || next === 'failed';
-      if (current === 'pending') return next === 'paid' || next === 'failed';
-      if (current === 'failed') return next === 'pending';
-      if (current === 'paid') return next === 'refunded';
-      return false;
-    };
     if (!useDatabase) {
       if (memory.paymentEvents.has(event.eventId)) return { applied:false, duplicate:true };
       const booking = memory.bookings.get(event.bookingId);
@@ -573,6 +565,8 @@ export function createRepository({ databaseUrl, fleet }) {
       memory.paymentEvents.set(event.eventId, event);
       booking.paymentStatus = event.status;
       booking.paymentProviderReference = event.providerReference;
+      const payment = memory.payments.get(String(event.bookingId));
+      if (payment) { payment.status = event.status; payment.providerReference = event.providerReference; payment.providerPaymentId = event.providerReference; payment.updatedAt = new Date().toISOString(); }
       booking.updatedAt = new Date().toISOString();
       return { applied:true, duplicate:false };
     }
@@ -589,12 +583,13 @@ export function createRepository({ databaseUrl, fleet }) {
         await client.query('rollback');
         return { applied:false, duplicate:false, invalid:true };
       }
-      const inserted = await client.query('insert into payment_events (provider_event_id,booking_id,status,provider_reference,received_at) values ($1,$2,$3,$4,now()) on conflict (provider_event_id) do nothing returning id',[event.eventId,event.bookingId,event.status,event.providerReference]);
+      const inserted = await client.query('insert into payment_events (provider_event_id,booking_id,status,provider_reference,amount_paise,currency,provider_order_id,received_at) values ($1,$2,$3,$4,$5,$6,$7,now()) on conflict (provider_event_id) do nothing returning id',[event.eventId,event.bookingId,event.status,event.providerReference,event.amountPaise,event.currency,event.providerOrderId||null]);
       if (!inserted.rows[0]) {
         await client.query('commit');
         return { applied:false, duplicate:true };
       }
       await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[event.bookingId,event.status,event.providerReference]);
+      await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where booking_id=$1',[event.bookingId,event.status,event.providerReference,event.providerOrderId||null]);
       await client.query('commit');
       return { applied:true, duplicate:false };
     } catch(e) {
@@ -744,5 +739,5 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
+  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,findPaymentByBooking,createOrGetPaymentOrder,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
 }
