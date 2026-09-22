@@ -14,7 +14,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }) : null;
   const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), vendors:new Map(), vehicles:new Map() };
 
-  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
+  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
     if (!row) return null;
     const vehicle = row.vehicle || fleet.find((v) => v.id === row.vehicle_id);
@@ -34,6 +34,7 @@ export function createRepository({ databaseUrl, fleet }) {
         rental:Number(row.rental_total ?? ((row.rental_total_paise ?? 0) / 100)),
         deliveryFee:Number(row.delivery_fee ?? ((row.delivery_fee_paise ?? 0) / 100)),
         platformFee:Number(row.platform_fee ?? ((row.platform_fee_paise ?? 0) / 100)),
+        securityDeposit:Number(row.security_deposit ?? ((row.security_deposit_paise ?? 0) / 100)),
         total:Number(row.total ?? ((row.total_paise ?? 0) / 100)),
         currency:'INR'
       },
@@ -60,8 +61,8 @@ export function createRepository({ databaseUrl, fleet }) {
       const typeValue = type?.toLowerCase();
       const cityValue = city?.toLowerCase();
       const qValue = q?.toLowerCase();
-      return fleet.filter((v) =>
-        v.active &&
+      return [...fleet, ...memory.vehicles.values()].filter((v) =>
+        v.active !== false &&
         (!typeValue || typeValue === 'all' || String(v.type).toLowerCase() === typeValue) &&
         (!cityValue || String(v.city).toLowerCase() === cityValue) &&
         (!qValue || `${v.name} ${v.subtitle || ''}`.toLowerCase().includes(qValue))
@@ -114,7 +115,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function getVehicle(id) {
-    if (!useDatabase) return fleet.find((v) => v.id === id && v.active) || null;
+    if (!useDatabase) return [...fleet, ...memory.vehicles.values()].find((v) => v.id === id && v.active !== false) || null;
     const { rows } = await pool.query(
       'select id, owner_id, type, name, make, model, year, city, daily_rate_paise, security_deposit_paise, active, transmission, fuel, seats, description, image_urls, delivery_available from vehicles where id = $1 and active = true',
       [id]
@@ -483,15 +484,15 @@ export function createRepository({ databaseUrl, fleet }) {
       const client=await pool.connect();
       try {
         await client.query('begin');
-        const vehicleCheck = await client.query('select id, owner_id, active from vehicles where id=$1 for share',[input.vehicle.id]);
-        if (!vehicleCheck.rows[0]) { const x=new Error('vehicle not found'); x.code='VEHICLE_NOT_FOUND'; throw x; }
-        if (!vehicleCheck.rows[0].active) { const x=new Error('vehicle inactive'); x.code='VEHICLE_INACTIVE'; throw x; }
         if(input.idempotencyKey){
           await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',[`${input.customerId}:${input.idempotencyKey}`]);
           const idem=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2 for share',[input.customerId,input.idempotencyKey]);
           if(idem.rows[0]){await client.query('commit');const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=mapBooking({...idem.rows[0],vehicle:input.vehicle});throw x;}
         }
-        const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_fee_paise,rental_total_paise,platform_fee_paise,total_paise,status,payment_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,\'requested\',\'unpaid\',$12) returning *',[input.customerId,input.vehicle.id,vehicleCheck.rows[0].owner_id||null,input.startAt,input.endAt,input.delivery,input.address,Math.round(input.pricing.deliveryFee * 100),Math.round(input.pricing.rental * 100),Math.round(input.pricing.platformFee * 100),Math.round(input.pricing.total * 100),input.notes||null]);
+        const vehicleCheck = await client.query('select id, owner_id, active from vehicles where id=$1 for share',[input.vehicle.id]);
+        if (!vehicleCheck.rows[0]) { const x=new Error('vehicle not found'); x.code='VEHICLE_NOT_FOUND'; throw x; }
+        if (!vehicleCheck.rows[0].active) { const x=new Error('vehicle inactive'); x.code='VEHICLE_INACTIVE'; throw x; }
+        const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,\'requested\',\'unpaid\',$12) returning *',[input.customerId,input.vehicle.id,vehicleCheck.rows[0].owner_id||null,input.startAt,input.endAt,input.delivery,input.address,Math.round(input.pricing.deliveryFee * 100),Math.round(input.pricing.rental * 100),Math.round(input.pricing.platformFee * 100),Math.round((input.pricing.securityDeposit||0) * 100),Math.round(input.pricing.total * 100),input.notes||null]);
         if(input.idempotencyKey) await client.query('insert into booking_idempotency_keys (customer_id,idempotency_key,booking_id) values ($1,$2,$3)',[input.customerId,input.idempotencyKey,rows[0].id]);
         await client.query('insert into booking_status_events (booking_id,next_status,actor_type,actor_id) values ($1,\'requested\',\'customer\',$2)',[rows[0].id,input.customerId]);
         await client.query('commit');
