@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View, Modal, Switch, KeyboardAvoidingView, Platform } from 'react-native';
-import RazorpayCheckout from 'react-native-razorpay';
 import { rideOnApi, clearStoredAccessToken, persistAccessToken, restoreAccessToken, setAccessToken } from '../services/api';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
@@ -136,6 +135,7 @@ export default function RideOnApp({ authenticatedUser, onLogout }) {
      };
      let callback;
      try{
+       const RazorpayCheckout = require('react-native-razorpay').default || require('react-native-razorpay');
        callback=await RazorpayCheckout.open(options);
      }catch(nativeError){
        throw Object.assign(new Error(nativeError?.description||nativeError?.message||'Payment checkout could not be opened.'),{code:nativeError?.code||'PAYMENT_CHECKOUT_FAILED'});
