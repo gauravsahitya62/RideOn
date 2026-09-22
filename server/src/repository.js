@@ -14,7 +14,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }) : null;
   const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map() };
 
-  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
+  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
     if (!row) return null;
     const vehicle = row.vehicle || fleet.find((v) => v.id === row.vehicle_id);
@@ -132,20 +132,20 @@ export function createRepository({ databaseUrl, fleet }) {
       const existingByEmail = await findCustomerByEmail(email);
       if (existingByEmail) {
         await pool.query('update customers set supabase_user_id=$2, email=coalesce(email,$3), full_name=coalesce(full_name,$4), updated_at=now() where id=$1',[existingByEmail.id,supabaseUserId,email,fullName]);
-        return { ...existingByEmail, supabaseUserId };
+        return { ...existingByEmail, supabaseUserId, role: existingByEmail.role || 'customer' };
       }
       const phone = 'supabase-' + supabaseUserId;
-      const { rows } = await pool.query('insert into customers(full_name,phone,email,password_hash,supabase_user_id) values($1,$2,$3,$4,$5) returning id,full_name,phone,email,supabase_user_id',[fullName,phone,email,'supabase-auth-managed',supabaseUserId]);
+      const { rows } = await pool.query('insert into customers(full_name,phone,email,password_hash,supabase_user_id,role) values($1,$2,$3,$4,$5,'customer') returning id,full_name,phone,email,supabase_user_id,role',[fullName,phone,email,'supabase-auth-managed',supabaseUserId]);
       return mapCustomer(rows[0]);
     }
     const existing=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(supabaseUserId)||String(v.email||'').toLowerCase()===String(email).toLowerCase());
-    if(existing){existing.supabaseUserId=supabaseUserId;existing.email=email;existing.fullName=existing.fullName||fullName;return {id:existing.id,fullName:existing.fullName,phone:existing.phone,email:existing.email,supabaseUserId};}
-    const id=crypto.randomUUID(); const phone='supabase-'+supabaseUserId; memory.customers.set(id,{id,fullName,phone,email,passwordHash:'supabase-auth-managed',supabaseUserId}); return {id,fullName,phone,email,supabaseUserId};
+    if(existing){existing.supabaseUserId=supabaseUserId;existing.email=email;existing.fullName=existing.fullName||fullName;return {id:existing.id,fullName:existing.fullName,phone:existing.phone,email:existing.email,role:existing.role||'customer',supabaseUserId};}
+    const id=crypto.randomUUID(); const phone='supabase-'+supabaseUserId; memory.customers.set(id,{id,fullName,phone,email,passwordHash:'supabase-auth-managed',role:'customer',supabaseUserId}); return {id,fullName,phone,email,role:'customer',supabaseUserId};
   }
 
   async function findCustomerBySupabaseUserId(id) {
-    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,supabaseUserId:c.supabaseUserId}:null; }
-    const { rows } = await pool.query('select id,full_name,phone,email,supabase_user_id from customers where supabase_user_id=$1',[id]);
+    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,role:c.role||'customer',supabaseUserId:c.supabaseUserId}:null; }
+    const { rows } = await pool.query('select id,full_name,phone,email,role,supabase_user_id from customers where supabase_user_id=$1',[id]);
     return rows[0]?mapCustomer(rows[0]):null;
   }
 
@@ -161,8 +161,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function findCustomerByPhone(phone) {
-    if (useDatabase) { const {rows}=await pool.query('select id,full_name,phone,email,password_hash from customers where phone=$1',[phone]); return rows[0]?{...mapCustomer(rows[0]),passwordHash:rows[0].password_hash}:null; }
-    const c=[...memory.customers.values()].find(v=>v.phone===phone); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,passwordHash:c.passwordHash}:null;
+    if (useDatabase) { const {rows}=await pool.query('select id,full_name,phone,email,password_hash,role from customers where phone=$1',[phone]); return rows[0]?{...mapCustomer(rows[0]),passwordHash:rows[0].password_hash}:null; }
+    const c=[...memory.customers.values()].find(v=>v.phone===phone); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,role:c.role||'customer',passwordHash:c.passwordHash}:null;
   }
 
   async function isVehicleUnavailable(vehicleId,startAt,endAt) {
@@ -270,20 +270,32 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function findCustomerByEmail(email) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where lower(email)=lower($1)', [email]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role from customers where lower(email)=lower($1)', [email]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = [...memory.customers.values()].find(v => String(v.email || '').toLowerCase() === String(email).toLowerCase());
-    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash } : null;
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, role:c.role||'customer', passwordHash:c.passwordHash } : null;
   }
 
   async function findCustomerById(id) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where id=$1', [id]);
-      return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
+      const { rows } = await pool.query(`select c.id,c.full_name,c.phone,c.email,c.password_hash,c.role,
+        case when v.id is not null then json_build_object('id',v.id,'businessName',v.business_name,'status',v.status,'serviceCity',v.service_city) end as vendor
+        from customers c left join vendors v on v.owner_customer_id=c.id where c.id=$1`, [id]);
+      return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash, vendor: rows[0].vendor || undefined } : null;
     }
     const c = memory.customers.get(id);
-    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash } : null;
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, role:c.role||'customer', passwordHash:c.passwordHash, vendor:c.vendor } : null;
+  }
+
+  async function findVendorByCustomerId(customerId) {
+    if (useDatabase) {
+      const { rows } = await pool.query('select id,owner_customer_id,business_name,contact_name,support_phone,support_email,status,service_city,service_area from vendors where owner_customer_id=$1',[customerId]);
+      if (!rows[0]) return null;
+      const r=rows[0];
+      return {id:String(r.id),ownerCustomerId:String(r.owner_customer_id),businessName:r.business_name,contactName:r.contact_name,supportPhone:r.support_phone,supportEmail:r.support_email,status:r.status,serviceCity:r.service_city,serviceArea:r.service_area};
+    }
+    return memory.customers.get(customerId)?.vendor || null;
   }
 
   async function createOtp({ customerId = null, channel, destination, codeHash, expiresAt }) {
@@ -312,5 +324,5 @@ export function createRepository({ databaseUrl, fleet }) {
     if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
   }
 
-  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt};
+  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt};
 }

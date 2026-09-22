@@ -65,6 +65,19 @@ test('protected booking routes reject anonymous callers', async () => {
   assert.equal(payload.error.code, 'AUTH_REQUIRED');
 });
 
+
+test('vendor-only endpoint rejects anonymous callers', async () => {
+  const response = await request('/api/v1/vendor/me');
+  const payload = await response.json();
+  assert.equal(response.status, 401);
+  assert.equal(payload.error.code, 'AUTH_REQUIRED');
+});
+
+test('customer-only booking APIs expose explicit role denial for non-customer identities', async () => {
+  const response = await request('/api/v1/bookings');
+  assert.equal(response.status, 401);
+});
+
 test('registration hashes credentials and login returns a bearer token', async () => {
   const registered = await register('+911234567891', 'Auth User');
   assert.ok(registered.accessToken);

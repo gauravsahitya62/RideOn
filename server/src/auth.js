@@ -13,8 +13,8 @@ export function createAuth({ jwtSecret, accessTokenTtlSeconds = 3600, bcryptRoun
     if (!token) return res.status(401).json({ error: { code: 'AUTH_REQUIRED', message: 'Authentication required.' } });
     try {
       const payload = jwt.verify(token, secret);
-      if (!payload?.sub || payload.role !== 'customer') throw new Error('invalid claims');
-      req.user = { id: String(payload.sub), role: 'customer' };
+      if (!payload?.sub || !['customer', 'vendor'].includes(payload.role)) throw new Error('invalid claims');
+      req.user = { id: String(payload.sub), role: payload.role };
       next();
     } catch {
       return res.status(401).json({ error: { code: 'INVALID_TOKEN', message: 'Session is invalid or expired.' } });
