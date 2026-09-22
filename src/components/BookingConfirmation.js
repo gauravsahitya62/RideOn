@@ -5,8 +5,8 @@ const money=value=>`₹${Number(value||0).toLocaleString('en-IN')}`;
 export default function BookingConfirmation({booking,vehicle,onTrips,onExplore}){
  const pricing=booking?.pricing||{};
  return <View style={styles.page}>
-  <Text style={styles.icon}>✓</Text><Text style={styles.title}>Booking request received</Text>
-  <Text style={styles.sub}>The RideOn server accepted your booking request. This does not indicate that a payment was processed.</Text>
+  <Text style={styles.icon}>✓</Text><Text style={styles.title}>{booking?.paymentStatus==='paid'?'Payment confirmed':'Booking request received'}</Text>
+  <Text style={styles.sub}>{booking?.paymentStatus==='paid'?'Your payment was confirmed by the RideOn backend. Vendor confirmation remains a separate booking state.':'The RideOn server accepted your booking request. Payment has not been confirmed as paid.'}</Text>
   <View style={styles.card}><Text style={styles.kicker}>BOOKING REFERENCE</Text><Text style={styles.reference}>{booking?.bookingId||booking?.id||'—'}</Text>
    {vehicle?.name||booking?.vehicleName?<Text style={styles.rowText}>{vehicle?.name||booking?.vehicleName}</Text>:null}
    {booking?.status?<Line label="Status" value={booking.status}/>:null}{booking?.paymentStatus?<Line label="Payment status" value={booking.paymentStatus}/>:null}
