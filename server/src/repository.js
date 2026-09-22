@@ -729,7 +729,7 @@ export function createRepository({ databaseUrl, fleet }) {
     }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
   }
 
-  async function refundPayment({ paymentId, customerId, providerReference, amountPaise, status='refunded' }) {
+  async function refundPayment({ paymentId, customerId = null, providerReference, amountPaise, status='refunded' }) {
     if (!useDatabase) {
       const p=[...(memory.payments?.values()||[])].find(x=>x.id===String(paymentId));
       if(!p){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
@@ -738,7 +738,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query('select p.*,b.customer_id from payments p join bookings b on b.id=p.booking_id where p.id=$1 and b.customer_id=$2 for update',[paymentId,customerId||null]);
+      const {rows}=await client.query('select p.*,b.customer_id from payments p join bookings b on b.id=p.booking_id where p.id=$1 and ($2::uuid is null or b.customer_id=$2) for update',[paymentId,customerId]);
       if(!rows[0]){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
       if(rows[0].status!=='paid'){const e=new Error('Payment is not refundable in its current state.');e.code='INVALID_PAYMENT_STATE';throw e;}
       await client.query("update payments set status='refunded',provider_reference=$2,updated_at=now() where id=$1",[paymentId,providerReference]);
