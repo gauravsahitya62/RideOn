@@ -28,7 +28,7 @@ export function createPaymentService({
   const razorpayConfigured = razorpayPaymentConfigured && Boolean(webhookSecret);
 
   function verifyWebhook(body, signature) {
-    if (selectedProvider !== 'razorpay' || !webhookSecret || !signature) return false;
+    if (!['razorpay','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
     const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
     const given = String(signature).trim();
     const a = Buffer.from(expected, 'utf8');
@@ -115,6 +115,12 @@ export function createPaymentService({
   }
 
   async function createOrder({ receipt, amountPaise, currency = 'INR', notes = {} } = {}) {
+    if (selectedProvider === 'mock') {
+      if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
+        const error = new Error('Invalid payment amount or currency.'); error.code = 'PAYMENT_CREATION_FAILED'; throw error;
+      }
+      return { id: `mock_order_${String(receipt)}`, amountPaise:Number(amountPaise), currency:'INR', status:'created', provider:'mock' };
+    }
     if (!razorpayPaymentConfigured) {
       const error = new Error('Payment provider is not configured.');
       error.code = 'PAYMENT_NOT_CONFIGURED';
@@ -168,6 +174,7 @@ export function createPaymentService({
   }
 
   async function refundPayment({ paymentId, amountPaise } = {}) {
+    if (selectedProvider === 'mock') return { id:`mock_refund_${String(paymentId)}`, providerReference:String(paymentId) };
     if (!razorpayPaymentConfigured) {
       const error = new Error('Payment provider is not configured.');
       error.code = 'PAYMENT_NOT_CONFIGURED';
