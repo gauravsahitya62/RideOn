@@ -621,6 +621,7 @@ test('duplicate webhook event is idempotent in memory payment state', async () =
   const configured=createPaymentService({provider:'razorpay',keyId:'k',keySecret:'s',webhookSecret:'webhook-secret'});
   const body=JSON.stringify(payload);
   const signature=crypto.createHmac('sha256','webhook-secret').update(body).digest('hex');
+  assert.ok(signature);
   const customerIdentity=await repository.findCustomerByPhone('+911234568001');
   await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customerIdentity.id,provider:'razorpay',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'order-duplicate',amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
   // This unit-level application path proves duplicate protection without mutating global server env.
