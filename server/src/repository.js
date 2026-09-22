@@ -106,6 +106,27 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function getVehicle(id) {
+    if (!useDatabase) return fleet.find((v) => v.id === id && v.active) || null;
+    const { rows } = await pool.query(
+      'select id, type, name, city, daily_rate_paise, active, transmission, fuel, seats from vehicles where id = $1 and active = true',
+      [id]
+    );
+    if (!rows[0]) return null;
+    const row = rows[0];
+    return {
+      id: String(row.id),
+      type: String(row.type),
+      name: row.name,
+      subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
+      pricePerDay: Number(row.daily_rate_paise || 0) / 100,
+      city: row.city,
+      seats: row.seats == null ? null : Number(row.seats),
+      transmission: row.transmission || null,
+      fuel: row.fuel || null,
+      active: Boolean(row.active),
+    };
+  }
+
   const mapVendor = (row) => row && ({
     id: String(row.id),
     ownerCustomerId: String(row.owner_customer_id),
