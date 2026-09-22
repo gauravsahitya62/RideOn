@@ -346,6 +346,23 @@ export function createRepository({ databaseUrl, fleet }) {
     if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
   }
 
+  async function getCustomerPreferences({customerId}) {
+    if(!useDatabase) return {bookingUpdates:true,reminders:true,offers:false,marketing:false};
+    const {rows}=await pool.query('select booking_updates as "bookingUpdates",reminders,offers,marketing from customer_preferences where customer_id=$1',[customerId]);
+    return rows[0]||{bookingUpdates:true,reminders:true,offers:false,marketing:false};
+  }
+  async function updateCustomerPreferences({customerId,bookingUpdates,reminders,offers,marketing}) {
+    if(!useDatabase) return {bookingUpdates:Boolean(bookingUpdates??true),reminders:Boolean(reminders??true),offers:Boolean(offers??false),marketing:Boolean(marketing??false)};
+    const {rows}=await pool.query(`insert into customer_preferences(customer_id,booking_updates,reminders,offers,marketing) values($1,coalesce($2,true),coalesce($3,true),coalesce($4,false),coalesce($5,false))
+      on conflict(customer_id) do update set booking_updates=coalesce($2,customer_preferences.booking_updates),reminders=coalesce($3,customer_preferences.reminders),offers=coalesce($4,customer_preferences.offers),marketing=coalesce($5,customer_preferences.marketing),updated_at=now()
+      returning booking_updates as "bookingUpdates",reminders,offers,marketing`,[customerId,bookingUpdates,reminders,offers,marketing]);
+    return rows[0];
+  }
+  async function createSupportRequest({customerId,name,contact,topic,message}) {
+    if(!useDatabase) return {id:crypto.randomUUID(),customerId,name,contact,topic,message,status:'open',createdAt:new Date().toISOString()};
+    const {rows}=await pool.query('insert into support_requests(customer_id,name,contact,topic,message) values($1,$2,$3,$4,$5) returning id,customer_id as "customerId",name,contact,topic,message,status,created_at as "createdAt"',[customerId,name,contact,topic,message]);
+    return rows[0];
+  }
   async function updateCustomerProfile({customerId,fullName,phone}) {
     if(!useDatabase) return null;
     const sets=[], values=[]; let n=1;
@@ -386,5 +403,5 @@ export function createRepository({ databaseUrl, fleet }) {
     if(!useDatabase)return false;
     const client=await pool.connect();try{await client.query('begin');const before=await client.query('select is_default from customer_addresses where id=$1 and customer_id=$2',[addressId,customerId]);if(!before.rows[0]){await client.query('rollback');return false;}const wasDefault=before.rows[0].is_default;await client.query('delete from customer_addresses where id=$1 and customer_id=$2',[addressId,customerId]);if(wasDefault)await client.query('update customer_addresses set is_default=true where id=(select id from customer_addresses where customer_id=$1 order by created_at desc limit 1)',[customerId]);await client.query('commit');return true;}catch(e){await client.query('rollback');throw e;}finally{client.release();}
   }
-  return {health,close,listVehicles,getVehicle,createCustomer,updateCustomerProfile,listCustomerAddresses,createCustomerAddress,updateCustomerAddress,deleteCustomerAddress,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt,listVendorBookings,findVendorByOwnerCustomerId,updateVendorBookingStatus,listVendorVehicles,createVendorVehicle};
+  return {health,close,listVehicles,getVehicle,createCustomer,getCustomerPreferences,updateCustomerPreferences,createSupportRequest,updateCustomerProfile,listCustomerAddresses,createCustomerAddress,updateCustomerAddress,deleteCustomerAddress,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt,listVendorBookings,findVendorByOwnerCustomerId,updateVendorBookingStatus,listVendorVehicles,createVendorVehicle};
 }
