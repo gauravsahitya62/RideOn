@@ -24,7 +24,8 @@ export function createPaymentService({
   }
 
   const configured = selectedProvider !== 'unconfigured' && selectedProvider !== 'mock';
-  const razorpayConfigured = selectedProvider === 'razorpay' && Boolean(keyId && keySecret && webhookSecret);
+  const razorpayPaymentConfigured = selectedProvider === 'razorpay' && Boolean(keyId && keySecret);
+  const razorpayConfigured = razorpayPaymentConfigured && Boolean(webhookSecret);
 
   function verifyWebhook(body, signature) {
     if (!configured || !webhookSecret || !signature) return false;
@@ -43,20 +44,60 @@ export function createPaymentService({
     return a.length === b.length && crypto.timingSafeEqual(a, b);
   }
 
-  function parseWebhook(payload = {}) {
-    const eventId = payload.eventId || payload.providerEventId;
-    const bookingId = payload.bookingId;
-    const providerReference = payload.providerReference || payload.paymentId || payload.orderId;
-    if (!eventId || !bookingId || !providerReference) return null;
-    if (!VALID_STATUSES.has(String(payload.status))) return null;
-    const amountPaise = Number(payload.amountPaise);
-    if (!Number.isSafeInteger(amountPaise) || amountPaise < 0 || payload.currency !== 'INR') return null;
+  function parseWebhook(payload = {}, { eventId: suppliedEventId } = {}) {
+    const eventId = suppliedEventId || payload.eventId || payload.providerEventId;
+    if (!eventId) return null;
+
+    // Accept the normalized internal format used by tests/mocks.
+    if (payload.bookingId || payload.status || payload.amountPaise) {
+      const bookingId = payload.bookingId;
+      const providerReference = payload.providerReference || payload.paymentId || payload.orderId;
+      if (!bookingId || !providerReference || !VALID_STATUSES.has(String(payload.status))) return null;
+      const amountPaise = Number(payload.amountPaise);
+      if (!Number.isSafeInteger(amountPaise) || amountPaise < 0 || payload.currency !== 'INR') return null;
+      return {
+        eventId: String(eventId),
+        bookingId: String(bookingId),
+        status: String(payload.status),
+        providerReference: String(providerReference),
+        providerOrderId: payload.providerOrderId ? String(payload.providerOrderId) : undefined,
+        amountPaise,
+        currency: 'INR',
+      };
+    }
+
+    const event = String(payload.event || '').toLowerCase();
+    const paymentEntity = payload?.payload?.payment?.entity;
+    const refundEntity = payload?.payload?.refund?.entity;
+    const orderEntity = payload?.payload?.order?.entity;
+    const entity = paymentEntity || refundEntity || null;
+    if (!entity) return null;
+
+    const eventStatus =
+      event === 'payment.captured' || event === 'order.paid' ? 'paid' :
+      event === 'payment.authorized' ? 'pending' :
+      event === 'payment.failed' ? 'failed' :
+      event === 'refund.processed' ? 'refunded' :
+      null;
+    if (!eventStatus) return null;
+
+    const bookingId =
+      entity.notes?.bookingId ||
+      orderEntity?.notes?.bookingId ||
+      payload?.payload?.order?.entity?.notes?.bookingId ||
+      null;
+    const providerOrderId = entity.order_id || orderEntity?.id || undefined;
+    const providerReference = entity.id || entity.payment_id;
+    const amountPaise = Number(entity.amount);
+    const currency = entity.currency || 'INR';
+    if (!providerReference || !Number.isSafeInteger(amountPaise) || amountPaise < 0 || currency !== 'INR') return null;
+
     return {
       eventId: String(eventId),
-      bookingId: String(bookingId),
-      status: String(payload.status),
+      bookingId: bookingId ? String(bookingId) : undefined,
+      status: eventStatus,
       providerReference: String(providerReference),
-      providerOrderId: payload.providerOrderId ? String(payload.providerOrderId) : undefined,
+      providerOrderId: providerOrderId ? String(providerOrderId) : undefined,
       amountPaise,
       currency: 'INR',
     };
@@ -74,7 +115,7 @@ export function createPaymentService({
   }
 
   async function createOrder({ receipt, amountPaise, currency = 'INR', notes = {} } = {}) {
-    if (!razorpayConfigured) {
+    if (!razorpayPaymentConfigured) {
       const error = new Error('Payment provider is not configured.');
       error.code = 'PAYMENT_NOT_CONFIGURED';
       throw error;
@@ -127,7 +168,7 @@ export function createPaymentService({
   }
 
   async function refundPayment({ paymentId, amountPaise } = {}) {
-    if (!razorpayConfigured) {
+    if (!razorpayPaymentConfigured) {
       const error = new Error('Payment provider is not configured.');
       error.code = 'PAYMENT_NOT_CONFIGURED';
       throw error;
