@@ -88,7 +88,7 @@ export default function RideOnApp({ authenticatedUser, onLogout }) {
    if(bookingBusy||paymentBusy)return;
    setBookingError('');setPaymentError('');
    if(!selected)return setBookingError('Choose a vehicle before continuing.');
-   const mobile=phone.replace(/\\D/g,'');
+   const mobile=phone.replace(/\D/g,'');
    if(name.trim().length<2)return setBookingError('Enter your full name.');
    if(mobile.length<10)return setBookingError('Enter a valid mobile number.');
    if(!bookingWindow)return setBookingError('Complete valid pickup and return date/time.');
