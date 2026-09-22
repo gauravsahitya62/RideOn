@@ -565,8 +565,11 @@ export function createRepository({ databaseUrl, fleet }) {
   async function applyPaymentEvent(event){
     if (!useDatabase) {
       if (memory.paymentEvents.has(event.eventId)) return { applied:false, duplicate:true };
-      const booking = memory.bookings.get(event.bookingId);
-      if (!booking) return { applied:false, duplicate:false, invalid:true };
+      const payment = event.providerOrderId ? [...memory.payments.values()].find(p => p.providerOrderId === String(event.providerOrderId)) : (event.bookingId ? memory.payments.get(String(event.bookingId)) : null);
+      const resolvedBookingId = event.bookingId || payment?.bookingId;
+      const booking = resolvedBookingId ? memory.bookings.get(String(resolvedBookingId)) : null;
+      if (!booking || !payment) return { applied:false, duplicate:false, invalid:true };
+      if (event.providerOrderId && payment.providerOrderId !== String(event.providerOrderId)) return { applied:false, duplicate:false, invalid:true };
       const expectedPaise = Math.round(Number(booking.pricing?.total || 0) * 100);
       if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedPaise || !event.providerReference || !canTransition(booking.paymentStatus || 'unpaid', event.status)) {
         return { applied:false, duplicate:false, invalid:true };
@@ -582,23 +585,32 @@ export function createRepository({ databaseUrl, fleet }) {
     const client = await pool.connect();
     try {
       await client.query('begin');
-      const bookingResult = await client.query('select id,payment_status,total_paise from bookings where id=$1 for update',[event.bookingId]);
+      const paymentResult = event.providerOrderId
+        ? await client.query('select id,booking_id,provider_order_id,amount_paise,status from payments where provider_order_id=$1 for update',[event.providerOrderId])
+        : event.bookingId
+          ? await client.query('select id,booking_id,provider_order_id,amount_paise,status from payments where booking_id=$1 and status in (\'pending\',\'paid\',\'failed\') order by created_at desc limit 1 for update',[event.bookingId])
+          : { rows: [] };
+      if (!paymentResult.rows[0]) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
+      const payment = paymentResult.rows[0];
+      const resolvedBookingId = event.bookingId || String(payment.booking_id);
+      if (event.providerOrderId && String(payment.provider_order_id) !== String(event.providerOrderId)) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
+      const bookingResult = await client.query('select id,payment_status,total_paise from bookings where id=$1 for update',[resolvedBookingId]);
       if (!bookingResult.rows[0]) {
         await client.query('rollback');
         return { applied:false, duplicate:false, invalid:true };
       }
       const booking = bookingResult.rows[0];
-      if (event.currency !== 'INR' || Number(event.amountPaise) !== Number(booking.total_paise) || !event.providerReference || !canTransition(booking.payment_status, event.status)) {
+      if (event.currency !== 'INR' || Number(event.amountPaise) !== Number(booking.total_paise) || Number(event.amountPaise) !== Number(payment.amount_paise) || !event.providerReference || !canTransition(booking.payment_status, event.status)) {
         await client.query('rollback');
         return { applied:false, duplicate:false, invalid:true };
       }
-      const inserted = await client.query('insert into payment_events (provider_event_id,booking_id,status,provider_reference,amount_paise,currency,provider_order_id,received_at) values ($1,$2,$3,$4,$5,$6,$7,now()) on conflict (provider_event_id) do nothing returning id',[event.eventId,event.bookingId,event.status,event.providerReference,event.amountPaise,event.currency,event.providerOrderId||null]);
+      const inserted = await client.query('insert into payment_events (provider_event_id,booking_id,status,provider_reference,amount_paise,currency,provider_order_id,received_at) values ($1,$2,$3,$4,$5,$6,$7,now()) on conflict (provider_event_id) do nothing returning id',[event.eventId,resolvedBookingId,event.status,event.providerReference,event.amountPaise,event.currency,event.providerOrderId||null]);
       if (!inserted.rows[0]) {
         await client.query('commit');
         return { applied:false, duplicate:true };
       }
-      await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[event.bookingId,event.status,event.providerReference]);
-      await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where booking_id=$1',[event.bookingId,event.status,event.providerReference,event.providerOrderId||null]);
+      await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[resolvedBookingId,event.status,event.providerReference]);
+      await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
       await client.query('commit');
       return { applied:true, duplicate:false };
     } catch(e) {
@@ -607,6 +619,40 @@ export function createRepository({ databaseUrl, fleet }) {
     } finally {
       client.release();
     }
+  }
+
+  async function findPaymentById(paymentId, customerId) {
+    if (!useDatabase) {
+      const payment=memory.payments.get(String(paymentId));
+      if (!payment || (customerId && String(payment.customerId)!==String(customerId))) return null;
+      return payment;
+    }
+    const { rows } = await pool.query(
+      'select p.id,p.booking_id,p.provider,p.provider_order_id,p.provider_payment_id,p.provider_reference,p.amount_paise,p.currency,p.status,p.idempotency_key,p.created_at,p.updated_at from payments p join bookings b on b.id=p.booking_id where p.id=$1 and b.customer_id=$2',
+      [paymentId, customerId]
+    );
+    return rows[0] ? {
+      id:String(rows[0].id), bookingId:String(rows[0].booking_id), provider:rows[0].provider,
+      providerOrderId:rows[0].provider_order_id || undefined, providerPaymentId:rows[0].provider_payment_id || undefined,
+      providerReference:rows[0].provider_reference || undefined, amountPaise:Number(rows[0].amount_paise),
+      currency:rows[0].currency, status:rows[0].status, idempotencyKey:rows[0].idempotency_key || undefined,
+      createdAt:iso(rows[0].created_at), updatedAt:iso(rows[0].updated_at || rows[0].created_at),
+    } : null;
+  }
+
+  async function findPaymentByProviderOrder(providerOrderId) {
+    if (!useDatabase) return [...memory.payments.values()].find(p => p.providerOrderId === String(providerOrderId)) || null;
+    const { rows } = await pool.query(
+      'select id,booking_id,provider,provider_order_id,provider_payment_id,provider_reference,amount_paise,currency,status,idempotency_key,created_at,updated_at from payments where provider_order_id=$1 order by created_at desc limit 1',
+      [providerOrderId]
+    );
+    return rows[0] ? {
+      id:String(rows[0].id), bookingId:String(rows[0].booking_id), provider:rows[0].provider,
+      providerOrderId:rows[0].provider_order_id || undefined, providerPaymentId:rows[0].provider_payment_id || undefined,
+      providerReference:rows[0].provider_reference || undefined, amountPaise:Number(rows[0].amount_paise),
+      currency:rows[0].currency, status:rows[0].status, idempotencyKey:rows[0].idempotency_key || undefined,
+      createdAt:iso(rows[0].created_at), updatedAt:iso(rows[0].updated_at || rows[0].created_at),
+    } : null;
   }
 
   async function findPaymentByBooking(bookingId) {
@@ -748,5 +794,5 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,findPaymentByBooking,createOrGetPaymentOrder,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
+  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
 }
