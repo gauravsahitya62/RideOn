@@ -15,6 +15,12 @@ test.before(async () => {
   server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
+  await repository.seedMemoryVehicles([
+    { id:'creta-01', type:'car', name:'Hyundai Creta', city:'Jaipur', pricePerDay:2499, active:true, transmission:'Automatic', fuel:'Petrol', seats:5, securityDeposit:0 },
+    { id:'baleno-01', type:'car', name:'Maruti Baleno', city:'Jaipur', pricePerDay:1499, active:true, transmission:'Manual', fuel:'Petrol', seats:5, securityDeposit:0 },
+    { id:'classic-01', type:'bike', name:'Royal Enfield Classic 350', city:'Jaipur', pricePerDay:999, active:true, transmission:null, fuel:null, seats:2, securityDeposit:0 },
+    { id:'activa-01', type:'bike', name:'Honda Activa 6G', city:'Jaipur', pricePerDay:499, active:true, transmission:'Automatic', fuel:'Petrol', seats:2, securityDeposit:0 },
+  ]);
 });
 
 
