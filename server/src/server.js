@@ -595,10 +595,11 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, as
 });
 
 app.post('/api/v1/vendor/bookings/:bookingId/refund', supabaseRequireAuth, requireVendor, async (req,res) => {
+  const scopedBooking=await repository.getVendorBooking(req.vendor.id,req.params.bookingId);
+  if(!scopedBooking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
   const payment=await repository.findPaymentByBooking(req.params.bookingId);
   if(!payment || payment.status!=='paid') return res.status(409).json({error:{code:'INVALID_PAYMENT_STATE',message:'Only a paid booking can enter the refund flow.'}});
   const booking=await repository.getBooking(req.params.bookingId);
-  if(!booking || String(booking.vendorId||'')!==String(req.vendor.id)) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
   try{
     const refund=await payments.refundPayment({paymentId:payment.providerPaymentId,amountPaise:payment.amountPaise});
     const updated=await repository.refundPayment({paymentId:payment.id,providerReference:refund.providerReference,status:'refunded'});
