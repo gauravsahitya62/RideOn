@@ -84,7 +84,7 @@ export function createRepository({ databaseUrl, fleet }) {
     }
 
     const { rows } = await pool.query(
-      `select id, type, name, city, daily_rate_paise, active, transmission, fuel, seats
+      `select id, owner_id, type, name, make, model, year, city, daily_rate_paise, security_deposit_paise, active, transmission, fuel, seats, description, image_urls, delivery_available
        from vehicles
        where ${where.join(' and ')}
        order by name asc`,
@@ -98,6 +98,14 @@ export function createRepository({ databaseUrl, fleet }) {
       subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
       pricePerDay: Number(row.daily_rate_paise || 0) / 100,
       city: row.city,
+      make: row.make || null,
+      model: row.model || null,
+      year: row.year == null ? null : Number(row.year),
+      securityDeposit: Number(row.security_deposit_paise || 0) / 100,
+      description: row.description || '',
+      imageUrls: Array.isArray(row.image_urls) ? row.image_urls : [],
+      deliveryAvailable: row.delivery_available !== false,
+      ownerId: row.owner_id ? String(row.owner_id) : null,
       seats: row.seats == null ? null : Number(row.seats),
       transmission: row.transmission || null,
       fuel: row.fuel || null,
@@ -108,7 +116,7 @@ export function createRepository({ databaseUrl, fleet }) {
   async function getVehicle(id) {
     if (!useDatabase) return fleet.find((v) => v.id === id && v.active) || null;
     const { rows } = await pool.query(
-      'select id, type, name, city, daily_rate_paise, active, transmission, fuel, seats from vehicles where id = $1 and active = true',
+      'select id, owner_id, type, name, make, model, year, city, daily_rate_paise, security_deposit_paise, active, transmission, fuel, seats, description, image_urls, delivery_available from vehicles where id = $1 and active = true',
       [id]
     );
     if (!rows[0]) return null;
@@ -120,6 +128,14 @@ export function createRepository({ databaseUrl, fleet }) {
       subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
       pricePerDay: Number(row.daily_rate_paise || 0) / 100,
       city: row.city,
+      make: row.make || null,
+      model: row.model || null,
+      year: row.year == null ? null : Number(row.year),
+      securityDeposit: Number(row.security_deposit_paise || 0) / 100,
+      description: row.description || '',
+      imageUrls: Array.isArray(row.image_urls) ? row.image_urls : [],
+      deliveryAvailable: row.delivery_available !== false,
+      ownerId: row.owner_id ? String(row.owner_id) : null,
       seats: row.seats == null ? null : Number(row.seats),
       transmission: row.transmission || null,
       fuel: row.fuel || null,
@@ -447,7 +463,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const client=await pool.connect();
       try {
         await client.query('begin');
-        const vehicleCheck = await client.query('select id from vehicles where id=$1 and active=true for share',[input.vehicle.id]);
+        const vehicleCheck = await client.query('select id, owner_id from vehicles where id=$1 and active=true for share',[input.vehicle.id]);
         if (!vehicleCheck.rows[0]) { const x=new Error('vehicle unavailable'); x.code='VEHICLE_UNAVAILABLE'; throw x; }
         if(input.idempotencyKey){
           await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',[`${input.customerId}:${input.idempotencyKey}`]);
@@ -469,7 +485,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const key=input.idempotencyKey?`${input.customerId}:${input.idempotencyKey}`:null;
     if(key&&memory.idempotency.has(key)){const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=memory.idempotency.get(key);throw x;}
     if([...memory.bookings.values()].some(b=>b.vehicleId===input.vehicle.id&&['requested','confirmed','in_progress'].includes(b.status)&&new Date(input.startAt)<new Date(b.endAt)&&new Date(input.endAt)>new Date(b.startAt))){const x=new Error('vehicle unavailable');x.code='VEHICLE_UNAVAILABLE';throw x;}
-    const id=crypto.randomUUID();const booking={id,customerId:input.customerId,vehicleId:input.vehicle.id,vehicle:input.vehicle,startAt:input.startAt,endAt:input.endAt,delivery:input.delivery,address:input.address,notes:input.notes,pricing:input.pricing,status:'requested',paymentStatus:'unpaid',createdAt:new Date().toISOString()};memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
+    const id=crypto.randomUUID();const booking={id,customerId:input.customerId,vehicleId:input.vehicle.id,vendorId:input.vehicle.ownerId||null,vehicle:input.vehicle,startAt:input.startAt,endAt:input.endAt,delivery:input.delivery,address:input.address,notes:input.notes,pricing:input.pricing,status:'requested',paymentStatus:'unpaid',createdAt:new Date().toISOString()};memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
   }
 
   async function getBooking(id, customerId = null){
