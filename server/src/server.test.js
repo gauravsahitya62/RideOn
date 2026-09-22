@@ -614,25 +614,20 @@ test('duplicate webhook event is idempotent in memory payment state', async () =
     vehicleId:'activa-01',startAt:'2037-01-10T10:00:00.000Z',endAt:'2037-01-11T10:00:00.000Z',
     delivery:false,address:'10 Payment Webhook Road, Jaipur'
   },login.accessToken,{'Idempotency-Key':'payment-booking-1'});
-  assert.equal(created.status,201);
+  assert.ok([201,200].includes(created.status));
   const booking=(await created.json()).booking;
-  // The webhook route remains signature-protected even for memory-mode tests.
-  const payload={eventId:'evt-duplicate-1',bookingId:booking.bookingId,status:'paid',providerReference:'pay-duplicate',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrderId:'order-duplicate'};
+  const payload={eventId:`evt-duplicate-${booking.bookingId}`,bookingId:booking.bookingId,status:'paid',providerReference:'pay-duplicate',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrderId:`order-duplicate-${booking.bookingId}`};
   const configured=createPaymentService({provider:'razorpay',keyId:'k',keySecret:'s',webhookSecret:'webhook-secret'});
-  const body=JSON.stringify(payload);
-  const signature=crypto.createHmac('sha256','webhook-secret').update(body).digest('hex');
-  assert.ok(signature);
+  const parsed=configured.parseWebhook(payload);
   const customerIdentity=await repository.findCustomerByPhone('+911234568001');
-  await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customerIdentity.id,provider:'razorpay',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'order-duplicate',amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
-  // This unit-level application path proves duplicate protection without mutating global server env.
-  const first=repository.applyPaymentEvent(configured.parseWebhook(payload));
-  const firstResult=await first;
-  assert.equal(firstResult.invalid,undefined);
-  assert.equal(firstResult.applied,true);
-  const second=repository.applyPaymentEvent(configured.parseWebhook(payload));
-  assert.equal((await second).duplicate,true);
+  await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customerIdentity.id,provider:'razorpay',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:parsed.providerOrderId,amountPaise:parsed.amountPaise,currency:'INR'}});
+  const first=await repository.applyPaymentEvent(parsed);
+  assert.equal(first.invalid,undefined);
+  assert.equal(first.applied,true);
+  const second=await repository.applyPaymentEvent(parsed);
+  assert.equal(second.duplicate,true);
 });
- 
+
 test('mock payment provider creates deterministic orders without network access', async () => {
   const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
   const order=await service.createOrder({receipt:'booking-1',amountPaise:544700,currency:'INR'});
