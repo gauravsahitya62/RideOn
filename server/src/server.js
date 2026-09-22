@@ -40,6 +40,29 @@ function normalizeBookingInput(body = {}) {
   return { ...body, startAt: start.toISOString(), endAt: new Date(start.getTime() + days * 86400000).toISOString() };
 }
 
+
+function validateBookingWindow(startAt,endAt) {
+  const start = new Date(startAt);
+  const end = new Date(endAt);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+    const error = new Error('Pickup and return must form a valid booking window.');
+    error.code = 'INVALID_BOOKING_WINDOW';
+    throw error;
+  }
+  if (start.getTime() < Date.now()) {
+    const error = new Error('Pickup cannot be in the past.');
+    error.code = 'INVALID_BOOKING_WINDOW';
+    throw error;
+  }
+  const days = Math.ceil((end.getTime() - start.getTime()) / 86400000);
+  if (days < 1 || days > 30) {
+    const error = new Error('Booking duration must be between 1 and 30 days.');
+    error.code = 'INVALID_BOOKING_WINDOW';
+    throw error;
+  }
+  return { start, end, days };
+}
+
 function pricing(vehicle, startAt, endAt, delivery) {
   const start = new Date(startAt);
   const end = new Date(endAt);
@@ -422,19 +445,17 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
 });
 
 app.get('/api/v1/vehicles/:id/availability', supabaseRequireAuth, requireCustomer, async (req, res) => {
-  const schema = z.object({
-    startAt: z.string().datetime(),
-    endAt: z.string().datetime(),
-  }).refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt' });
+  const schema = z.object({ startAt:z.string().datetime(), endAt:z.string().datetime() });
   const parsed = schema.safeParse(req.query);
-  if (!parsed.success) return res.status(400).json({ error:{ code:'INVALID_BOOKING_WINDOW', message:'Provide valid ISO startAt and endAt timestamps.', details:parsed.error.flatten() } });
-  const vehicle = await repository.getVehicle(req.params.id);
-  if (!vehicle) return res.status(404).json({ error:{ code:'VEHICLE_NOT_FOUND', message:'Vehicle not found.' } });
+  if (!parsed.success) return res.status(400).json({ error:{code:'INVALID_BOOKING_WINDOW',message:'Provide valid ISO startAt and endAt timestamps.',details:parsed.error.flatten()} });
   try {
-    const availability = await repository.checkVehicleAvailability(vehicle.id, parsed.data.startAt, parsed.data.endAt);
+    validateBookingWindow(parsed.data.startAt, parsed.data.endAt);
+    const availability = await repository.checkVehicleAvailability(req.params.id, parsed.data.startAt, parsed.data.endAt);
+    if (!availability.exists) return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+    if (!availability.active) return res.status(409).json({error:{code:'VEHICLE_INACTIVE',message:'This vehicle is not currently available for booking.'}});
     res.json(availability);
-  } catch (error) {
-    if(error.code==='INVALID_BOOKING_WINDOW') return res.status(400).json({ error:{code:error.code,message:'The booking window is invalid.'} });
+  } catch(error) {
+    if(error.code==='INVALID_BOOKING_WINDOW') return res.status(400).json({error:{code:error.code,message:error.message}});
     throw error;
   }
 });
@@ -455,16 +476,24 @@ app.post('/api/v1/bookings/quote', supabaseRequireAuth, requireCustomer, async (
     if(error.code==='INVALID_BOOKING_WINDOW') return res.status(400).json({ error:{code:error.code,message:'The booking window is invalid.'} });
     throw error;
   }
-  const quote = { vehicleId: vehicle.id, ...pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery) };
+  let quote;
+  try { quote = { vehicleId: vehicle.id, ...pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery) }; } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
 });
 
 app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
+  try { validateBookingWindow(parsed.data.startAt, parsed.data.endAt); } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
   const vehicle = await repository.getVehicle(parsed.data.vehicleId);
-  if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND' } });
-  const pricingData = pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery);
+  if (!vehicle) {
+    const state = await repository.getVehicleState(parsed.data.vehicleId);
+    if (!state.exists) return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+    if (!state.active) return res.status(409).json({error:{code:'VEHICLE_INACTIVE',message:'This vehicle is not currently available for booking.'}});
+    return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+  }
+  let pricingData;
+  try { pricingData = pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery); } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
 
   const idempotencyKey = req.get('Idempotency-Key')?.trim() || null;
   if (idempotencyKey && idempotencyKey.length > 128) return res.status(400).json({ error: { code: 'INVALID_IDEMPOTENCY_KEY' } });
