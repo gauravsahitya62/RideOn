@@ -69,7 +69,11 @@ async function request(path, options = {}) {
   }
   if (!response.ok) {
     const message = payload?.error?.message || payload?.message || payload?.error?.code || `Request failed (${response.status})`;
-    throw new Error(String(message));
+    const error = new Error(String(message));
+    error.code = payload?.error?.code || null;
+    error.status = response.status;
+    error.details = payload?.error?.details;
+    throw error;
   }
   return payload;
 }
