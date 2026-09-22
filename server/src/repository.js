@@ -144,7 +144,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function findCustomerBySupabaseUserId(id) {
-    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,supabaseUserId:c.supabaseUserId}:null; }
+    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,role:c.role||'customer',supabaseUserId:c.supabaseUserId}:null; }
     const { rows } = await pool.query('select id,full_name,phone,email,role,supabase_user_id from customers where supabase_user_id=$1',[id]);
     return rows[0]?mapCustomer(rows[0]):null;
   }
@@ -162,7 +162,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function findCustomerByPhone(phone) {
     if (useDatabase) { const {rows}=await pool.query('select id,full_name,phone,email,password_hash,role from customers where phone=$1',[phone]); return rows[0]?{...mapCustomer(rows[0]),passwordHash:rows[0].password_hash}:null; }
-    const c=[...memory.customers.values()].find(v=>v.phone===phone); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,passwordHash:c.passwordHash}:null;
+    const c=[...memory.customers.values()].find(v=>v.phone===phone); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,role:c.role||'customer',passwordHash:c.passwordHash}:null;
   }
 
   async function isVehicleUnavailable(vehicleId,startAt,endAt) {
@@ -274,7 +274,7 @@ export function createRepository({ databaseUrl, fleet }) {
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = [...memory.customers.values()].find(v => String(v.email || '').toLowerCase() === String(email).toLowerCase());
-    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash } : null;
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, role:c.role||'customer', passwordHash:c.passwordHash } : null;
   }
 
   async function findCustomerById(id) {
