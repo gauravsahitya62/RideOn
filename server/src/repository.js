@@ -12,7 +12,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map() };
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), vendors:new Map(), vehicles:new Map() };
 
   const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
@@ -106,26 +106,276 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function getVehicle(id) {
-    if (!useDatabase) return fleet.find((v) => v.id === id && v.active) || null;
+  const mapVendor = (row) => row && ({
+    id: String(row.id),
+    ownerCustomerId: String(row.owner_customer_id),
+    businessName: row.business_name,
+    contactName: row.contact_name,
+    phone: row.phone || row.support_phone,
+    email: row.email || row.support_email,
+    address: row.address || row.service_city,
+    status: row.status,
+    serviceCity: row.service_city,
+    serviceArea: row.service_area || {},
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  });
+
+  const mapManagedVehicle = (row) => row && ({
+    id: String(row.id),
+    ownerId: row.owner_id ? String(row.owner_id) : null,
+    type: String(row.type),
+    name: row.name || [row.make, row.model].filter(Boolean).join(' ') || 'RideOn vehicle',
+    make: row.make || '',
+    model: row.model || '',
+    year: row.year == null ? null : Number(row.year),
+    city: row.city,
+    dailyRate: Number(row.daily_rate_paise || 0) / 100,
+    securityDeposit: Number(row.security_deposit_paise || 0) / 100,
+    transmission: row.transmission || '',
+    fuel: row.fuel || '',
+    seats: row.seats == null ? null : Number(row.seats),
+    registrationNumber: row.registration_number || '',
+    description: row.description || '',
+    imageUrls: Array.isArray(row.image_urls) ? row.image_urls : [],
+    deliveryAvailable: row.delivery_available !== false,
+    active: Boolean(row.active),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  });
+
+  async function findVendorByCustomerId(customerId) {
+    if (!useDatabase) return memory.vendors?.get(customerId) || null;
     const { rows } = await pool.query(
-      'select id, type, name, city, daily_rate_paise, active, transmission, fuel, seats from vehicles where id = $1 and active = true',
-      [id]
+      'select id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,created_at,updated_at from vendors where owner_customer_id=$1',
+      [customerId]
+    );
+    return rows[0] ? mapVendor(rows[0]) : null;
+  }
+
+  async function ensureVendorForCustomer(customerId, input = {}) {
+    if (!useDatabase) {
+      if (!memory.vendors) memory.vendors = new Map();
+      const existing = memory.vendors.get(customerId);
+      if (existing) return existing;
+      const vendor = {
+        id: crypto.randomUUID(),
+        ownerCustomerId: String(customerId),
+        businessName: input.businessName || 'RideOn Vendor',
+        contactName: input.contactName || 'Vendor',
+        phone: input.phone || '',
+        email: input.email || '',
+        address: input.address || input.serviceCity || '',
+        status: 'active',
+        serviceCity: input.serviceCity || 'Jaipur',
+        serviceArea: input.serviceArea || {},
+      };
+      memory.vendors.set(customerId, vendor);
+      return vendor;
+    }
+    const existing = await findVendorByCustomerId(customerId);
+    if (existing) return existing;
+    const customer = await findCustomerById(customerId);
+    if (!customer) return null;
+    const { rows } = await pool.query(
+      `insert into vendors(owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area)
+       values($1,$2,$3,$4,$5,$6,$4,$5,'active',$7,$8)
+       returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,created_at,updated_at`,
+      [
+        customerId,
+        input.businessName || customer.fullName || 'RideOn Vendor',
+        input.contactName || customer.fullName || 'Vendor',
+        input.phone || (customer.phone?.startsWith('supabase-') ? '' : customer.phone) || '',
+        input.email || customer.email || '',
+        input.address || input.serviceCity || '',
+        input.serviceCity || 'Jaipur',
+        input.serviceArea || {},
+      ]
+    );
+    return rows[0] ? mapVendor(rows[0]) : null;
+  }
+
+  async function updateVendor(customerId, input) {
+    if (!useDatabase) {
+      const vendor = await ensureVendorForCustomer(customerId, input);
+      Object.assign(vendor, input);
+      return vendor;
+    }
+    const vendor = await findVendorByCustomerId(customerId);
+    if (!vendor) return null;
+    const { rows } = await pool.query(
+      `update vendors set business_name=coalesce($2,business_name), contact_name=coalesce($3,contact_name),
+       phone=coalesce($4,phone), email=coalesce($5,email), address=coalesce($6,address),
+       service_city=coalesce($7,service_city), service_area=coalesce($8,service_area), updated_at=now()
+       where owner_customer_id=$1
+       returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,created_at,updated_at`,
+      [customerId,input.businessName,input.contactName,input.phone,input.email,input.address,input.serviceCity,input.serviceArea]
+    );
+    return rows[0] ? mapVendor(rows[0]) : null;
+  }
+
+  async function listVendorVehicles(vendorId, { active } = {}) {
+    if (!useDatabase) return [...(memory.vehicles?.values() || [])].filter(v => String(v.ownerId) === String(vendorId) && (active === undefined || v.active === active));
+    const params=[vendorId];
+    const where=['owner_id=$1'];
+    if (active !== undefined) { params.push(active); where.push(`active=$${params.length}`); }
+    const { rows } = await pool.query(
+      `select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,active,created_at,updated_at
+       from vehicles where ${where.join(' and ')} order by created_at desc`, params);
+    return rows.map(mapManagedVehicle);
+  }
+
+  async function getVendorVehicle(vendorId, vehicleId) {
+    if (!useDatabase) {
+      const v = memory.vehicles?.get(vehicleId);
+      return v && String(v.ownerId) === String(vendorId) ? v : null;
+    }
+    const { rows } = await pool.query(
+      'select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where id=$1 and owner_id=$2',
+      [vehicleId,vendorId]
+    );
+    return rows[0] ? mapManagedVehicle(rows[0]) : null;
+  }
+
+  async function createVendorVehicle(vendorId, input) {
+    if (!useDatabase) {
+      if (!memory.vehicles) memory.vehicles = new Map();
+      const id = crypto.randomUUID();
+      const vehicle = { id, ownerId: vendorId, ...input, active: input.active !== false, imageUrls: input.imageUrls || [] };
+      memory.vehicles.set(id, vehicle);
+      return vehicle;
+    }
+    const id = crypto.randomUUID();
+    try {
+      const { rows } = await pool.query(
+        `insert into vehicles(id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,active,updated_at)
+         values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
+         returning id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,active,created_at,updated_at`,
+        [id,vendorId,input.type,input.name,input.make,input.model,input.year,input.city,
+         Math.round(Number(input.dailyRate)*100),Math.round(Number(input.securityDeposit||0)*100),
+         input.transmission || null,input.fuel || null,input.seats || null,input.registrationNumber || null,
+         input.description || null,input.imageUrls || [],input.deliveryAvailable !== false,input.active !== false]
+      );
+      return mapManagedVehicle(rows[0]);
+    } catch (error) {
+      if (error.code === '23505' && input.registrationNumber) { const x=new Error('vehicle registration exists'); x.code='VEHICLE_EXISTS'; throw x; }
+      throw error;
+    }
+  }
+
+  async function updateVendorVehicle(vendorId, vehicleId, input) {
+    if (!useDatabase) {
+      const vehicle = await getVendorVehicle(vendorId, vehicleId);
+      if (!vehicle) return null;
+      Object.assign(vehicle, input);
+      return vehicle;
+    }
+    const fields = [
+      ['type',input.type],['name',input.name],['make',input.make],['model',input.model],['year',input.year],
+      ['city',input.city],['daily_rate_paise',input.dailyRate == null ? undefined : Math.round(Number(input.dailyRate)*100)],
+      ['security_deposit_paise',input.securityDeposit == null ? undefined : Math.round(Number(input.securityDeposit)*100)],
+      ['transmission',input.transmission],['fuel',input.fuel],['seats',input.seats],
+      ['registration_number',input.registrationNumber],['description',input.description],
+      ['image_urls',input.imageUrls],['delivery_available',input.deliveryAvailable],['active',input.active]
+    ];
+    const sets=[]; const params=[vehicleId,vendorId];
+    for (const [column,value] of fields) {
+      if (value === undefined) continue;
+      params.push(value);
+      sets.push(`${column}=$${params.length}`);
+    }
+    if (!sets.length) return getVendorVehicle(vendorId, vehicleId);
+    params.push(new Date());
+    sets.push('updated_at=now()');
+    try {
+      const { rows } = await pool.query(
+        `update vehicles set ${sets.join(', ')} where id=$1 and owner_id=$2
+         returning id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,active,created_at,updated_at`,
+        params.slice(0,-1)
+      );
+      return rows[0] ? mapManagedVehicle(rows[0]) : null;
+    } catch (error) {
+      if (error.code === '23505' && input.registrationNumber) { const x=new Error('vehicle registration exists'); x.code='VEHICLE_EXISTS'; throw x; }
+      throw error;
+    }
+  }
+
+  async function deactivateVendorVehicle(vendorId, vehicleId) {
+    if (!useDatabase) {
+      const vehicle = await getVendorVehicle(vendorId, vehicleId);
+      if (!vehicle) return null;
+      vehicle.active=false;
+      return vehicle;
+    }
+    const { rows } = await pool.query(
+      `update vehicles set active=false,updated_at=now() where id=$1 and owner_id=$2 returning id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,active,created_at,updated_at`,
+      [vehicleId,vendorId]
+    );
+    return rows[0] ? mapManagedVehicle(rows[0]) : null;
+  }
+
+  async function listVendorBookings(vendorId, { limit=20, offset=0 } = {}) {
+    if (!useDatabase) {
+      return [...memory.bookings.values()]
+        .filter(b => String(b.vendorId||'') === String(vendorId))
+        .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt))
+        .slice(offset, offset+limit);
+    }
+    const { rows } = await pool.query(
+      `select b.*, v.name as v_name, v.type as v_type
+       from bookings b join vehicles v on v.id=b.vehicle_id
+       where v.owner_id=$1
+       order by b.created_at desc limit $2 offset $3`,
+      [vendorId,limit,offset]
+    );
+    return rows.map(r=>mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:{id:String(r.vehicle_id),name:r.v_name,type:String(r.v_type)}}));
+  }
+
+  async function getVendorBooking(vendorId, bookingId) {
+    if (!useDatabase) {
+      const b = memory.bookings.get(bookingId);
+      return b && String(b.vendorId||'') === String(vendorId) ? b : null;
+    }
+    const { rows } = await pool.query(
+      `select b.*, v.name as v_name, v.type as v_type
+       from bookings b join vehicles v on v.id=b.vehicle_id
+       where b.id=$1 and v.owner_id=$2`,
+      [bookingId,vendorId]
     );
     if (!rows[0]) return null;
-    const row = rows[0];
-    return {
-      id: String(row.id),
-      type: String(row.type),
-      name: row.name,
-      subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
-      pricePerDay: Number(row.daily_rate_paise || 0) / 100,
-      city: row.city,
-      seats: row.seats == null ? null : Number(row.seats),
-      transmission: row.transmission || null,
-      fuel: row.fuel || null,
-      active: Boolean(row.active),
-    };
+    return mapBooking({...rows[0],vehicle:{id:String(rows[0].vehicle_id),name:rows[0].v_name,type:String(rows[0].v_type)}});
   }
+
+  async function updateVendorBookingStatus(vendorId, bookingId, nextStatus, note='') {
+    const allowed = {
+      requested: ['confirmed','rejected','cancelled'],
+      confirmed: ['in_progress','cancelled'],
+      in_progress: ['completed','cancelled'],
+      rejected: [],
+      completed: [],
+      cancelled: [],
+    };
+    if (!allowed[nextStatus]) { const e=new Error('invalid status'); e.code='INVALID_BOOKING_STATUS'; throw e; }
+    if (!useDatabase) {
+      const b=await getVendorBooking(vendorId,bookingId);
+      if(!b){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(!allowed[b.status]?.includes(nextStatus)){const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
+      b.status=nextStatus;b.updatedAt=new Date().toISOString();return b;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
+      if(!rows[0]){await client.query('rollback');const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
+      const current=rows[0].status;
+      if(!allowed[current]?.includes(nextStatus)){await client.query('rollback');const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
+      const {rows:updated}=await client.query('update bookings set status=$2,updated_at=now() where id=$1 returning *',[bookingId,nextStatus]);
+      await client.query('insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$3,\'vendor\',$4,$5)',[bookingId,current,nextStatus,vendorId,note||null]);
+      await client.query('commit');
+      return mapBooking({...updated[0],vehicle:{id:String(updated[0].vehicle_id),name:rows[0].v_name,type:String(rows[0].v_type)}});
+    } catch(error){try{await client.query('rollback');}catch{};throw error;}finally{client.release();}
+  }
+
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName}) {
     if (useDatabase) {
@@ -312,5 +562,5 @@ export function createRepository({ databaseUrl, fleet }) {
     if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
   }
 
-  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt};
+  return {health,close,listVehicles,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,createOtp,consumeLatestOtp,incrementOtpAttempt};
 }
