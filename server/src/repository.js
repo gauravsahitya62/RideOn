@@ -65,7 +65,7 @@ export function createRepository({ databaseUrl, fleet }) {
         v.active !== false &&
         (!typeValue || typeValue === 'all' || String(v.type).toLowerCase() === typeValue) &&
         (!cityValue || String(v.city).toLowerCase() === cityValue) &&
-        (!qValue || `${v.name} ${v.subtitle || ''}`.toLowerCase().includes(qValue))
+        (!qValue || `${v.name} ${v.subtitle || ''} ${v.make || ''} ${v.model || ''}`.toLowerCase().includes(qValue))
       );
     }
 
