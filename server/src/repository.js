@@ -782,7 +782,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function findCustomerByEmail(email) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where lower(email)=lower($1)', [email]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where lower(email)=lower($1::text)', [email]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = [...memory.customers.values()].find(v => String(v.email || '').toLowerCase() === String(email).toLowerCase());
