@@ -542,6 +542,7 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
   const booking = await repository.getBooking(req.params.id);
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
+  if (booking.paymentStatus === 'paid') return res.status(409).json({ error: { code: 'REFUND_POLICY_REQUIRED', message: 'This paid booking requires an approved refund policy before cancellation.' } });
   try {
     const updated = await repository.cancelBooking(req.params.id, req.user.id);
     if (!updated) return res.status(409).json({ error: { code: 'CANNOT_CANCEL', message: 'This booking can no longer be cancelled.' } });
