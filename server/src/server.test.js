@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import crypto from 'node:crypto';
+import jwt from 'jsonwebtoken';
 import { createPaymentService } from './payments.js';
 
 process.env.NODE_ENV = 'test';
@@ -15,6 +16,12 @@ test.before(async () => {
   server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
+  await repository.seedMemoryVehicles([
+    { id:'creta-01', type:'car', name:'Hyundai Creta', city:'Jaipur', pricePerDay:2499, active:true, transmission:'Automatic', fuel:'Petrol', seats:5, securityDeposit:0 },
+    { id:'baleno-01', type:'car', name:'Maruti Baleno', city:'Jaipur', pricePerDay:1499, active:true, transmission:'Manual', fuel:'Petrol', seats:5, securityDeposit:0 },
+    { id:'classic-01', type:'bike', name:'Royal Enfield Classic 350', city:'Jaipur', pricePerDay:999, active:true, transmission:null, fuel:null, seats:2, securityDeposit:0 },
+    { id:'activa-01', type:'bike', name:'Honda Activa 6G', city:'Jaipur', pricePerDay:499, active:true, transmission:'Automatic', fuel:'Petrol', seats:2, securityDeposit:0 },
+  ]);
 });
 
 
@@ -324,6 +331,7 @@ test('booking round trip preserves API rupees after persistence', async () => {
     rental: 4998,
     deliveryFee: 199,
     platformFee: 250,
+    securityDeposit: 0,
     total: 5447,
     currency: 'INR',
     currencyUnit: 'rupees',
@@ -354,9 +362,179 @@ test('quote pricing keeps rupees at the API boundary', async () => {
   const response = await jsonRequest('/api/v1/bookings/quote', 'POST', { vehicleId: 'creta-01', startDate: '2033-01-01', durationDays: 2, delivery: true }, aLogin.accessToken);
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.deepEqual(payload.quote, { vehicleId: 'creta-01', days: 2, rental: 4998, deliveryFee: 199, platformFee: 250, total: 5447, currency: 'INR', currencyUnit: 'rupees' });
+  assert.deepEqual(payload.quote, { vehicleId: 'creta-01', days: 2, rental: 4998, deliveryFee: 199, platformFee: 250, securityDeposit: 0, total: 5447, currency: 'INR', currencyUnit: 'rupees' });
 });
 
+
+
+test('availability endpoint reports available and unavailable windows', async () => {
+  const a = await register('+911234567910', 'Availability User');
+  const login = await legacyLogin('+911234567910');
+  const available = await request('/api/v1/vehicles/creta-01/availability?startAt=2034-01-10T10:00:00.000Z&endAt=2034-01-12T10:00:00.000Z', {
+    headers: { authorization: 'Bearer ' + login.accessToken },
+  });
+  const availablePayload = await available.json();
+  assert.equal(available.status, 200);
+  assert.equal(availablePayload.available, true);
+
+  const created = await jsonRequest('/api/v1/bookings', 'POST', {
+    vehicleId: 'creta-01',
+    startAt: '2034-02-10T10:00:00.000Z',
+    endAt: '2034-02-12T10:00:00.000Z',
+    delivery: false,
+    address: '10 Availability Road, Jaipur',
+  }, login.accessToken, { 'Idempotency-Key': 'availability-seed-1' });
+  assert.equal(created.status, 201);
+
+  const busy = await request('/api/v1/vehicles/creta-01/availability?startAt=2034-02-10T10:00:00.000Z&endAt=2034-02-11T10:00:00.000Z', {
+    headers: { authorization: 'Bearer ' + login.accessToken },
+  });
+  const busyPayload = await busy.json();
+  assert.equal(busy.status, 200);
+  assert.equal(busyPayload.available, false);
+});
+
+test('availability rejects invalid windows', async () => {
+  await register('+911234567911', 'Invalid Window User');
+  const login = await legacyLogin('+911234567911');
+  const response = await request('/api/v1/vehicles/creta-01/availability?startAt=not-a-date&endAt=2034-03-02T10:00:00.000Z', {
+    headers: { authorization: 'Bearer ' + login.accessToken },
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 400);
+  assert.equal(payload.error.code, 'INVALID_BOOKING_WINDOW');
+});
+
+test('different idempotency keys cannot reserve an overlapping interval twice', async () => {
+  const a = await register('+911234567912', 'Conflict User');
+  const login = await legacyLogin('+911234567912');
+  const payload = {
+    vehicleId: 'baleno-01',
+    startAt: '2034-04-10T10:00:00.000Z',
+    endAt: '2034-04-12T10:00:00.000Z',
+    delivery: false,
+    address: '12 Conflict Road, Jaipur',
+  };
+  const first = await jsonRequest('/api/v1/bookings', 'POST', payload, login.accessToken, { 'Idempotency-Key': 'conflict-a' });
+  const second = await jsonRequest('/api/v1/bookings', 'POST', payload, login.accessToken, { 'Idempotency-Key': 'conflict-b' });
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 409);
+  assert.equal((await second.json()).error.code, 'VEHICLE_UNAVAILABLE');
+});
+
+test('cancellation records the actual previous status', async () => {
+  const a = await register('+911234567913', 'Cancellation User');
+  const login = await legacyLogin('+911234567913');
+  const created = await jsonRequest('/api/v1/bookings', 'POST', {
+    vehicleId: 'activa-01',
+    startAt: '2034-05-10T10:00:00.000Z',
+    endAt: '2034-05-11T10:00:00.000Z',
+    delivery: false,
+    address: '13 Cancel Road, Jaipur',
+  }, login.accessToken, { 'Idempotency-Key': 'cancel-event-1' });
+  assert.equal(created.status, 201);
+  const bookingId = (await created.json()).booking.bookingId;
+  const cancelled = await request('/api/v1/bookings/' + bookingId + '/cancel', {
+    method: 'PATCH',
+    headers: { authorization: 'Bearer ' + login.accessToken },
+  });
+  assert.equal(cancelled.status, 200);
+  assert.equal((await cancelled.json()).booking.status, 'cancelled');
+});
+
+test('inactive vehicle cannot be checked or booked', async () => {
+  await repository.seedMemoryVehicles([
+    { id:'inactive-01', type:'car', name:'Inactive Car', city:'Jaipur', pricePerDay:1000, active:false, transmission:'Manual', fuel:'Petrol', seats:5, securityDeposit:0 },
+  ]);
+  const user = await register('+911234567914', 'Inactive Vehicle User');
+  const login = await legacyLogin('+911234567914');
+
+  const availability = await request('/api/v1/vehicles/inactive-01/availability?startAt=2036-01-10T10:00:00.000Z&endAt=2036-01-11T10:00:00.000Z', {
+    headers:{authorization:'Bearer '+login.accessToken},
+  });
+  assert.equal(availability.status, 409);
+  assert.equal((await availability.json()).error.code, 'VEHICLE_INACTIVE');
+
+  const booking = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'inactive-01',
+    startAt:'2036-01-10T10:00:00.000Z',
+    endAt:'2036-01-11T10:00:00.000Z',
+    delivery:false,
+    address:'14 Inactive Road, Jaipur',
+  },login.accessToken,{ 'Idempotency-Key':'inactive-booking-1' });
+  assert.equal(booking.status,409);
+  assert.equal((await booking.json()).error.code,'VEHICLE_INACTIVE');
+});
+
+test('vendor booking lifecycle is isolated and customer-visible', async () => {
+  const customer = await register('+911234567915', 'Lifecycle Customer');
+  const customerLogin = await legacyLogin('+911234567915');
+  const vendorCustomer = await register('+911234567916', 'Vendor A User');
+  const otherVendorCustomer = await register('+911234567917', 'Vendor B User');
+
+  const vendorA = await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const vendorB = await repository.ensureVendorForCustomer(otherVendorCustomer.customer.id);
+  const vehicleA = await repository.createVendorVehicle(vendorA.id, {
+    type:'car', name:'Vendor A Car', make:'Test', model:'A', year:2034, city:'Jaipur',
+    dailyRate:1200, securityDeposit:500, transmission:'Manual', fuel:'Petrol', seats:5,
+    registrationNumber:'RJ14LIFE001', description:'Lifecycle test vehicle', imageUrls:[], deliveryAvailable:true, active:true,
+  });
+  await repository.createVendorVehicle(vendorB.id, {
+    type:'car', name:'Vendor B Car', make:'Test', model:'B', year:2034, city:'Jaipur',
+    dailyRate:1300, securityDeposit:500, transmission:'Manual', fuel:'Petrol', seats:5,
+    registrationNumber:'RJ14LIFE002', description:'Other lifecycle vehicle', imageUrls:[], deliveryAvailable:true, active:true,
+  });
+
+  const bookingResponse = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:vehicleA.id,
+    startAt:'2036-06-10T10:00:00.000Z',
+    endAt:'2036-06-11T10:00:00.000Z',
+    delivery:false,
+    address:'15 Vendor Lifecycle Road, Jaipur',
+  },customerLogin.accessToken,{ 'Idempotency-Key':'vendor-lifecycle-1' });
+  assert.equal(bookingResponse.status,201);
+  const bookingId = (await bookingResponse.json()).booking.bookingId;
+
+  const vendorAToken = jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorBToken = jwt.sign({sub:otherVendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+
+  const ownList = await request('/api/v1/vendor/bookings',{headers:{authorization:'Bearer '+vendorAToken}});
+  assert.equal(ownList.status,200);
+  assert.equal((await ownList.json()).bookings.length,1);
+
+  const foreignDetail = await request('/api/v1/vendor/bookings/'+bookingId,{headers:{authorization:'Bearer '+vendorBToken}});
+  assert.equal(foreignDetail.status,404);
+
+  const customerTransition = await request('/api/v1/vendor/bookings/'+bookingId+'/status',{
+    method:'PATCH',
+    headers:{authorization:'Bearer '+customerLogin.accessToken,'content-type':'application/json'},
+    body:JSON.stringify({status:'confirmed'}),
+  });
+  assert.equal(customerTransition.status,403);
+
+  const confirm = await jsonRequest('/api/v1/vendor/bookings/'+bookingId+'/status','PATCH',{status:'confirmed'},vendorAToken);
+  assert.equal(confirm.status,200);
+  assert.equal((await confirm.json()).booking.status,'confirmed');
+
+  const customerDetail = await request('/api/v1/bookings/'+bookingId,{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  assert.equal(customerDetail.status,200);
+  assert.equal((await customerDetail.json()).booking.status,'confirmed');
+
+  const invalidTransition = await jsonRequest('/api/v1/vendor/bookings/'+bookingId+'/status','PATCH',{status:'rejected'},vendorAToken);
+  assert.equal(invalidTransition.status,409);
+
+  const start = await jsonRequest('/api/v1/vendor/bookings/'+bookingId+'/status','PATCH',{status:'in_progress'},vendorAToken);
+  assert.equal(start.status,200);
+  const complete = await jsonRequest('/api/v1/vendor/bookings/'+bookingId+'/status','PATCH',{status:'completed'},vendorAToken);
+  assert.equal(complete.status,200);
+  assert.equal((await complete.json()).booking.status,'completed');
+
+  const cancelled = await request('/api/v1/bookings/'+bookingId+'/cancel',{
+    method:'PATCH',
+    headers:{authorization:'Bearer '+customerLogin.accessToken},
+  });
+  assert.equal(cancelled.status,409);
+});
 
 test('vendor APIs reject anonymous callers', async () => {
   const response = await request('/api/v1/vendor/vehicles');

@@ -5,7 +5,7 @@ const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',line:'#E8EAF0',white:'#F
 const money=value=>`₹${Number(value||0).toLocaleString('en-IN')}`;
 
 export default function CheckoutSummary({vehicle,date,pickupTime,returnDate,returnTime,duration,city,delivery,address,quote,fallbackSubtotal=0}){
- const rental=quote?.rental, deliveryFee=quote?.deliveryFee, platformFee=quote?.platformFee, taxes=quote?.taxes, discount=quote?.discount, total=quote?.total;
+ const rental=quote?.rental, deliveryFee=quote?.deliveryFee, platformFee=quote?.platformFee, securityDeposit=quote?.securityDeposit, taxes=quote?.taxes, discount=quote?.discount, total=quote?.total;
  return <View style={styles.card}>
   <View style={styles.head}><Text style={styles.kicker}>BOOKING SUMMARY</Text>{quote?<Text style={styles.badge}>API QUOTE</Text>:null}</View>
   <Text style={styles.vehicle}>{vehicle?.emoji||'🚘'} {vehicle?.name||'Selected vehicle'}</Text>
@@ -17,7 +17,7 @@ export default function CheckoutSummary({vehicle,date,pickupTime,returnDate,retu
   {quote?<>{rental!=null&&<Line label="Rental" value={money(rental)}/>}
    {taxes!=null&&<Line label="Taxes" value={money(taxes)}/>}
    {deliveryFee!=null&&<Line label="Delivery" value={money(deliveryFee)}/>}
-   {platformFee!=null&&<Line label="Platform fee" value={money(platformFee)}/>}
+   {platformFee!=null&&<Line label="Platform fee" value={money(platformFee)}/>} {securityDeposit!=null&&securityDeposit>0&&<Line label="Security deposit" value={money(securityDeposit)}/>}
    {discount!=null&&<Line label="Discount" value={'−'+money(discount)}/>}
    {total!=null?<><View style={styles.divider}/><Line label="Payable total" value={money(total)} strong/></>:<Text style={styles.note}>The server quote did not provide a total amount.</Text>}
   </>:<><Line label="Rental subtotal" value={money(fallbackSubtotal)}/><Text style={styles.note}>No server quote has been loaded yet. This is the existing vehicle-rate subtotal only.</Text></>}

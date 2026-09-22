@@ -69,7 +69,11 @@ async function request(path, options = {}) {
   }
   if (!response.ok) {
     const message = payload?.error?.message || payload?.message || payload?.error?.code || `Request failed (${response.status})`;
-    throw new Error(String(message));
+    const error = new Error(String(message));
+    error.code = payload?.error?.code || null;
+    error.status = response.status;
+    error.details = payload?.error?.details;
+    throw error;
   }
   return payload;
 }
@@ -85,6 +89,7 @@ export const rideOnApi = {
     return request(`/api/v1/vehicles${query ? `?${query}` : ''}`);
   },
   getVehicle: (id) => request(`/api/v1/vehicles/${encode(id)}`),
+  availability: (id, params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/vehicles/${encode(id)}/availability${query ? `?${query}` : ''}`); },
   quote: (payload) => request('/api/v1/bookings/quote', { method: 'POST', body: JSON.stringify(payload) }),
   createBooking: (payload, idempotencyKey) => request('/api/v1/bookings', { method: 'POST', headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined, body: JSON.stringify(payload) }),
   getBooking: (id) => request(`/api/v1/bookings/${encode(id)}`),
