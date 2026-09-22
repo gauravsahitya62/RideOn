@@ -330,6 +330,7 @@ test('booking round trip preserves API rupees after persistence', async () => {
     rental: 4998,
     deliveryFee: 199,
     platformFee: 250,
+    securityDeposit: 0,
     total: 5447,
     currency: 'INR',
     currencyUnit: 'rupees',
@@ -360,7 +361,7 @@ test('quote pricing keeps rupees at the API boundary', async () => {
   const response = await jsonRequest('/api/v1/bookings/quote', 'POST', { vehicleId: 'creta-01', startDate: '2033-01-01', durationDays: 2, delivery: true }, aLogin.accessToken);
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.deepEqual(payload.quote, { vehicleId: 'creta-01', days: 2, rental: 4998, deliveryFee: 199, platformFee: 250, total: 5447, currency: 'INR', currencyUnit: 'rupees' });
+  assert.deepEqual(payload.quote, { vehicleId: 'creta-01', days: 2, rental: 4998, deliveryFee: 199, platformFee: 250, securityDeposit: 0, total: 5447, currency: 'INR', currencyUnit: 'rupees' });
 });
 
 
