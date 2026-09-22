@@ -562,14 +562,16 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
   if(['cancelled','rejected','completed'].includes(booking.status)) return res.status(409).json({error:{code:'BOOKING_NOT_PAYABLE',message:'This booking cannot be paid.'}});
   if(booking.paymentStatus==='paid') return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This booking is already paid.'}});
   try{
-    const amountPaise=Math.round(Number(booking.pricing.total)*100);
-    const existing=await repository.findPaymentByBooking(booking.id);
-    if(existing?.providerOrderId && ['unpaid','pending'].includes(existing.status)){
-      return res.json({payment:{id:existing.id,provider:'razorpay',orderId:existing.providerOrderId,amount:existing.amountPaise,currency:'INR',status:existing.status},keyId:paymentKeyId});
-    }
-    const order=await payments.createOrder({receipt:`rideon_${booking.id}`,amountPaise,currency:'INR',notes:{bookingId:booking.id,customerId:req.user.id}});
-    const result=await repository.createOrGetPaymentOrder({bookingId:booking.id,customerId:req.user.id,provider:'razorpay',amountPaise,currency:'INR',idempotencyKey:parsed.data.idempotencyKey,providerOrder:order});
-    return res.status(201).json({payment:{id:result.payment.id,provider:'razorpay',orderId:result.payment.providerOrderId,amount:result.payment.amountPaise,currency:'INR',status:result.payment.status},keyId:paymentKeyId});
+    return await repository.withPaymentLock(booking.id, async ()=>{
+      const amountPaise=Math.round(Number(booking.pricing.total)*100);
+      const existing=await repository.findPaymentByBooking(booking.id);
+      if(existing?.providerOrderId && ['unpaid','pending'].includes(existing.status)){
+        return res.json({payment:{id:existing.id,provider:'razorpay',orderId:existing.providerOrderId,amount:existing.amountPaise,currency:'INR',status:existing.status},keyId:paymentKeyId});
+      }
+      const order=await payments.createOrder({receipt:`rideon_${booking.id}`,amountPaise,currency:'INR',notes:{bookingId:booking.id,customerId:req.user.id}});
+      const result=await repository.createOrGetPaymentOrder({bookingId:booking.id,customerId:req.user.id,provider:'razorpay',amountPaise,currency:'INR',idempotencyKey:parsed.data.idempotencyKey,providerOrder:order});
+      return res.status(201).json({payment:{id:result.payment.id,provider:'razorpay',orderId:result.payment.providerOrderId,amount:result.payment.amountPaise,currency:'INR',status:result.payment.status},keyId:paymentKeyId});
+    });
   }catch(error){
     if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_NOT_CONFIGURED',message:'Payment provider is not configured.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
