@@ -577,8 +577,15 @@ export function createRepository({ databaseUrl, fleet }) {
       memory.paymentEvents.set(event.eventId, event);
       booking.paymentStatus = event.status;
       booking.paymentProviderReference = event.providerReference;
-      const payment = memory.payments.get(String(event.bookingId));
-      if (payment) { payment.status = event.status; payment.providerReference = event.providerReference; payment.providerPaymentId = event.providerReference; payment.updatedAt = new Date().toISOString(); }
+      const paymentRecord = event.providerOrderId
+        ? [...memory.payments.values()].find(p => p.providerOrderId === String(event.providerOrderId))
+        : memory.payments.get(String(resolvedBookingId));
+      if (paymentRecord) {
+        paymentRecord.status = event.status;
+        paymentRecord.providerReference = event.providerReference;
+        paymentRecord.providerPaymentId = event.providerReference;
+        paymentRecord.updatedAt = new Date().toISOString();
+      }
       booking.updatedAt = new Date().toISOString();
       return { applied:true, duplicate:false };
     }
