@@ -173,14 +173,44 @@ const supabaseRequireAuth = async (req, res, next) => {
       email: user.email,
       fullName: metadata.full_name || metadata.name || user.email.split('@')[0],
     });
-    req.user = { id: ensured.id, role:'customer', supabaseUserId:user.id, email:user.email };
+    const identity = await repository.findCustomerById(ensured.id);
+    if (!identity?.id) return res.status(401).json({ error:{ code:'USER_NOT_FOUND', message:'RideOn user identity could not be resolved.' } });
+    req.user = {
+      id: identity.id,
+      name: identity.fullName,
+      role: identity.role || 'customer',
+      supabaseUserId: user.id,
+      email: identity.email || user.email,
+    };
     next();
   } catch {
     return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
   }
 };
 
-const requireAuth = supabaseRequireAuth;
+const requireRole = (...roles) => (req, res, next) => {
+  if (!req.user || !roles.includes(req.user.role)) {
+    return res.status(403).json({ error:{ code:'FORBIDDEN', message:'You do not have access to this resource.' } });
+  }
+  next();
+};
+
+const requireCustomer = requireRole('customer');
+
+const requireVendor = async (req, res, next) => {
+  if (!req.user || req.user.role !== 'vendor') {
+    return res.status(403).json({ error:{ code:'FORBIDDEN', message:'Vendor access is required.' } });
+  }
+  try {
+    const vendor = await repository.findVendorByCustomerId(req.user.id);
+    if (!vendor) return res.status(404).json({ error:{ code:'VENDOR_NOT_FOUND', message:'Vendor profile not found.' } });
+    if (vendor.status === 'suspended') return res.status(403).json({ error:{ code:'FORBIDDEN', message:'Vendor account is suspended.' } });
+    req.vendor = vendor;
+    next();
+  } catch {
+    return res.status(404).json({ error:{ code:'VENDOR_NOT_FOUND', message:'Vendor profile not found.' } });
+  }
+};
 
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
@@ -203,7 +233,12 @@ app.get('/api/v1/vehicles', async (req, res) => {
   res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
 });
 
-app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => { const customer = await repository.findCustomerById(req.user.id); if (!customer) return res.status(404).json({ error:{ code:'CUSTOMER_NOT_FOUND' } }); res.json({ customer }); });
+app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
+  const customer = await repository.findCustomerById(req.user.id);
+  if (!customer) return res.status(404).json({ error:{ code:'USER_NOT_FOUND' } });
+  const user={id:customer.id,name:customer.fullName,email:customer.email||req.user.email,role:req.user.role};
+  res.json({user,customer});
+});
 
 app.get('/api/v1/vehicles/:id', async (req, res) => {
   const vehicle = await repository.getVehicle(req.params.id);
@@ -212,6 +247,116 @@ app.get('/api/v1/vehicles/:id', async (req, res) => {
   res.json({ data, vehicle: data });
 });
 
+// Vendor profile and fleet management.
+app.get('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
+  res.json({ user: { id:req.user.id, name:req.user.name, email:req.user.email, role:'vendor' }, vendor:req.vendor });
+});
+
+app.patch('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
+  const parsed=z.object({
+    businessName:z.string().trim().min(2).max(160).optional(),
+    contactName:z.string().trim().min(2).max(100).optional(),
+    phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
+    email:z.string().trim().email().max(254).optional(),
+    address:z.string().trim().max(300).optional(),
+    serviceCity:z.string().trim().min(2).max(100).optional(),
+    serviceArea:z.record(z.any()).optional(),
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid vendor profile.',details:parsed.error.flatten()}});
+  const vendor=await repository.updateVendor(req.user.id,parsed.data);
+  if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor profile not found.'}});
+  res.json({vendor});
+});
+
+const vehicleInput=z.object({
+  type:z.enum(['car','bike']),
+  name:z.string().trim().min(2).max(160),
+  make:z.string().trim().min(2).max(80).optional().default(''),
+  model:z.string().trim().min(1).max(100).optional().default(''),
+  year:z.number().int().min(1980).max(new Date().getFullYear()+1).nullable().optional(),
+  city:z.string().trim().min(2).max(100),
+  dailyRate:z.number().min(0),
+  securityDeposit:z.number().min(0).optional().default(0),
+  transmission:z.string().trim().max(30).optional().default(''),
+  fuel:z.string().trim().max(30).optional().default(''),
+  seats:z.number().int().min(1).max(16).nullable().optional(),
+  registrationNumber:z.string().trim().max(30).optional().default(''),
+  description:z.string().trim().max(2000).optional().default(''),
+  imageUrls:z.array(z.string().url()).max(12).optional().default([]),
+  deliveryAvailable:z.boolean().optional().default(true),
+  active:z.boolean().optional().default(true),
+});
+
+app.get('/api/v1/vendor/vehicles', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const activeParam=req.query.active?.toString();
+  const active=activeParam===undefined?undefined:activeParam==='true';
+  const vehicles=await repository.listVendorVehicles(req.vendor.id,{active});
+  res.json({data:vehicles,vehicles,meta:{count:vehicles.length}});
+});
+
+app.post('/api/v1/vendor/vehicles', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=vehicleInput.safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_VEHICLE',message:'Invalid vehicle details.',details:parsed.error.flatten()}});
+  try{
+    const vehicle=await repository.createVendorVehicle(req.vendor.id,parsed.data);
+    res.status(201).json({data:vehicle,vehicle});
+  }catch(error){
+    if(error.code==='VEHICLE_EXISTS') return res.status(409).json({error:{code:error.code,message:'A vehicle with this registration number already exists.'}});
+    throw error;
+  }
+});
+
+app.get('/api/v1/vendor/vehicles/:id', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const vehicle=await repository.getVendorVehicle(req.vendor.id,req.params.id);
+  if(!vehicle) return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+  res.json({data:vehicle,vehicle});
+});
+
+app.patch('/api/v1/vendor/vehicles/:id', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=vehicleInput.partial().safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_VEHICLE',message:'Invalid vehicle details.',details:parsed.error.flatten()}});
+  try{
+    const vehicle=await repository.updateVendorVehicle(req.vendor.id,req.params.id,parsed.data);
+    if(!vehicle) return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+    res.json({data:vehicle,vehicle});
+  }catch(error){
+    if(error.code==='VEHICLE_EXISTS') return res.status(409).json({error:{code:error.code,message:'A vehicle with this registration number already exists.'}});
+    throw error;
+  }
+});
+
+app.delete('/api/v1/vendor/vehicles/:id', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const vehicle=await repository.deactivateVendorVehicle(req.vendor.id,req.params.id);
+  if(!vehicle) return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+  res.json({data:vehicle,vehicle});
+});
+
+app.get('/api/v1/vendor/bookings', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const limit=Math.min(50,Math.max(1,Number(req.query.limit)||20));
+  const offset=Math.max(0,Number(req.query.offset)||0);
+  const data=await repository.listVendorBookings(req.vendor.id,{limit,offset});
+  res.json({data:data.map(publicBooking),bookings:data.map(publicBooking),pagination:{limit,offset,count:data.length}});
+});
+
+app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
+  if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+  res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+});
+
+app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['confirmed','rejected','cancelled','in_progress','completed']),note:z.string().trim().max(500).optional()}).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid booking status.',details:parsed.error.flatten()}});
+  try{
+    const booking=await repository.updateVendorBookingStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
+    res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+  }catch(error){
+    if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
+    if(error.code==='INVALID_BOOKING_TRANSITION') return res.status(409).json({error:{code:error.code,message:'Booking cannot move to that status.'}});
+    if(error.code==='INVALID_BOOKING_STATUS') return res.status(400).json({error:{code:error.code,message:'Invalid booking status.'}});
+    throw error;
+  }
+});
 
 app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
   const parsed = z.object({ email:z.string().trim().email().max(254), fullName:z.string().trim().min(2).max(100).optional() }).safeParse(req.body);
@@ -260,7 +405,7 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
   res.json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
 
-app.post('/api/v1/bookings/quote', supabaseRequireAuth, async (req, res) => {
+app.post('/api/v1/bookings/quote', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const normalized = normalizeBookingInput(req.body);
   const schema = z.object({ vehicleId: z.string(), startAt: z.string().datetime(), endAt: z.string().datetime(), delivery: z.boolean().default(true) })
     .refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt' });
@@ -274,7 +419,7 @@ app.post('/api/v1/bookings/quote', supabaseRequireAuth, async (req, res) => {
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
 });
 
-app.post('/api/v1/bookings', supabaseRequireAuth, async (req, res) => {
+app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
   const vehicle = await repository.getVehicle(parsed.data.vehicleId);
@@ -304,20 +449,20 @@ app.post('/api/v1/bookings', supabaseRequireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/v1/bookings', supabaseRequireAuth, async (req, res) => {
+app.get('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const data = await repository.listCustomerBookings({ customerId: req.user.id, limit, offset });
   res.json({ data: data.map(publicBooking), bookings: data.map(publicBooking), pagination: { limit, offset, count: data.length } });
 });
 
-app.get('/api/v1/bookings/:id', supabaseRequireAuth, async (req, res) => {
+app.get('/api/v1/bookings/:id', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const booking = await repository.getBooking(req.params.id, req.user.id);
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   res.json({ data: publicBooking(booking), booking: publicBooking(booking) });
 });
 
-app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, async (req, res) => {
+app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const booking = await repository.getBooking(req.params.id);
   if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
   if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
