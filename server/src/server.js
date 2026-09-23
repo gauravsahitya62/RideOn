@@ -140,6 +140,7 @@ function publicBooking(booking) {
     total: booking.pricing.total,
     status: booking.status,
     paymentStatus: booking.paymentStatus,
+    paymentId: booking.paymentId,
     createdAt: booking.createdAt,
     updatedAt: booking.updatedAt || booking.createdAt,
   };
