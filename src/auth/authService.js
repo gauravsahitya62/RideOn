@@ -20,45 +20,80 @@ const authErrorLog = (...args) => { try { console.error('[RideOnAuth]', ...args)
 
 export const authService = {
   async sendEmailOtp({ email, fullName }) {
-    authLog('sendEmailOtp:start', { email, hasFullName: Boolean(fullName), apiUrl: process.env.EXPO_PUBLIC_API_URL || 'default-render-api', hasSupabaseUrl: Boolean(SUPABASE_URL), hasSupabaseKey: Boolean(SUPABASE_PUBLISHABLE_KEY) });
+    authLog('sendEmailOtp:start', {
+      email,
+      hasFullName: Boolean(fullName),
+      apiUrl: process.env.EXPO_PUBLIC_API_URL || 'default-render-api',
+      hasSupabaseUrl: Boolean(SUPABASE_URL),
+      hasSupabaseKey: Boolean(SUPABASE_PUBLISHABLE_KEY),
+    });
+
     try {
       const result = await rideOnApi.requestOtp({ email, fullName });
       authLog('sendEmailOtp:rideon-api:success', { hasResponse: Boolean(result) });
       return result;
-    } catch (error) {
-      authErrorLog('sendEmailOtp:rideon-api:failed', { message: error?.message, code: error?.code, status: error?.status, details: error?.details });
-      // OTP delivery is an authentication concern, not a dependency on the RideOn API.
-      // Fall back to Supabase directly when the API is unavailable (important for Expo Go/physical devices).
-      if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
-        authErrorLog('sendEmailOtp:supabase-fallback:unavailable', { hasSupabaseUrl: Boolean(SUPABASE_URL), hasSupabaseKey: Boolean(SUPABASE_PUBLISHABLE_KEY) });
-        throw error;
-      }
-      authLog('sendEmailOtp:supabase-fallback:start', { supabaseHost: SUPABASE_URL.replace(/^https?:\/\//, '').split('/')[0] });
-      const response = await fetch(SUPABASE_URL + '/auth/v1/otp', {
-        method: 'POST',
-        headers: {
-          apikey: SUPABASE_PUBLISHABLE_KEY,
-          Authorization: 'Bearer ' + SUPABASE_PUBLISHABLE_KEY,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email,
-          create_user: true,
-          data: fullName ? { full_name: fullName } : undefined,
-        }),
+    } catch (apiError) {
+      authErrorLog('sendEmailOtp:rideon-api:failed', {
+        message: apiError?.message,
+        code: apiError?.code,
+        status: apiError?.status,
       });
-      const payload = await response.json().catch(() => ({}));
-      authLog('sendEmailOtp:supabase-fallback:response', { status: response.status, ok: response.ok, payload: response.ok ? { ok: true } : payload });
-      if (!response.ok) {
-        const fallbackError = new Error(payload?.msg || payload?.message || payload?.error_description || 'Supabase could not send the verification email.');
-        fallbackError.code = payload?.error || payload?.error_code || null;
-        fallbackError.status = response.status;
-        throw fallbackError;
+
+      if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+        authErrorLog('sendEmailOtp:supabase-fallback:unavailable', {
+          hasSupabaseUrl: Boolean(SUPABASE_URL),
+          hasSupabaseKey: Boolean(SUPABASE_PUBLISHABLE_KEY),
+        });
+        throw apiError;
       }
-      return payload;
-    } catch (error) {
-      authErrorLog('sendEmailOtp:failed', { message: error?.message, code: error?.code, status: error?.status });
-      throw error;
+
+      try {
+        const supabaseHost = SUPABASE_URL.replace(/^https?:\/\//, '').split('/')[0];
+        authLog('sendEmailOtp:supabase-fallback:start', { supabaseHost });
+
+        const response = await fetch(SUPABASE_URL + '/auth/v1/otp', {
+          method: 'POST',
+          headers: {
+            apikey: SUPABASE_PUBLISHABLE_KEY,
+            Authorization: 'Bearer ' + SUPABASE_PUBLISHABLE_KEY,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            email,
+            create_user: true,
+            data: fullName ? { full_name: fullName } : undefined,
+          }),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+
+        authLog('sendEmailOtp:supabase-fallback:response', {
+          status: response.status,
+          ok: response.ok,
+          payload: response.ok ? { ok: true } : payload,
+        });
+
+        if (!response.ok) {
+          const fallbackError = new Error(
+            payload?.msg ||
+            payload?.message ||
+            payload?.error_description ||
+            'Supabase could not send the verification email.'
+          );
+          fallbackError.code = payload?.error || payload?.error_code || null;
+          fallbackError.status = response.status;
+          throw fallbackError;
+        }
+
+        return payload;
+      } catch (supabaseError) {
+        authErrorLog('sendEmailOtp:supabase-fallback:failed', {
+          message: supabaseError?.message,
+          code: supabaseError?.code,
+          status: supabaseError?.status,
+        });
+        throw supabaseError;
+      }
     }
   },
   async verifyEmailOtp(email, token) {
