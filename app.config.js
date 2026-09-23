@@ -2,7 +2,7 @@ const appJson = require('./app.json');
 
 module.exports = ({ config }) => {
   const projectId = process.env.EAS_PROJECT_ID || config.extra?.eas?.projectId;
-  const apiUrl = process.env.EXPO_PUBLIC_API_URL || '';
+  const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://rideon-api.onrender.com';
   const easChannel = process.env.EAS_UPDATE_CHANNEL || process.env.EAS_CHANNEL || '';
   const isProduction = easChannel === 'production' || process.env.EAS_BUILD_PROFILE === 'production';
 
