@@ -1,0 +1,2 @@
+-- CI-only vehicle fixtures are restored in the database test environment by the test runner.
+-- This file intentionally does not seed production because NODE_ENV is checked by the test process.
