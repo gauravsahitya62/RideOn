@@ -570,6 +570,41 @@ test('vendor APIs reject anonymous callers', async () => {
   assert.equal(payload.error.code, 'AUTH_REQUIRED');
 });
 
+test('Supabase identity roles persist and vendor onboarding is idempotent', async () => {
+  const email='supabase-role-test@example.com';
+  const supabaseUserId=crypto.randomUUID();
+  const first=await repository.createOrLinkCustomerFromSupabase({
+    supabaseUserId,email,fullName:'Role Vendor',phone:'+911234567899',role:'vendor'
+  });
+  const second=await repository.createOrLinkCustomerFromSupabase({
+    supabaseUserId,email,fullName:'Role Vendor Changed',phone:'+911234567899',role:'vendor'
+  });
+  assert.equal(first.id,second.id);
+  assert.equal(second.role,'vendor');
+
+  const vendorOne=await repository.ensureVendorForCustomer(first.id,{
+    businessName:'Role Vendor',contactName:'Role Vendor',phone:'+911234567899',email
+  });
+  const vendorTwo=await repository.ensureVendorForCustomer(first.id,{
+    businessName:'Role Vendor Retry',contactName:'Role Vendor',phone:'+911234567899',email
+  });
+  assert.equal(vendorOne.id,vendorTwo.id);
+});
+
+test('Supabase identity refuses customer/vendor account-type conflicts', async () => {
+  const email='supabase-role-conflict@example.com';
+  const supabaseUserId=crypto.randomUUID();
+  await repository.createOrLinkCustomerFromSupabase({
+    supabaseUserId,email,fullName:'Conflict Vendor',phone:'+911234567898',role:'vendor'
+  });
+  await assert.rejects(
+    () => repository.createOrLinkCustomerFromSupabase({
+      supabaseUserId:crypto.randomUUID(),email,fullName:'Conflict Customer',phone:'+911234567897',role:'customer'
+    }),
+    error => error.code==='ACCOUNT_TYPE_CONFLICT'
+  );
+});
+
 test('customer identity exposes the existing current-user contract', async () => {
   const customer = await register('+911234567901', 'Current User Contract');
   const customerLogin = await legacyLogin('+911234567901');
