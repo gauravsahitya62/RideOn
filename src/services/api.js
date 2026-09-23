@@ -80,7 +80,16 @@ async function request(path, options = {}) {
   } catch {
     payload = {};
   }
-  if (!response.ok) {\n    const message = payload?.error?.message || payload?.message || payload?.error?.code || `Request failed (${response.status})`;\n    const error = new Error(`${String(message)} [${response.status} ${path}]`);\n    error.code = payload?.error?.code || null;\n    error.status = response.status;\n    error.path = path;\n    error.details = payload?.error?.details;\n    throw error;\n  }\n  return payload;
+  if (!response.ok) {
+    const message = payload?.error?.message || payload?.message || payload?.error?.code || `Request failed (${response.status})`;
+    const error = new Error(`${String(message)} [${response.status} ${path}]`);
+    error.code = payload?.error?.code || null;
+    error.status = response.status;
+    error.path = path;
+    error.details = payload?.error?.details;
+    throw error;
+  }
+  return payload;
 }
 
 const encode = (value) => encodeURIComponent(String(value));
