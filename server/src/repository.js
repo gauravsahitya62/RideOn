@@ -745,7 +745,11 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function verifyPayment({ paymentId, bookingId, customerId, providerPaymentId, providerOrderId, providerSignature }) {
     if (!useDatabase) {
-      const p=memory.payments?.get(String(bookingId));
+      const p=[...(memory.payments?.values()||[])].find((candidate) =>
+        candidate.id===String(paymentId) &&
+        String(candidate.bookingId)===String(bookingId) &&
+        String(candidate.customerId)===String(customerId)
+      );
       if(!p || p.id!==String(paymentId) || p.providerOrderId!==String(providerOrderId)) {const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
       p.providerPaymentId=String(providerPaymentId);p.providerReference=String(providerPaymentId);p.status='pending';p.updatedAt=new Date().toISOString();
       return p;
