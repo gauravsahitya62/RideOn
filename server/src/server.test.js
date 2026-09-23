@@ -696,4 +696,78 @@ test('mock payment provider creates deterministic UPI requests without network a
   assert.equal(service.verifyWebhook(body,signature),true);
 });
 
+test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });test('UPI payment service creates deterministic payment requests in test mode', async () => {
+  const service = createPaymentService({
+    provider:'upi',
+    merchantVpa:'rideon.test@upi',
+    webhookSecret:'upi-test-secret',
+  });
+  const payment = await service.createPaymentRequest({
+    paymentReference:'booking-test-1',
+    amountPaise:544700,
+    currency:'INR',
+  });
+  assert.equal(payment.provider,'upi');
+  assert.equal(payment.amountPaise,544700);
+  assert.equal(payment.currency,'INR');
+  assert.match(payment.upiUri, /^upi:\/\/pay\?/);
+});
+
+test('UPI verification rejects mismatched amount and accepts valid signed callback', () => {
+  const service = createPaymentService({ provider:'upi', webhookSecret:'upi-test-secret' });
+  const valid = {
+    eventId:'evt-upi-1',
+    bookingId:'booking-1',
+    paymentId:'payment-1',
+    providerReference:'upi-ref-1',
+    amountPaise:544700,
+    currency:'INR',
+    status:'paid',
+  };
+  const body = JSON.stringify(valid);
+  const signature = crypto.createHmac('sha256','upi-test-secret').update(body).digest('hex');
+  assert.equal(service.verifyWebhook(body,signature),true);
+  assert.equal(service.parseWebhook({...valid,amountPaise:1}).amountPaise,1);
+  assert.equal(service.canTransition('pending','paid'),true);
+  assert.equal(service.canTransition('paid','pending'),false);
+});
+
+test('request correlation is returned on a 404 response', async () => {
+  const response = await request('/missing-route', { headers:{'X-Request-Id':'rideon-test-123'} });
+  const payload = await response.json();
+  assert.equal(response.status,404);
+  assert.equal(response.headers.get('x-request-id'),'rideon-test-123');
+  assert.equal(payload.error.requestId,'rideon-test-123');
+});
+
+test('UPI payment state rejects direct client paid transitions', () => {
+  const service = createPaymentService({ provider:'upi', merchantVpa:'rideon.test@upi', webhookSecret:'upi-test-secret' });
+  assert.equal(service.canTransition('unpaid','paid'),false);
+  assert.equal(service.canTransition('unpaid','pending'),true);
+  assert.equal(service.canTransition('pending','paid'),true);
+  assert.equal(service.canTransition('paid','pending'),false);
+  assert.equal(service.canTransition('paid','refunded'),true);
+});
+
+test('duplicate webhook event is idempotent in memory payment state', async () => {
+  const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
+  const event={eventId:'evt-direct-duplicate',bookingId:'booking-direct-duplicate',status:'paid',providerReference:'pay-direct-duplicate',amountPaise:49900,currency:'INR',providerOrderId:'mock_order_booking-direct-duplicate'};
+  assert.equal(service.canTransition('unpaid','paid'),false);
+  assert.equal(service.canTransition('pending','paid'),true);
+  const body=JSON.stringify({event});
+  const signature=crypto.createHmac('sha256','mock-secret').update(body).digest('hex');
+  assert.equal(service.verifyWebhook(body,signature),true);
+  assert.equal(service.verifyWebhook(body,'bad'),false);
+});
+test('mock payment provider creates deterministic UPI requests without network access', async () => {
+  const service=createPaymentService({provider:'mock',merchantVpa:'rideon.test@upi',webhookSecret:'mock-secret'});
+  const order=await service.createPaymentRequest({paymentReference:'booking-1',amountPaise:544700,currency:'INR'});
+  assert.equal(order.id,'mock_payment_booking-1');
+  assert.equal(order.amountPaise,544700);
+  assert.match(order.upiUri,/^upi:\/\/pay\?/);
+  const body=JSON.stringify({eventId:'evt-mock'});
+  const signature=crypto.createHmac('sha256','mock-secret').update(body).digest('hex');
+  assert.equal(service.verifyWebhook(body,signature),true);
+});
+
 test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
