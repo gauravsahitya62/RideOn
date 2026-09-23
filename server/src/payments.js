@@ -1,32 +1,32 @@
 import crypto from 'node:crypto';
 
-const VALID_STATUSES = new Set(['unpaid','pending','paid','failed','refunded']);
-const TERMINAL_STATUS = new Set(['refunded']);
-const PROVIDERS = new Set(['upi','mock','unconfigured']);
+const RENTAL_STATUSES = new Set(['pending','paid','held','settlement_pending','settled','refund_pending','refunded','failed','disputed']);
+const PROVIDERS = new Set(['paytm','mock','unconfigured']);
 
-function paiseFromRupees(value) {
-  const n = Number(value);
-  return Number.isSafeInteger(Math.round(n * 100)) ? Math.round(n * 100) : null;
-}
-
-function stableUpiUri({ vpa, name, amountPaise, transactionRef, note }) {
-  const params = new URLSearchParams({
-    pa: vpa,
-    pn: name || 'RideOn',
-    am: (Number(amountPaise) / 100).toFixed(2),
-    cu: 'INR',
-    tr: transactionRef,
-    tn: note || 'RideOn vehicle rental',
-  });
-  return `upi://pay?${params.toString()}`;
+function transition(current, next) {
+  if (current === next) return true;
+  const allowed = {
+    pending:['paid','failed'],
+    paid:['held','refund_pending','failed','disputed'],
+    held:['settlement_pending','refund_pending','disputed'],
+    settlement_pending:['settled','failed','disputed'],
+    settled:['refund_pending','disputed'],
+    refund_pending:['refunded','failed','disputed'],
+    failed:['pending'],
+    disputed:['refund_pending','settlement_pending'],
+    refunded:[],
+  };
+  return Boolean(allowed[current]?.includes(next));
 }
 
 export function createPaymentService({
   provider = 'unconfigured',
-  merchantVpa = '',
-  merchantName = 'RideOn',
+  merchantId = '',
+  clientId = '',
+  clientSecret = '',
+  website = '',
+  callbackUrl = '',
   webhookSecret = '',
-  fetchImpl = globalThis.fetch,
 } = {}) {
   const selectedProvider = String(provider || 'unconfigured').toLowerCase();
   if (!PROVIDERS.has(selectedProvider)) {
@@ -34,100 +34,45 @@ export function createPaymentService({
     error.code = 'PAYMENT_PROVIDER_UNSUPPORTED';
     throw error;
   }
-
-  const upiConfigured = selectedProvider === 'upi' && Boolean(merchantVpa && webhookSecret);
-  const configured = selectedProvider !== 'unconfigured' && selectedProvider !== 'mock';
+  const paytmConfigured = selectedProvider === 'paytm' && Boolean(merchantId && clientId && clientSecret && website && callbackUrl);
 
   function verifyWebhook(body, signature) {
-    if (!['upi','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
+    if (!['paytm','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
     const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
     const given = String(signature).trim();
-    const a = Buffer.from(expected, 'utf8');
-    const b = Buffer.from(given, 'utf8');
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
+    const a = Buffer.from(expected);
+    const b = Buffer.from(given);
+    return a.length === b.length && crypto.timingSafeEqual(a,b);
   }
 
   function parseWebhook(payload = {}, { eventId: suppliedEventId } = {}) {
-    const eventId = suppliedEventId || payload.eventId || payload.providerEventId;
-    if (!eventId) return null;
+    const eventId = suppliedEventId || payload.eventId || payload.providerEventId || payload.referenceId;
+    const providerReference = payload.providerReference || payload.transactionReference || payload.providerTransactionId || payload.paymentId;
+    const providerOrderId = payload.providerOrderId || payload.orderId || payload.ORDERID;
     const bookingId = payload.bookingId ? String(payload.bookingId) : undefined;
     const paymentId = payload.paymentId ? String(payload.paymentId) : undefined;
-    const providerReference = payload.providerReference || payload.transactionReference || payload.utr || payload.paymentId;
-    const status = String(payload.status || '').toLowerCase();
-    const amountPaise = Number(payload.amountPaise);
-    if (!providerReference || !VALID_STATUSES.has(status) || !Number.isSafeInteger(amountPaise) || amountPaise <= 0 || payload.currency !== 'INR') return null;
-    return {
-      eventId: String(eventId),
-      bookingId,
-      paymentId,
-      status,
-      providerReference: String(providerReference),
-      providerOrderId: payload.providerOrderId ? String(payload.providerOrderId) : undefined,
-      amountPaise,
-      currency: 'INR',
-    };
+    const status = String(payload.status || payload.STATUS || '').toLowerCase();
+    const amountPaise = Number(payload.amountPaise ?? (payload.TXNAMOUNT != null ? Math.round(Number(payload.TXNAMOUNT) * 100) : NaN));
+    if (!eventId || !providerReference || !providerOrderId || !RENTAL_STATUSES.has(status) || !Number.isSafeInteger(amountPaise) || amountPaise <= 0 || (payload.currency || 'INR') !== 'INR') return null;
+    return { eventId:String(eventId), bookingId, paymentId, providerReference:String(providerReference), providerOrderId:String(providerOrderId), amountPaise, currency:'INR', status };
   }
 
-  function canTransition(currentStatus, nextStatus) {
-    if (!VALID_STATUSES.has(nextStatus)) return false;
-    if (currentStatus === nextStatus) return true;
-    if (currentStatus === 'unpaid') return nextStatus === 'pending' || nextStatus === 'failed';
-    if (currentStatus === 'pending') return nextStatus === 'paid' || nextStatus === 'failed';
-    if (currentStatus === 'failed') return nextStatus === 'pending';
-    if (currentStatus === 'paid') return nextStatus === 'refunded';
-    return false;
-  }
+  function canTransition(currentStatus, nextStatus) { return transition(currentStatus,nextStatus); }
 
-  async function createPaymentRequest({ paymentReference, amountPaise, currency='INR', note } = {}) {
-    if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
-      const error = new Error('Invalid payment amount or currency.');
-      error.code = 'PAYMENT_CREATION_FAILED';
-      throw error;
+  async function createCustomerPayment({ orderId, amountPaise } = {}) {
+    if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0) {
+      const error = new Error('Invalid payment amount.'); error.code = 'PAYMENT_CREATION_FAILED'; throw error;
     }
-    if (selectedProvider === 'mock') {
-      return {
-        id: `mock_payment_${String(paymentReference)}`,
-        provider: 'mock',
-        amountPaise: Number(amountPaise),
-        currency: 'INR',
-        status: 'pending',
-        paymentReference: String(paymentReference),
-        upiUri: stableUpiUri({ vpa: merchantVpa || 'rideon.test@upi', name: merchantName, amountPaise, transactionRef: String(paymentReference), note }),
-      };
-    }
-    if (!upiConfigured) {
-      const error = new Error('UPI payment provider is not configured.');
-      error.code = 'PAYMENT_NOT_CONFIGURED';
-      throw error;
-    }
-    const reference = String(paymentReference);
-    return {
-      id: reference,
-      provider: 'upi',
-      amountPaise: Number(amountPaise),
-      currency: 'INR',
-      status: 'pending',
-      paymentReference: reference,
-      upiVpa: merchantVpa,
-      upiUri: stableUpiUri({ vpa: merchantVpa, name: merchantName, amountPaise, transactionRef: reference, note }),
-    };
+    if (selectedProvider === 'mock') return { provider:'mock', status:'pending', providerOrderId:String(orderId), paymentUrl:`https://paytm.test/checkout/${encodeURIComponent(String(orderId))}`, amountPaise:Number(amountPaise), currency:'INR' };
+    if (!paytmConfigured) { const error = new Error('Paytm payment provider is not configured.'); error.code='PAYMENT_NOT_CONFIGURED'; throw error; }
+    const error = new Error('Verified Paytm checkout integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error;
   }
 
-  async function refundPayment() {
-    const error = new Error('Refund requires the configured UPI provider reconciliation/refund mechanism.');
-    error.code = 'REFUND_NOT_CONFIGURED';
-    throw error;
-  }
+  async function verifyPayment() { if (selectedProvider === 'mock') return { verified:true }; const error=new Error('Verified Paytm payment-status integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
+  async function refundPayment() { if (selectedProvider === 'mock') return { accepted:true }; const error=new Error('Verified Paytm refund integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
+  async function createVendorSettlement() { if (selectedProvider === 'mock') return { accepted:true }; const error=new Error('Verified Paytm marketplace/vendor settlement integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
+  async function getSettlementStatus() { if (selectedProvider === 'mock') return { status:'processing' }; const error=new Error('Verified Paytm settlement-status integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
+  async function reconcileTransaction() { if (selectedProvider === 'mock') return { reconciled:true }; const error=new Error('Verified Paytm transaction reconciliation integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
 
-  return {
-    name: configured ? selectedProvider : 'unconfigured',
-    provider: selectedProvider,
-    configured: selectedProvider === 'mock' || upiConfigured,
-    verifyWebhook,
-    parseWebhook,
-    canTransition,
-    createPaymentRequest,
-    refundPayment,
-    paiseFromRupees,
-  };
+  return { provider:selectedProvider, name:selectedProvider, configured:selectedProvider === 'mock' || paytmConfigured, verifyWebhook, parseWebhook, canTransition, createCustomerPayment, verifyPayment, refundPayment, createVendorSettlement, getSettlementStatus, reconcileTransaction };
 }
