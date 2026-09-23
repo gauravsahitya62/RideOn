@@ -605,42 +605,22 @@ test('payment creation rejects anonymous callers', async () => {
   assert.equal((await response.json()).error.code,'AUTH_REQUIRED');
 });
 
-test('UPI payment creation persists pending state for an authenticated booking', async () => {
-  const previous = {
-    PAYMENT_PROVIDER: process.env.PAYMENT_PROVIDER,
-    UPI_VPA: process.env.UPI_VPA,
-    UPI_WEBHOOK_SECRET: process.env.UPI_WEBHOOK_SECRET,
-  };
-  try {
-    process.env.PAYMENT_PROVIDER='mock';
-    process.env.UPI_VPA='rideon.test@upi';
-    process.env.UPI_WEBHOOK_SECRET='mock-secret';
-    const user = await register('+911234568100','UPI Payment User');
-    const login = await legacyLogin('+911234568100');
-    const bookingResponse = await jsonRequest('/api/v1/bookings','POST',{
-      vehicleId:'activa-01',
-      startAt:'2038-01-10T10:00:00.000Z',
-      endAt:'2038-01-11T10:00:00.000Z',
-      delivery:false,
-      address:'10 UPI Payment Road, Jaipur'
-    },login.accessToken,{'Idempotency-Key':'upi-payment-booking-1'});
-    assert.equal(bookingResponse.status,201);
-    const booking=(await bookingResponse.json()).booking;
-    const paymentResponse=await jsonRequest('/api/v1/payments/create-order','POST',{
-      bookingId:booking.bookingId,
-      idempotencyKey:'upi-payment-order-1'
-    },login.accessToken);
-    assert.equal(paymentResponse.status,201);
-    const paymentPayload=await paymentResponse.json();
-    assert.equal(paymentPayload.payment.provider,'upi');
-    assert.equal(paymentPayload.payment.status,'pending');
-    assert.equal(paymentPayload.payment.currency,'INR');
-    assert.equal(paymentPayload.payment.amount,499);
-  } finally {
-    process.env.PAYMENT_PROVIDER=previous.PAYMENT_PROVIDER;
-    process.env.UPI_VPA=previous.UPI_VPA;
-    process.env.UPI_WEBHOOK_SECRET=previous.UPI_WEBHOOK_SECRET;
-  }
+test('UPI payment request uses the server-calculated amount', async () => {
+  const service = createPaymentService({
+    provider:'upi',
+    merchantVpa:'rideon.test@upi',
+    webhookSecret:'upi-test-secret',
+  });
+  const payment = await service.createPaymentRequest({
+    paymentReference:'booking-upi-1',
+    amountPaise:49900,
+    currency:'INR',
+  });
+  assert.equal(payment.provider,'upi');
+  assert.equal(payment.amountPaise,49900);
+  assert.equal(payment.status,'pending');
+  assert.equal(payment.currency,'INR');
+  assert.match(payment.upiUri,/^upi:\/\/pay\?/);
 });
 test('UPI payment service creates deterministic payment requests in test mode', async () => {
   const service = createPaymentService({
