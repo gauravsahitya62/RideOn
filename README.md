@@ -161,19 +161,16 @@ Authentication endpoints have a dedicated rate limit in addition to the global A
 
 ## Payments
 
-No real payment provider is configured.
+UPI is the primary MVP payment method. The API creates a server-calculated INR payment request and may return a UPI deep link. The mobile app never treats a deep-link return or a customer-entered UTR/reference as proof of payment.
 
-The payment boundary requires a provider event ID, booking ID, provider reference, INR currency, and integer amount in paise. Verified webhooks are the only source of payment status changes. Duplicate provider event IDs are ignored.
+The payment state machine is explicit:
 
-Supported status transitions are explicit:
+`unpaid → pending → paid`, `pending → failed`, `paid → refunded`.
 
-`unpaid → pending/failed → paid/failed → refunded` with retry from `failed → pending`. Terminal/refunded bookings cannot move backwards.
-
-A stale event cannot move a paid booking back to pending/failed. Booking amount, currency, provider reference, and current payment state are checked inside the repository transaction before a persistent event is applied.
-
-Do not set `PAYMENT_PROVIDER` to a real provider until its real credentials, provider-specific signature verification, event mapping, and refund behavior are implemented and tested. The app must not represent a demo payment as a completed charge.
+Production requires `PAYMENT_PROVIDER=upi`, `UPI_VPA`, and `UPI_WEBHOOK_SECRET`. A real authoritative provider callback/verification path must exist before live payments can be considered production-ready.
 
 ## Testing
+
 
 Memory-path API tests:
 
