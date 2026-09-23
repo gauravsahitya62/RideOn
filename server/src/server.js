@@ -632,7 +632,6 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
           amount:existing.amountPaise, amountPaise:existing.amountPaise,
           currency:'INR', status:existing.status,
           paymentReference:existing.providerOrderId || existing.providerReference,
-          upiVpa:upiMerchantVpa,
         }});
       }
       const paymentReference = `rideon_${booking.id}`;
