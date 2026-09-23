@@ -150,6 +150,14 @@ function publicBooking(booking) {
 }
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
+console.log('[RideOnServer][BOOT]', JSON.stringify({
+  nodeEnv: process.env.NODE_ENV || 'development',
+  port: Number(process.env.PORT) || 4000,
+  buildCommit,
+  hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
+  hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
+  hasSupabaseKey: Boolean(process.env.SUPABASE_PUBLISHABLE_KEY)
+}));
 const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'paytm' : 'mock')).toLowerCase();
 const paytmMerchantId = process.env.PAYTM_MERCHANT_ID || '';
 const paytmClientId = process.env.PAYTM_CLIENT_ID || '';
@@ -508,6 +516,17 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
 });
 
 app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) => {
+  console.log('[RideOnAuth][COMPLETE_REGISTRATION_REQUEST]', JSON.stringify({
+    requestId:req.requestId,
+    method:req.method,
+    path:req.path,
+    hasAuthorization:Boolean(req.get('Authorization')),
+    bodyKeys:Object.keys(req.body || {}),
+    accountType:req.body?.accountType || null,
+    fullNameLength:String(req.body?.fullName || '').length,
+    hasPhone:Boolean(req.body?.phone),
+    buildCommit
+  }));
   const header=req.get('Authorization')||'';
   const token=header.startsWith('Bearer ')?header.slice(7).trim():'';
   if(!token) return res.status(401).json({error:{code:'AUTH_REQUIRED',message:'Authentication required.'}});
@@ -520,21 +539,28 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
   }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid account type and registration details.'}});
   try{
+    console.log('[RideOnAuth][TOKEN_VERIFY_START]', JSON.stringify({requestId:req.requestId, buildCommit}));
     const supa=await verifySupabaseAccessToken(token);
+    console.log('[RideOnAuth][TOKEN_VERIFY_RESULT]', JSON.stringify({requestId:req.requestId, valid:Boolean(supa?.id), hasEmail:Boolean(supa?.email)}));
     if(!supa?.id||!supa?.email) return res.status(401).json({error:{code:'INVALID_TOKEN',message:'Session is invalid or expired.'}});
+    console.log('[RideOnAuth][IDENTITY_LINK_START]', JSON.stringify({requestId:req.requestId, accountType:parsed.data.accountType, email: supa.email}));
     const customer=await repository.createOrLinkCustomerFromSupabase({
       supabaseUserId:supa.id,email:supa.email,fullName:parsed.data.fullName,phone:parsed.data.phone,role:parsed.data.accountType,
     });
+    console.log('[RideOnAuth][IDENTITY_LINK_SUCCESS]', JSON.stringify({requestId:req.requestId, customerId:customer.id, role:customer.role}));
     let vendor=null;
     if(parsed.data.accountType==='vendor'){
+      console.log('[RideOnAuth][VENDOR_PROFILE_START]', JSON.stringify({requestId:req.requestId, customerId:customer.id}));
       vendor=await repository.ensureVendorForCustomer(customer.id,{
         businessName:parsed.data.fullName,contactName:parsed.data.fullName,
         phone:parsed.data.phone,email:supa.email,serviceCity:'Jaipur'
       });
+      console.log('[RideOnAuth][VENDOR_PROFILE_RESULT]', JSON.stringify({requestId:req.requestId, created:Boolean(vendor)}));
       if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
     }
     return res.json({user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},customer,vendor});
   }catch(error){
+    console.error('[RideOnAuth][COMPLETE_REGISTRATION_ERROR]', JSON.stringify({requestId:req.requestId, code:error?.code, message:error?.message, buildCommit}));
     if(error.code==='ACCOUNT_TYPE_CONFLICT') return res.status(409).json({error:{code:error.code,message:error.message}});
     console.error(JSON.stringify({level:'error',event:'registration_completion_failed',requestId:req.requestId,code:error?.code||'REGISTRATION_COMPLETION_FAILED'}));
     return res.status(500).json({error:{code:'REGISTRATION_COMPLETION_FAILED',message:'We could not complete your RideOn registration right now.'}});
