@@ -61,6 +61,9 @@ jobs:
       - name: Apply PostgreSQL migrations
         working-directory: server
         run: npm run db:migrate
+      - name: Seed PostgreSQL integration fixtures
+        working-directory: server
+        run: node scripts/seed-test-fixtures.js
       - name: Run PostgreSQL API tests
         working-directory: server
         run: npm test
