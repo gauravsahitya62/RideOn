@@ -155,14 +155,51 @@ export const authService = {
   },
 
   async currentUser() {
-    const result = await rideOnApi.me();
-    const user = result?.user;
+    try {
+      const result = await rideOnApi.me();
+      const user = result?.user;
 
-    if (!user?.id || !['customer', 'vendor'].includes(user.role)) {
-      throw new Error('Your RideOn account has no valid role.');
+      if (!user?.id || !['customer', 'vendor'].includes(user.role)) {
+        throw new Error('Your RideOn account has no valid role.');
+      }
+
+      return user;
+    } catch (apiError) {
+      log('currentUser:api:failed', {
+        message: apiError?.message,
+        status: apiError?.status,
+      });
+
+      if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY || !accessToken) {
+        throw apiError;
+      }
+
+      const response = await fetch(SUPABASE_URL + '/auth/v1/user', {
+        method: 'GET',
+        headers: {
+          apikey: SUPABASE_PUBLISHABLE_KEY,
+          Authorization: 'Bearer ' + accessToken,
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      log('currentUser:supabase:response', {
+        status: response.status,
+        ok: response.ok,
+      });
+
+      if (!response.ok || !payload?.id || !payload?.email) {
+        throw apiError;
+      }
+
+      const metadata = payload.user_metadata || {};
+      return {
+        id: payload.id,
+        name: metadata.full_name || metadata.name || payload.email.split('@')[0],
+        email: payload.email,
+        role: 'customer',
+      };
     }
-
-    return user;
   },
 
   async signOut() {
