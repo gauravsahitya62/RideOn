@@ -50,12 +50,17 @@ export async function clearStoredAccessToken() {
 }
 
 async function request(path, options = {}) {
+  const requestId = `mobile-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  const method = options.method || 'GET';
+  const url = `${API_URL}${path}`;
+  const startedAt = Date.now();
+  console.log('[RideOnNetwork][REQUEST]', JSON.stringify({ requestId, method, url, hasAuthToken: Boolean(accessToken) }));
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   let timeoutId;
   let response;
   try {
     if (controller) timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    response = await fetch(`${API_URL}${path}`, {
+    response = await fetch(url, {
       ...options,
       ...(controller ? { signal: controller.signal } : {}),
       headers: {
@@ -66,6 +71,7 @@ async function request(path, options = {}) {
       },
     });
   } catch (error) {
+    console.error('[RideOnNetwork][FETCH_ERROR]', JSON.stringify({ requestId, method, url, elapsedMs: Date.now() - startedAt, name: error?.name, message: error?.message }));
     if (error?.name === 'AbortError') {
       throw new Error(`RideOn API request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds. Check your connection and retry.`);
     }
@@ -80,6 +86,7 @@ async function request(path, options = {}) {
   } catch {
     payload = {};
   }
+  console.log('[RideOnNetwork][RESPONSE]', JSON.stringify({ requestId, method, url, status: response.status, ok: response.ok, elapsedMs: Date.now() - startedAt, errorCode: payload?.error?.code || null }));
   if (!response.ok) {
     const message = payload?.error?.message || payload?.message || payload?.error?.code || `Request failed (${response.status})`;
     const error = new Error(`${String(message)} [${response.status} ${path}]`);
@@ -87,8 +94,10 @@ async function request(path, options = {}) {
     error.status = response.status;
     error.path = path;
     error.details = payload?.error?.details;
+    console.error('[RideOnNetwork][HTTP_ERROR]', JSON.stringify({ requestId, method, url, status: response.status, path, errorCode: error.code, message: error.message, response: payload?.error || payload?.message || null }));
     throw error;
   }
+  console.log('[RideOnNetwork][SUCCESS]', JSON.stringify({ requestId, method, path, status: response.status }));
   return payload;
 }
 
