@@ -484,7 +484,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function findCustomerBySupabaseUserId(id) {
-    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,supabaseUserId:c.supabaseUserId}:null; }
+    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,role:c.role||'customer',supabaseUserId:c.supabaseUserId}:null; }
     const { rows } = await pool.query('select id,full_name,phone,email,role,supabase_user_id from customers where supabase_user_id=$1',[id]);
     return rows[0]?mapCustomer(rows[0]):null;
   }
