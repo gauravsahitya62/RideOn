@@ -775,7 +775,11 @@ export function createRepository({ databaseUrl, fleet }) {
       throw e;
     }
     if (!useDatabase) {
-      const p=memory.payments?.get(String(bookingId));
+      const p=[...(memory.payments?.values()||[])].find((candidate) =>
+        candidate.id===String(paymentId) &&
+        String(candidate.bookingId)===String(bookingId) &&
+        String(candidate.customerId)===String(customerId)
+      );
       if(!p || p.id!==String(paymentId) || String(p.customerId)!==String(customerId)) {
         const e=new Error('Payment not found.'); e.code='PAYMENT_NOT_FOUND'; throw e;
       }
