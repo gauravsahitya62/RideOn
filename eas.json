@@ -7,15 +7,27 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "channel": "development"
+      "channel": "development",
+      "env": {
+        "EAS_BUILD_PROFILE": "development",
+        "EAS_UPDATE_CHANNEL": "development"
+      }
     },
     "preview": {
       "distribution": "internal",
-      "channel": "preview"
+      "channel": "preview",
+      "env": {
+        "EAS_BUILD_PROFILE": "preview",
+        "EAS_UPDATE_CHANNEL": "preview"
+      }
     },
     "production": {
       "channel": "production",
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EAS_BUILD_PROFILE": "production",
+        "EAS_UPDATE_CHANNEL": "production"
+      }
     }
   },
   "submit": {
