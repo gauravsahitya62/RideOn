@@ -11,6 +11,7 @@ const { app, repository } = await import('./server.js');
 
 let server;
 let base;
+let serverStarted = false;
 
 const testVehicles = [
   { id:'creta-01', type:'car', name:'Hyundai Creta', city:'Jaipur', pricePerDay:2499, active:true, transmission:'Automatic', fuel:'Petrol', seats:5, securityDeposit:0 },
@@ -45,6 +46,7 @@ async function seedPostgresTestVehicles() {
 test.before(async () => {
   server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  serverStarted = true;
   base = `http://127.0.0.1:${server.address().port}`;
   await seedPostgresTestVehicles();
 });
@@ -728,7 +730,7 @@ test('mock payment provider creates deterministic UPI requests without network a
   assert.equal(service.verifyWebhook(body,signature),true);
 });
 
-test.after(async () => { if (server?.listening) { await new Promise((resolve) => server.close(() => resolve())); } await repository.close(); });test('UPI payment service creates deterministic payment requests in test mode', async () => {
+test.after(async () => { if (serverStarted && server?.listening) { await new Promise((resolve) => server.close(() => resolve())); } await repository.close(); });test('UPI payment service creates deterministic payment requests in test mode', async () => {
   const service = createPaymentService({
     provider:'upi',
     merchantVpa:'rideon.test@upi',
