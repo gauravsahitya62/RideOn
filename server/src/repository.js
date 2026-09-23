@@ -569,6 +569,8 @@ export function createRepository({ databaseUrl, fleet }) {
       const resolvedBookingId = event.bookingId || payment?.bookingId;
       const booking = resolvedBookingId ? memory.bookings.get(String(resolvedBookingId)) : null;
       if (!booking || !payment) return { applied:false, duplicate:false, invalid:true };
+      // Persist the first valid event before mutating booking/payment state so a retry is a strict replay.
+
       if (event.providerOrderId && payment.providerOrderId !== String(event.providerOrderId)) return { applied:false, duplicate:false, invalid:true };
       const expectedPaise = Math.round(Number(booking.pricing?.total || 0) * 100);
       if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedPaise || !event.providerReference || !canTransition(booking.paymentStatus || 'unpaid', event.status)) {
