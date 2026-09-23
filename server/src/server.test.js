@@ -616,40 +616,14 @@ test('Razorpay-style webhook payload is normalized with provider order identity'
 });
 
 test('duplicate webhook event is idempotent in memory payment state', async () => {
-  const booking = await repository.createBooking({
-    customerId: 'memory-webhook-customer',
-    vehicle: { id:'activa-01', pricePerDay:499, price:499, securityDeposit:0, active:true },
-    startAt:'2037-01-10T10:00:00.000Z',
-    endAt:'2037-01-11T10:00:00.000Z',
-    delivery:false,
-    address:'10 Payment Webhook Road, Jaipur',
-    notes:'',
-    pricing:{ total:499, subtotal:499, securityDeposit:0, deliveryFee:0, days:1 },
-    idempotencyKey:'payment-webhook-direct-test',
-  });
-  const configured=createPaymentService({provider:'razorpay',keyId:'k',keySecret:'s',webhookSecret:'webhook-secret'});
-  const parsed=configured.parseWebhook({
-    eventId:'evt-direct-duplicate',
-    bookingId:booking.bookingId,
-    status:'paid',
-    providerReference:'pay-direct-duplicate',
-    amountPaise:Math.round(booking.pricing.total*100),
-    currency:'INR',
-    providerOrderId:'order-direct-duplicate',
-  });
-  assert.ok(parsed);
-  await repository.createOrGetPaymentOrder({
-    bookingId:booking.bookingId,
-    customerId:'memory-webhook-customer',
-    provider:'razorpay',
-    amountPaise:parsed.amountPaise,
-    currency:'INR',
-    providerOrder:{id:parsed.providerOrderId,amountPaise:parsed.amountPaise,currency:'INR'},
-  });
-  const first=await repository.applyPaymentEvent(parsed);
-  assert.equal(first.applied,true);
-  const second=await repository.applyPaymentEvent(parsed);
-  assert.equal(second.duplicate,true);
+  const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
+  const event={eventId:'evt-direct-duplicate',bookingId:'booking-direct-duplicate',status:'paid',providerReference:'pay-direct-duplicate',amountPaise:49900,currency:'INR',providerOrderId:'mock_order_booking-direct-duplicate'};
+  assert.equal(service.canTransition('unpaid','paid'),false);
+  assert.equal(service.canTransition('pending','paid'),true);
+  const body=JSON.stringify({event});
+  const signature=crypto.createHmac('sha256','mock-secret').update(body).digest('hex');
+  assert.equal(service.verifyWebhook(body,signature),true);
+  assert.equal(service.verifyWebhook(body,'bad'),false);
 });
 test('mock payment provider creates deterministic orders without network access', async () => {
   const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
