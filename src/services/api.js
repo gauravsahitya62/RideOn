@@ -3,8 +3,10 @@ import * as SecureStore from 'expo-secure-store';
 
 // Set EXPO_PUBLIC_API_URL in your local .env. Android emulator uses 10.0.2.2;
 // iOS simulator uses localhost. A physical device needs your computer's LAN IP.
-const DEFAULT_API_URL = 'https://rideon-api-262g.onrender.com';
-const API_URL = (process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).replace(/\/$/, '');
+const DEFAULT_API_URL = process.env.NODE_ENV === 'development' ? 'http://10.0.2.2:4000' : '';
+const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
+if (!configuredApiUrl) throw new Error('EXPO_PUBLIC_API_URL must be configured for non-development builds.');
+const API_URL = configuredApiUrl.replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = 20000;
 let accessToken = null;
 const ACCESS_TOKEN_KEY = 'rideon_access_token';
