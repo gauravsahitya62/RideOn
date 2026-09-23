@@ -466,7 +466,25 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
 });
 
 app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
-  return res.status(410).json({ error:{ code:'OTP_FLOW_RETIRED', message:'RideOn now verifies email OTPs with Supabase Auth. Update the app to use the Supabase session.' } });
+  const parsed = z.object({ email:z.string().trim().email().max(254), token:z.string().trim().regex(/^\\d{6}$/) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Provide the email address and 6-digit verification code.' } });
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+  if (!supabaseUrl || !publishableKey) return res.status(503).json({ error:{ code:'AUTH_NOT_CONFIGURED', message:'Supabase authentication is not configured.' } });
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/verify`, {
+      method:'POST',
+      headers:{ apikey:publishableKey, Authorization:`Bearer ${publishableKey}`, 'Content-Type':'application/json' },
+      body:JSON.stringify({ email:parsed.data.email.toLowerCase(), token:parsed.data.token, type:'email' })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.access_token) {
+      return res.status(response.status===429?429:401).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:payload?.msg || payload?.error_description || 'The verification code is invalid or expired.' } });
+    }
+    return res.json({ data:{ accessToken:payload.access_token, refreshToken:payload.refresh_token, expiresIn:payload.expires_in }, accessToken:payload.access_token });
+  } catch {
+    return res.status(502).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:'Unable to verify the RideOn code right now.' } });
+  }
 });
 
 app.post('/api/v1/auth/register', authRateLimit, async (req, res) => {
