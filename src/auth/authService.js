@@ -17,7 +17,31 @@ async function verifySupabaseEmailOtp(email, token) {
 
 export const authService = {
   async sendEmailOtp({ email, fullName }) {
-    return rideOnApi.requestOtp({ email, fullName });
+    try {
+      return await rideOnApi.requestOtp({ email, fullName });
+    } catch (error) {
+      // OTP delivery is an authentication concern, not a dependency on the RideOn API.
+      // Fall back to Supabase directly when the API is unavailable (important for Expo Go/physical devices).
+      if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) throw error;
+      const response = await fetch(SUPABASE_URL + '/auth/v1/otp', {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_PUBLISHABLE_KEY,
+          Authorization: 'Bearer ' + SUPABASE_PUBLISHABLE_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          email,
+          create_user: true,
+          data: fullName ? { full_name: fullName } : undefined,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.msg || payload?.message || payload?.error_description || 'Supabase could not send the verification email.');
+      }
+      return payload;
+    }
   },
   async verifyEmailOtp(email, token) {
     const result = await rideOnApi.verifyOtp({ email, token });
