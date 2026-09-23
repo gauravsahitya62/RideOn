@@ -610,7 +610,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       const existing=await repository.findPaymentByBooking(booking.id);
       if(existing && ['unpaid','pending'].includes(existing.status)) {
         return res.json({payment:{
-          id:existing.id, bookingId:existing.bookingId, provider:'upi',
+          id:existing.id, bookingId:existing.bookingId, provider:existing.provider || paymentProvider,
           amount:existing.amountPaise, amountPaise:existing.amountPaise,
           currency:'INR', status:existing.status,
           paymentReference:existing.providerOrderId || existing.providerReference,
@@ -626,7 +626,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
         amountPaise,
         currency:'INR',
         idempotencyKey:parsed.data.idempotencyKey,
-        providerOrder:{id:paymentRequest.paymentReference || paymentRequest.id,amountPaise:paymentRequest.amountPaise,currency:'INR'},
+        providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'},
       });
       return res.status(201).json({payment:{
         id:result.payment.id,
