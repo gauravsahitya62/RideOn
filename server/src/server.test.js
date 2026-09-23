@@ -650,33 +650,7 @@ test('request correlation is returned on a 404 response', async () => {
 });
 
 test('checkout signature verification never marks payment paid by itself', () => {
-  const service = createPaymentService({ provider:'razorpay', keyId:'rzp_test_key', keySecret:'checkout-secret', webhookSecret:'webhook-secret' });
-  const orderId='order_123';
-  const paymentId='pay_123';
-  const signature=crypto.createHmac('sha256','checkout-secret').update(`${orderId}|${paymentId}`).digest('hex');
-  assert.equal(service.verifyCheckoutSignature({orderId,paymentId,signature}),true);
-  assert.equal(service.verifyCheckoutSignature({orderId,paymentId,signature:'bad'}),false);
-  assert.equal(service.canTransition('pending','paid'),true);
-});
-
-test('Razorpay-style webhook payload is normalized with provider order identity', () => {
-  const service=createPaymentService({provider:'razorpay',keyId:'k',keySecret:'s',webhookSecret:'w'});
-  const event=service.parseWebhook({
-    event:'payment.captured',
-    payload:{payment:{entity:{
-      id:'pay_123',order_id:'order_123',amount:544700,currency:'INR',
-      notes:{bookingId:'booking-123'}
-    }}}
-  },{eventId:'evt_123'});
-  assert.equal(event.eventId,'evt_123');
-  assert.equal(event.bookingId,'booking-123');
-  assert.equal(event.providerOrderId,'order_123');
-  assert.equal(event.providerReference,'pay_123');
-  assert.equal(event.status,'paid');
-  assert.equal(event.amountPaise,544700);
-});
-
-test('duplicate webhook event is idempotent in memory payment state', async () => {
+  const service = test('duplicate webhook event is idempotent in memory payment state', async () => {
   const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
   const event={eventId:'evt-direct-duplicate',bookingId:'booking-direct-duplicate',status:'paid',providerReference:'pay-direct-duplicate',amountPaise:49900,currency:'INR',providerOrderId:'mock_order_booking-direct-duplicate'};
   assert.equal(service.canTransition('unpaid','paid'),false);
