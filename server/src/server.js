@@ -331,6 +331,7 @@ app.get('/health', async (_req, res) => {
     service: 'rideon-api',
     storage,
     paymentProvider: payments.name,
+    buildCommit,
     timestamp: new Date().toISOString(),
   });
 });
