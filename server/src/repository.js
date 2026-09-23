@@ -81,7 +81,7 @@ export function createRepository({ databaseUrl, fleet }) {
     }
     if (q) {
       params.push(`%${q}%`);
-      where.push(`(name ilike ${params.length}::text or coalesce(make, '') ilike ${params.length}::text or coalesce(model, '') ilike ${params.length}::text)`);
+      where.push(`(name ilike ${params.length} or coalesce(make, '') ilike ${params.length} or coalesce(model, '') ilike ${params.length})`);
     }
 
     const { rows } = await pool.query(
