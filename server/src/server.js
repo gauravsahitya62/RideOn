@@ -499,7 +499,8 @@ app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
       return res.status(response.status===429?429:401).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:payload?.msg || payload?.error_description || 'The verification code is invalid or expired.' } });
     }
     return res.json({ data:{ accessToken:payload.access_token, refreshToken:payload.refresh_token, expiresIn:payload.expires_in }, accessToken:payload.access_token });
-  } catch {
+  } catch (error) {
+    console.error('[rideon-auth] OTP verification failed', { message:error?.message, code:error?.code });
     return res.status(502).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:'Unable to verify the RideOn code right now.' } });
   }
 });
