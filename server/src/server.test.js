@@ -605,6 +605,42 @@ test('payment creation rejects anonymous callers', async () => {
   assert.equal((await response.json()).error.code,'AUTH_REQUIRED');
 });
 
+test('UPI payment service creates deterministic payment requests in test mode', async () => {
+  const service = createPaymentService({
+    provider:'upi',
+    merchantVpa:'rideon.test@upi',
+    webhookSecret:'upi-test-secret',
+  });
+  const payment = await service.createPaymentRequest({
+    paymentReference:'booking-test-1',
+    amountPaise:544700,
+    currency:'INR',
+  });
+  assert.equal(payment.provider,'upi');
+  assert.equal(payment.amountPaise,544700);
+  assert.equal(payment.currency,'INR');
+  assert.match(payment.upiUri, /^upi:\/\/pay\?/);
+});
+
+test('UPI verification rejects mismatched amount and accepts valid signed callback', () => {
+  const service = createPaymentService({ provider:'upi', webhookSecret:'upi-test-secret' });
+  const valid = {
+    eventId:'evt-upi-1',
+    bookingId:'booking-1',
+    paymentId:'payment-1',
+    providerReference:'upi-ref-1',
+    amountPaise:544700,
+    currency:'INR',
+    status:'paid',
+  };
+  const body = JSON.stringify(valid);
+  const signature = crypto.createHmac('sha256','upi-test-secret').update(body).digest('hex');
+  assert.equal(service.verifyWebhook(body,signature),true);
+  assert.equal(service.parseWebhook({...valid,amountPaise:1}).amountPaise,1);
+  assert.equal(service.canTransition('pending','paid'),true);
+  assert.equal(service.canTransition('paid','pending'),false);
+});
+
 test('request correlation is returned on a 404 response', async () => {
   const response = await request('/missing-route', { headers:{'X-Request-Id':'rideon-test-123'} });
   const payload = await response.json();
