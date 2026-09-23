@@ -22,8 +22,11 @@ const run = (script) => new Promise((resolve, reject) => {
   });
 });
 
+console.log('[RideOnStart][MIGRATION_START]', JSON.stringify({ nodeEnv: process.env.NODE_ENV || 'development', hasDatabaseUrl: Boolean(process.env.DATABASE_URL) }));
 await run('scripts/migrate.js');
+console.log('[RideOnStart][MIGRATION_COMPLETE]');
 
+console.log('[RideOnStart][API_START]', JSON.stringify({ nodeEnv: process.env.NODE_ENV || 'development' }));
 const child = spawn(process.execPath, ['src/server.js'], {
   stdio: 'inherit',
   env: process.env,
