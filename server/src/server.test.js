@@ -668,13 +668,12 @@ test('duplicate webhook event is idempotent in memory payment state', async () =
   assert.equal(service.verifyWebhook(body,signature),true);
   assert.equal(service.verifyWebhook(body,'bad'),false);
 });
-test('mock payment provider creates deterministic orders without network access', async () => {
-  const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
+test('mock payment provider creates deterministic UPI requests without network access', async () => {
+  const service=createPaymentService({provider:'mock',merchantVpa:'rideon.test@upi',webhookSecret:'mock-secret'});
   const order=await service.createPaymentRequest({paymentReference:'booking-1',amountPaise:544700,currency:'INR'});
-  assert.equal(order.id,'mock_order_booking-1');
+  assert.equal(order.id,'mock_payment_booking-1');
   assert.equal(order.amountPaise,544700);
-  const refund=await service.refundPayment();
-  assert.equal(refund.providerReference,'pay-1');
+  assert.match(order.upiUri,/^upi:\/\/pay\?/);
   const body=JSON.stringify({eventId:'evt-mock'});
   const signature=crypto.createHmac('sha256','mock-secret').update(body).digest('hex');
   assert.equal(service.verifyWebhook(body,signature),true);
