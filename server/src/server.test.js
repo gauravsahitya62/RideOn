@@ -616,33 +616,41 @@ test('Razorpay-style webhook payload is normalized with provider order identity'
 });
 
 test('duplicate webhook event is idempotent in memory payment state', async () => {
-  const user=await register('+911234568001','Webhook Duplicate User');
-  const login=await legacyLogin('+911234568001');
-  const created=await jsonRequest('/api/v1/bookings','POST',{
-    vehicleId:'activa-01',startAt:'2037-01-10T10:00:00.000Z',endAt:'2037-01-11T10:00:00.000Z',
-    delivery:false,address:'10 Payment Webhook Road, Jaipur'
-  },login.accessToken,{'Idempotency-Key':`payment-booking-${Date.now()}`});
-  assert.equal(created.status,201);
-  const booking=(await created.json()).booking;
-  const providerOrderId=`order-duplicate-${booking.bookingId}`;
-  const payload={eventId:`evt-duplicate-${booking.bookingId}`,bookingId:booking.bookingId,status:'paid',providerReference:`pay-duplicate-${booking.bookingId}`,amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrderId};
+  const booking = await repository.createBooking({
+    customerId: 'memory-webhook-customer',
+    vehicle: { id:'activa-01', pricePerDay:499, price:499, securityDeposit:0, active:true },
+    startAt:'2037-01-10T10:00:00.000Z',
+    endAt:'2037-01-11T10:00:00.000Z',
+    delivery:false,
+    address:'10 Payment Webhook Road, Jaipur',
+    notes:'',
+    pricing:{ total:499, subtotal:499, securityDeposit:0, deliveryFee:0, days:1 },
+    idempotencyKey:'payment-webhook-direct-test',
+  });
   const configured=createPaymentService({provider:'razorpay',keyId:'k',keySecret:'s',webhookSecret:'webhook-secret'});
-  const parsed=configured.parseWebhook(payload);
-  const customerIdentity=await repository.findCustomerByPhone('+911234568001');
+  const parsed=configured.parseWebhook({
+    eventId:'evt-direct-duplicate',
+    bookingId:booking.bookingId,
+    status:'paid',
+    providerReference:'pay-direct-duplicate',
+    amountPaise:Math.round(booking.pricing.total*100),
+    currency:'INR',
+    providerOrderId:'order-direct-duplicate',
+  });
+  assert.ok(parsed);
   await repository.createOrGetPaymentOrder({
     bookingId:booking.bookingId,
-    customerId:customerIdentity.id,
+    customerId:'memory-webhook-customer',
     provider:'razorpay',
     amountPaise:parsed.amountPaise,
     currency:'INR',
-    providerOrder:{id:parsed.providerOrderId,amountPaise:parsed.amountPaise,currency:'INR'}
+    providerOrder:{id:parsed.providerOrderId,amountPaise:parsed.amountPaise,currency:'INR'},
   });
   const first=await repository.applyPaymentEvent(parsed);
   assert.equal(first.applied,true);
   const second=await repository.applyPaymentEvent(parsed);
   assert.equal(second.duplicate,true);
 });
-
 test('mock payment provider creates deterministic orders without network access', async () => {
   const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
   const order=await service.createOrder({receipt:'booking-1',amountPaise:544700,currency:'INR'});
