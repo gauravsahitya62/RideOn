@@ -629,6 +629,8 @@ test('duplicate webhook event is idempotent in memory payment state', async () =
     currency:'INR',
     providerOrder:{id:parsed.providerOrderId,amountPaise:parsed.amountPaise,currency:'INR'}
   });
+  const resolvedOrder = await repository.findPaymentByBooking(booking.bookingId);
+  assert.equal(resolvedOrder?.providerOrderId, parsed.providerOrderId);
   const first=await repository.applyPaymentEvent(parsed);
   assert.equal(first.applied,true);
   const second=await repository.applyPaymentEvent(parsed);
