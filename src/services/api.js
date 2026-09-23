@@ -112,7 +112,12 @@ export const rideOnApi = {
   getVendorBooking: (id) => request(`/api/v1/vendor/bookings/${encode(id)}`),
   updateVendorBookingStatus: (id,payload) => request(`/api/v1/vendor/bookings/${encode(id)}/status`, { method:'PATCH', body:JSON.stringify(payload) }),
   createPaymentOrder: (payload) => request('/api/v1/payments/create-order', { method:'POST', body:JSON.stringify(payload) }),
-  verifyPayment: (id,payload) => request(`/api/v1/payments/${encode(id)}/verify`, { method:'POST', body:JSON.stringify(payload) }),
   getPayment: (id) => request(`/api/v1/payments/${encode(id)}`),
+  getPaymentByBooking: async (bookingId) => {
+    const result = await request(`/api/v1/bookings/${encode(bookingId)}`);
+    const paymentId = result?.booking?.paymentId || result?.booking?.payment?.id;
+    return paymentId ? request(`/api/v1/payments/${encode(paymentId)}`) : null;
+  },
+  verifyPayment: (id,payload) => request(`/api/v1/payments/${encode(id)}/verify`, { method:'POST', body:JSON.stringify(payload) }),
   listBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/bookings${query ? `?${query}` : ''}`); },
 };
