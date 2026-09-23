@@ -140,13 +140,7 @@ export const authService = {
     setAccessToken(token);
 
     try {
-      const result = await rideOnApi.me();
-      const user = result?.user;
-
-      if (!user?.id || !['customer', 'vendor'].includes(user.role)) {
-        throw new Error('Your RideOn account has no valid role.');
-      }
-
+      const user = await this.currentUser();
       return { token, user };
     } catch (error) {
       await this.signOut();
