@@ -164,7 +164,8 @@ export const authService = {
         status: apiError?.status,
       });
 
-      if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY || !accessToken) {
+      const token = await restoreAccessToken();
+      if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY || !token) {
         throw apiError;
       }
 
@@ -172,7 +173,7 @@ export const authService = {
         method: 'GET',
         headers: {
           apikey: SUPABASE_PUBLISHABLE_KEY,
-          Authorization: 'Bearer ' + accessToken,
+          Authorization: 'Bearer ' + token,
         },
       });
       const payload = await response.json().catch(() => ({}));
