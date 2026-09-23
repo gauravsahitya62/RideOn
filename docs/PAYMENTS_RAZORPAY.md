@@ -1,58 +1,53 @@
-# RideOn payments — UPI-first
+# RideOn marketplace payments — Paytm
 
-This document describes the MVP UPI payment architecture.
+RideOn treats the rental obligation and refundable security deposit as separate financial objects. The accounting ledger is not an internal wallet and is not described as an escrow account.
 
-RideOn keeps booking state and payment state separate. A booking is not treated as paid merely because a customer returns from a UPI app or submits a transaction reference.
+## Booking financials
 
-## Environment
+- rental amount: rental charge attributable to the vendor.
+- security deposit: refundable customer obligation.
+- platform fee: existing RideOn platform charge.
+- customer total = rental + security deposit + applicable customer fees.
+- vendor settlement = rental - platform fee - approved adjustments.
+- security refund = security deposit - approved deduction.
 
-`PAYMENT_PROVIDER=upi`
-`UPI_VPA=<RideOn merchant VPA>`
-`UPI_MERCHANT_NAME=RideOn`
-`UPI_WEBHOOK_SECRET=<server-side callback verification secret>`
+Security deposit money is never vendor revenue.
 
-## Flow
+## Lifecycle
 
-1. Create the booking request.
-2. Create or reuse the active UPI payment using the server-calculated INR amount.
-3. Open the returned `upi://pay` URI when a compatible UPI app is available.
-4. Treat app return as a client-side signal only.
-5. Allow the customer to submit a UPI transaction reference as supporting information.
-6. Keep the payment in `pending` until an authoritative provider callback/reconciliation mechanism verifies the transaction.
-7. Apply the callback transactionally and ignore duplicate event IDs.
+Rental payment:
+PENDING -> PAID -> HELD/UNSETTLED -> SETTLEMENT_PENDING -> SETTLED
 
-## State machine
+Security deposit:
+PENDING -> HELD -> REFUND_PENDING -> REFUNDED
 
-`unpaid → pending → paid`
+Damage:
+HELD -> DEDUCTION_PENDING -> PARTIALLY_DEDUCTED -> REFUND_PENDING -> REFUNDED
 
-`pending → failed`
+Disputes are preserved as DISPUTED until an authorized resolution.
 
-`paid → refunded`
+Vendor settlement is not triggered by payment success alone. Booking completion and return/inspection conditions are required.
 
-## Verification rules
+## Paytm boundary
 
-The backend validates:
+The server uses a provider abstraction for customer payment creation, verification, refunds, vendor settlement, settlement status, webhook verification, and reconciliation.
 
-- authenticated customer ownership;
-- authoritative booking amount;
-- INR currency;
-- payment/booking association;
-- callback signature;
-- provider event/reference ID;
-- allowed payment state transitions.
+Configured variable names:
+- PAYTM_MERCHANT_ID
+- PAYTM_CLIENT_ID
+- PAYTM_CLIENT_SECRET
+- PAYTM_WEBSITE
+- PAYTM_CALLBACK_URL
+- PAYTM_WEBHOOK_SECRET
 
-A customer-entered UTR/reference never independently changes the payment to `paid`.
+This session could not live-verify current Paytm external documentation, so the implementation intentionally does not invent Paytm endpoint URLs, payloads, checksum rules, marketplace product names, sub-merchant identifiers, or payout endpoints. Provider-specific live operations fail closed with PAYTM_ONBOARDING_REQUIRED until the verified Paytm product integration is enabled.
 
-## Webhook
+## Render
 
-Provider callbacks use:
+render.yaml contains only the non-secret provider selector. Put all Paytm credentials/secrets in Render Environment settings.
 
-`POST /api/v1/payments/webhook`
+The old UPI_VPA and UPI_WEBHOOK_SECRET production dependency is removed.
 
-with `X-UPI-Signature` and `X-UPI-Event-Id` or the generic `X-Payment-Signature` header.
+## External onboarding
 
-## Production requirement
-
-The repository implements the UPI-first boundary and secure state model. A real production payment integration is only complete when the selected payment infrastructure provides authoritative server-to-server verification and that mechanism has been tested in staging/device testing.
-
-Refund completion likewise requires a verified provider/refund mechanism; a client action alone cannot mark a payment refunded.
+Before live transactions, complete Paytm merchant onboarding and confirm the exact Paytm products enabled for collections, refunds, and marketplace/vendor settlement. Do not describe the flow as escrow unless the actual arrangement explicitly permits that terminology.

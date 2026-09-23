@@ -3,14 +3,11 @@ import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',line:'#E8EAF0',white:'#FFFFFF',green:'#258565'};
 export default function PaymentMethodSelector({disabled=false}){
  return <View style={styles.card}>
-  <View style={styles.head}>
-   <View style={{flex:1}}><Text style={styles.kicker}>PAYMENT</Text><Text style={styles.title}>UPI</Text></View>
-   <Text style={styles.badge}>PRIMARY</Text>
-  </View>
-  <Text style={styles.note}>Pay securely using your UPI app. RideOn uses the server-calculated booking amount and confirms payment only after authoritative verification.</Text>
+  <View style={styles.head}><View style={{flex:1}}><Text style={styles.kicker}>PAYMENT</Text><Text style={styles.title}>Paytm</Text></View><Text style={styles.badge}>PRIMARY</Text></View>
+  <Text style={styles.note}>Pay the exact server-calculated rental amount and refundable security deposit. RideOn confirms payment only after verified provider state.</Text>
   <TouchableOpacity disabled={disabled} style={styles.option} accessibilityRole="radio" accessibilityState={{selected:true,disabled}}>
-    <View style={styles.radio}><Text style={styles.dot}>●</Text></View>
-    <View style={{flex:1}}><Text style={styles.optionTitle}>UPI</Text><Text style={styles.sub}>Pay securely using your UPI app</Text></View>
+   <View style={styles.radio}><Text style={styles.dot}>●</Text></View>
+   <View style={{flex:1}}><Text style={styles.optionTitle}>Paytm</Text><Text style={styles.sub}>Rental payment + refundable security deposit</Text></View>
   </TouchableOpacity>
  </View>;
 }
