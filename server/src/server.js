@@ -158,7 +158,8 @@ if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is 
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
 if (isProduction && paymentProvider !== 'paytm') throw new Error('PAYMENT_PROVIDER must be paytm in production; mock/unconfigured providers are not allowed');
-if (isProduction && (!paytmMerchantId || !paytmClientId || !paytmClientSecret || !paytmWebsite || !paytmCallbackUrl || !paymentWebhookSecret)) throw new Error('Required Paytm production configuration is missing');
+// Paytm credentials are intentionally optional at process startup. This keeps health/API deployment available
+// while live payment operations fail closed with PAYTM_ONBOARDING_REQUIRED until merchant onboarding is complete.
 
 
 function normalizeOtpDestination({ channel, value }) {
