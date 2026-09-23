@@ -11,13 +11,24 @@ import { createPaymentService } from './payments.js';
 const fleet = [];
 
 const app = express();
-app.set('trust proxy', 1);
+app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 app.use(helmet());
 app.disable('x-powered-by');
-const allowedOrigin = process.env.CLIENT_ORIGIN || '*';
-app.use(cors({ origin: allowedOrigin === '*' ? true : allowedOrigin }));
+const allowedOrigins = String(process.env.CLIENT_ORIGIN || '*')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const isProduction = process.env.NODE_ENV === 'production';
+if (isProduction && allowedOrigins.includes('*')) throw new Error('CLIENT_ORIGIN must be explicit in production');
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('CORS origin not allowed'));
+  },
+  credentials: false,
+}));
 app.use(express.json({ limit: '64kb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
-app.use(rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
+app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
 const bookingSchema = z.object({
@@ -118,8 +129,11 @@ const paymentProvider = (process.env.PAYMENT_PROVIDER || 'unconfigured').toLower
 const paymentKeyId = process.env.RAZORPAY_KEY_ID || '';
 const paymentKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
 const paymentWebhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '';
-if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
-if (process.env.NODE_ENV === 'production' && (!process.env.CLIENT_ORIGIN || process.env.CLIENT_ORIGIN === '*')) throw new Error('CLIENT_ORIGIN must be explicitly configured in production');
+if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
+if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
+if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
+if (isProduction && (!process.env.PAYMENT_PROVIDER || process.env.PAYMENT_PROVIDER === 'unconfigured')) throw new Error('PAYMENT_PROVIDER must be configured in production');
+if (isProduction && paymentProvider === 'razorpay' && (!paymentKeyId || !paymentKeySecret || !paymentWebhookSecret)) throw new Error('Razorpay credentials and webhook secret are required in production');
 
 
 function normalizeOtpDestination({ channel, value }) {
