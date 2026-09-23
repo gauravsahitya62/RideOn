@@ -121,53 +121,37 @@ export default function RideOnApp({ authenticatedUser, onLogout }) {
    try{
      const orderResult=await rideOnApi.createPaymentOrder({bookingId:selectedBooking.id,idempotencyKey:`payment:${selectedBooking.id}`});
      const payment=orderResult?.payment;
-     if(!payment?.id||!payment?.orderId||!payment?.amount)throw new Error('Payment order was not created by the server.');
-     setPaymentState('launched');
-     const options={
-       key:orderResult.keyId,
-       amount:payment.amount,
-       currency:payment.currency||'INR',
-       name:'RideOn',
-       description:`RideOn booking ${selectedBooking.id}`,
-       order_id:payment.orderId,
-       prefill:{name:name||undefined,email:email||undefined,contact:phone||undefined},
-       theme:{color:C.orange},
-       method:{[paymentMethod]:1},
-     };
-     let callback;
-     try{
-       const RazorpayCheckout = require('react-native-razorpay').default || require('react-native-razorpay');
-       callback=await RazorpayCheckout.open(options);
-     }catch(nativeError){
-       throw Object.assign(new Error(nativeError?.description||nativeError?.message||'Payment checkout could not be opened.'),{code:nativeError?.code||'PAYMENT_CHECKOUT_FAILED'});
+     if(!payment?.id||!payment?.amount)throw new Error('UPI payment request was not created by the server.');
+     setPaymentState('pending');
+     const upiUri=payment.upiUri;
+     if(upiUri) {
+       try {
+         const Linking = require('react-native').Linking;
+         const canOpen=await Linking.canOpenURL(upiUri);
+         if(canOpen) await Linking.openURL(upiUri);
+       } catch {}
      }
-     if(!callback?.razorpay_payment_id||!callback?.razorpay_order_id||!callback?.razorpay_signature){
-       throw Object.assign(new Error('Payment callback did not include the required verification fields.'),{code:'PAYMENT_VERIFICATION_FAILED'});
-     }
-     setPaymentState('verifying');
-     await rideOnApi.verifyPayment(payment.id,{
-       bookingId:selectedBooking.id,
-       razorpayOrderId:callback.razorpay_order_id,
-       razorpayPaymentId:callback.razorpay_payment_id,
-       razorpaySignature:callback.razorpay_signature,
-     });
-     const confirmation=await waitForPaymentConfirmation(selectedBooking.id);
-     if(confirmation.status==='paid'){
-       const confirmed=confirmation.booking;
-       setSelectedBooking(confirmed);setTrips(old=>old.map(t=>String(t.id)===String(confirmed.id)?{...t,...confirmed}:t));setPaymentState('paid');setScreen('success');return;
-     }
-     if(confirmation.status==='failed'){
-       setPaymentState('failed');setPaymentError('The provider reported a failed payment. Your booking remains safe and you can retry.');
-       return;
-     }
-     setPaymentState('processing');
-     setPaymentError('Payment is still being confirmed by the server. Refresh the booking status before retrying.');
+     setPaymentError('Complete the UPI payment in your UPI app. Return to RideOn and submit the transaction reference to begin verification.');
    }catch(error){
-     if(error?.code==='PAYMENT_NOT_CONFIGURED')setPaymentError('Payments are not configured on the RideOn server yet.');
-     else if(error?.code==='PAYMENT_VERIFICATION_FAILED')setPaymentError('Payment could not be verified by the RideOn server. Do not retry until the payment status is checked.');
-     else if(error?.code==='PAYMENT_CHECKOUT_FAILED')setPaymentError(error.message||'Payment checkout could not be opened.');
-     else setPaymentError(error.message||'Payment could not be completed. Your booking remains safe.');
-     setPaymentState(error?.code==='PAYMENT_VERIFICATION_FAILED'?'processing':'failed');
+     if(error?.code==='PAYMENT_NOT_CONFIGURED')setPaymentError('UPI payments are not configured on the RideOn server yet.');
+     else setPaymentError(error.message||'Could not start the UPI payment. Your booking remains safe.');
+     setPaymentState('failed');
+   }finally{setPaymentBusy(false);}
+ };
+ const submitPaymentReference=async(reference)=>{
+   if(paymentBusy||!selectedBooking?.id||!paymentState)return;
+   const value=String(reference||'').trim();
+   if(value.length<4)return setPaymentError('Enter the UPI transaction reference/UTR.');
+   setPaymentBusy(true);setPaymentError('');
+   try{
+     const payment=await rideOnApi.getPaymentByBooking?await rideOnApi.getPaymentByBooking(selectedBooking.id):null;
+     const paymentId=payment?.payment?.id||payment?.id;
+     if(!paymentId)throw new Error('No active UPI payment was found for this booking.');
+     const result=await rideOnApi.verifyPayment(paymentId,{bookingId:selectedBooking.id,transactionReference:value});
+     setPaymentState(result?.verification==='pending_verification'?'pending_verification':'pending');
+     setPaymentError('Payment submitted. RideOn will mark it paid only after authoritative UPI verification. Do not make another payment.');
+   }catch(error){
+     setPaymentError(error.message||'Could not submit the transaction reference.');
    }finally{setPaymentBusy(false);}
  };
  const retryPayment=()=>{setPaymentError('');setPaymentState(null);startPayment();};
