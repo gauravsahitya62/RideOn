@@ -622,6 +622,41 @@ test('UPI payment request uses the server-calculated amount', async () => {
   assert.equal(payment.currency,'INR');
   assert.match(payment.upiUri,/^upi:\/\/pay\?/);
 });
+
+test('UPI reference submission stays pending until provider verification', async () => {
+  const user = await register('+911234568100','UPI Reference User');
+  const login = await legacyLogin('+911234568100');
+  const bookingResponse = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',
+    startAt:'2038-01-10T10:00:00.000Z',
+    endAt:'2038-01-11T10:00:00.000Z',
+    delivery:false,
+    address:'10 UPI Reference Road, Jaipur'
+  },login.accessToken,{'Idempotency-Key':'upi-reference-booking-1'});
+  assert.equal(bookingResponse.status,201);
+  const booking=(await bookingResponse.json()).booking;
+  await repository.createOrGetPaymentOrder({
+    bookingId:booking.bookingId,
+    customerId:user.customer.id,
+    provider:'upi',
+    amountPaise:49900,
+    currency:'INR',
+    idempotencyKey:'upi-reference-payment-1',
+    providerOrder:{id:'rideon_'+booking.bookingId,amountPaise:49900,currency:'INR'}
+  });
+  const payment=await repository.findPaymentByBooking(booking.bookingId);
+  assert.equal(payment.status,'pending');
+  const submitted=await repository.submitPaymentReference({
+    paymentId:payment.id,
+    bookingId:booking.bookingId,
+    customerId:user.customer.id,
+    providerReference:'UTR123456789'
+  });
+  assert.equal(submitted.status,'pending');
+  assert.equal(submitted.providerReference,'UTR123456789');
+  const freshBooking=await repository.getBooking(booking.bookingId,user.customer.id);
+  assert.equal(freshBooking.paymentStatus,'pending');
+});
 test('UPI payment service creates deterministic payment requests in test mode', async () => {
   const service = createPaymentService({
     provider:'upi',
