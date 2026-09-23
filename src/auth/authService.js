@@ -33,7 +33,7 @@ export const authService = {
         authErrorLog('sendEmailOtp:supabase-fallback:unavailable', { hasSupabaseUrl: Boolean(SUPABASE_URL), hasSupabaseKey: Boolean(SUPABASE_PUBLISHABLE_KEY) });
         throw error;
       }
-      authLog('sendEmailOtp:supabase-fallback:start', { supabaseHost: SUPABASE_URL.replace(/^https?:\\/\\//, '').split('/')[0] });
+      authLog('sendEmailOtp:supabase-fallback:start', { supabaseHost: SUPABASE_URL.replace(/^https?:\/\//, '').split('/')[0] });
       const response = await fetch(SUPABASE_URL + '/auth/v1/otp', {
         method: 'POST',
         headers: {
