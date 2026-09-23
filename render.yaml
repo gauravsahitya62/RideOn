@@ -6,3 +6,6 @@ services:
     dockerfilePath: Dockerfile
     healthCheckPath: /health
     autoDeploy: true
+    envVars:
+      - key: PAYMENT_PROVIDER
+        value: upi

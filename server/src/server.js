@@ -147,7 +147,7 @@ function publicBooking(booking) {
 }
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
-const paymentProvider = (process.env.PAYMENT_PROVIDER || 'unconfigured').toLowerCase();
+const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'upi' : 'unconfigured')).toLowerCase();
 const upiMerchantVpa = process.env.UPI_VPA || '';
 const upiMerchantName = process.env.UPI_MERCHANT_NAME || 'RideOn';
 const paymentWebhookSecret = process.env.UPI_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '';
