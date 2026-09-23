@@ -12,16 +12,41 @@ const { app, repository } = await import('./server.js');
 let server;
 let base;
 
+const testVehicles = [
+  { id:'creta-01', type:'car', name:'Hyundai Creta', city:'Jaipur', pricePerDay:2499, active:true, transmission:'Automatic', fuel:'Petrol', seats:5, securityDeposit:0 },
+  { id:'baleno-01', type:'car', name:'Maruti Baleno', city:'Jaipur', pricePerDay:1499, active:true, transmission:'Manual', fuel:'Petrol', seats:5, securityDeposit:0 },
+  { id:'classic-01', type:'bike', name:'Royal Enfield Classic 350', city:'Jaipur', pricePerDay:999, active:true, transmission:null, fuel:null, seats:2, securityDeposit:0 },
+  { id:'activa-01', type:'bike', name:'Honda Activa 6G', city:'Jaipur', pricePerDay:499, active:true, transmission:'Automatic', fuel:'Petrol', seats:2, securityDeposit:0 },
+];
+
+async function seedPostgresTestVehicles() {
+  if (process.env.DATABASE_URL) {
+    const pg = await import('pg');
+    const pool = new pg.default.Pool({ connectionString: process.env.DATABASE_URL });
+    try {
+      for (const vehicle of testVehicles) {
+        await pool.query(
+          `insert into vehicles (id,type,name,city,daily_rate_paise,active,transmission,fuel,seats)
+           values ($1,$2,$3,$4,$5,true,$6,$7,$8)
+           on conflict (id) do update set active=true, daily_rate_paise=excluded.daily_rate_paise,
+             name=excluded.name, city=excluded.city, transmission=excluded.transmission,
+             fuel=excluded.fuel, seats=excluded.seats`,
+          [vehicle.id,vehicle.type,vehicle.name,vehicle.city,Math.round(vehicle.pricePerDay*100),vehicle.transmission,vehicle.fuel,vehicle.seats]
+        );
+      }
+    } finally {
+      await pool.end();
+    }
+  } else {
+    await repository.seedMemoryVehicles(testVehicles);
+  }
+}
+
 test.before(async () => {
   server = createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
-  await repository.seedMemoryVehicles([
-    { id:'creta-01', type:'car', name:'Hyundai Creta', city:'Jaipur', pricePerDay:2499, active:true, transmission:'Automatic', fuel:'Petrol', seats:5, securityDeposit:0 },
-    { id:'baleno-01', type:'car', name:'Maruti Baleno', city:'Jaipur', pricePerDay:1499, active:true, transmission:'Manual', fuel:'Petrol', seats:5, securityDeposit:0 },
-    { id:'classic-01', type:'bike', name:'Royal Enfield Classic 350', city:'Jaipur', pricePerDay:999, active:true, transmission:null, fuel:null, seats:2, securityDeposit:0 },
-    { id:'activa-01', type:'bike', name:'Honda Activa 6G', city:'Jaipur', pricePerDay:499, active:true, transmission:'Automatic', fuel:'Petrol', seats:2, securityDeposit:0 },
-  ]);
+  await seedPostgresTestVehicles();
 });
 
 
