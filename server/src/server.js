@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -11,6 +12,26 @@ import { createPaymentService } from './payments.js';
 const fleet = [];
 
 const app = express();
+
+// Lightweight request correlation and structured HTTP access logging.
+// Never log request bodies, query strings, credentials, OTPs, or payment data.
+app.use((req, res, next) => {
+  const supplied = req.get('X-Request-Id') || '';
+  const requestId = /^[A-Za-z0-9._:-]{1,128}$/.test(supplied) ? supplied : crypto.randomUUID();
+  const startedAt = process.hrtime.bigint();
+  req.requestId = requestId;
+  res.setHeader('X-Request-Id', requestId);
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    console.log(JSON.stringify({
+      level:'info', event:'http_request', requestId, timestamp:new Date().toISOString(),
+      method:req.method, route:req.path, status:res.statusCode,
+      durationMs:Math.round(durationMs * 100) / 100,
+      userId:req.user?.id || undefined,
+    }));
+  });
+  next();
+});
 app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 app.use(helmet());
 app.disable('x-powered-by');
