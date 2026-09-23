@@ -1,56 +1,58 @@
 # RideOn payments — UPI-first
 
-RideOn uses UPI as the primary MVP payment method. Payment state remains separate from booking state.
+This document describes the MVP UPI payment architecture.
+
+RideOn keeps booking state and payment state separate. A booking is not treated as paid merely because a customer returns from a UPI app or submits a transaction reference.
 
 ## Environment
-
-Set these on the API server and never expose server-side secrets to the mobile app:
 
 `PAYMENT_PROVIDER=upi`
 `UPI_VPA=<RideOn merchant VPA>`
 `UPI_MERCHANT_NAME=RideOn`
 `UPI_WEBHOOK_SECRET=<server-side callback verification secret>`
 
-The API generates a trusted UPI payment URI containing the server-calculated INR amount and a unique payment reference.
+## Flow
 
-## Payment flow
+1. Create the booking request.
+2. Create or reuse the active UPI payment using the server-calculated INR amount.
+3. Open the returned `upi://pay` URI when a compatible UPI app is available.
+4. Treat app return as a client-side signal only.
+5. Allow the customer to submit a UPI transaction reference as supporting information.
+6. Keep the payment in `pending` until an authoritative provider callback/reconciliation mechanism verifies the transaction.
+7. Apply the callback transactionally and ignore duplicate event IDs.
 
-1. Customer creates a booking request.
-2. `POST /api/v1/payments/create-order` authenticates the customer, verifies ownership/payability, derives the amount from the stored booking, and creates/reuses the active UPI payment.
-3. Mobile opens the returned `upi://pay` URI when a compatible UPI app is available.
-4. Returning to RideOn is never treated as proof of payment.
-5. Customer submits the transaction reference only as supporting information.
-6. The server records that reference as `pending`; it does not mark the payment paid.
-7. An authoritative UPI/payment-provider callback must pass signature, amount, INR, booking association, event-id and state-transition validation before the payment becomes `paid`.
-
-## Payment status
+## State machine
 
 `unpaid → pending → paid`
 
-Failure:
-
 `pending → failed`
-
-Refund:
 
 `paid → refunded`
 
-A submitted UPI reference is not sufficient to enter `paid`.
+## Verification rules
+
+The backend validates:
+
+- authenticated customer ownership;
+- authoritative booking amount;
+- INR currency;
+- payment/booking association;
+- callback signature;
+- provider event/reference ID;
+- allowed payment state transitions.
+
+A customer-entered UTR/reference never independently changes the payment to `paid`.
 
 ## Webhook
 
-Configure the provider callback to:
+Provider callbacks use:
 
-`https://<rideon-api-host>/api/v1/payments/webhook`
+`POST /api/v1/payments/webhook`
 
-Use `X-UPI-Signature` and `X-UPI-Event-Id` (or the generic `X-Payment-Signature` fallback) according to the selected provider adapter.
+with `X-UPI-Signature` and `X-UPI-Event-Id` or the generic `X-Payment-Signature` header.
 
-The callback must contain the authoritative booking/payment reference, amount in paise, currency `INR`, status and event ID.
+## Production requirement
 
-## Important production limitation
+The repository implements the UPI-first boundary and secure state model. A real production payment integration is only complete when the selected payment infrastructure provides authoritative server-to-server verification and that mechanism has been tested in staging/device testing.
 
-The repository now implements the UPI-first payment architecture and deliberately refuses to treat manual UPI/UTR submission as payment confirmation. A real production payment integration is only complete once the chosen UPI/payment infrastructure provides an authoritative server-to-server verification mechanism and that mechanism has been exercised in staging/device testing.
-
-## Refunds
-
-Paid customer cancellation remains protected by the existing refund policy. Refund completion must be verified by the configured payment infrastructure before the database reaches `refunded`.
+Refund completion likewise requires a verified provider/refund mechanism; a client action alone cannot mark a payment refunded.
