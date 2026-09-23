@@ -34,7 +34,7 @@ export default function AuthScreen({onAuthenticated}) {
     const e=email.trim().toLowerCase();
     if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return setError('Enter a valid email address.');
     if(mode==='register'&&name.trim().length<2) return setError('Enter your full name.');
-    if(mode==='register'&&phone && !/^\+?[0-9]{10,15}$/.test(phone.trim())) return setError('Enter a valid phone number.');
+    if(mode==='register'&&accountType==='vendor'&&!/^\+?[0-9]{10,15}$/.test(phone.trim())) return setError('Enter a valid phone number for vendor registration.');
     setBusy(true);setError('');
     try{
       await authService.sendEmailOtp({email:e,fullName:mode==='register'?name.trim():undefined});
@@ -51,10 +51,7 @@ export default function AuthScreen({onAuthenticated}) {
       const session=await authService.verifyEmailOtp(e,otp.trim());
       let user;
       if(mode==='register'){
-        if(accountType==='vendor' && !/^\+?[0-9]{10,15}$/.test(phone.trim())){
-          throw new Error('Enter a valid phone number for vendor registration.');
-        }
-        const completed=await authService.completeRegistration({
+                const completed=await authService.completeRegistration({
           accessToken:session.access_token,
           accountType,
           fullName:name.trim(),
