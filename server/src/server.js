@@ -650,9 +650,12 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
   res.json({ received: true, applied: result.applied, duplicate: result.duplicate });
 });
 
-app.use((_req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found' } }));
-app.use((err, _req, res, _next) => {
-  console.error('[rideon-api]', err?.code || 'INTERNAL_ERROR');
+app.use((req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found', requestId:req.requestId } }));
+app.use((err, req, res, _next) => {
+  console.error(JSON.stringify({
+    level:'error', event:'api_error', requestId:req.requestId, timestamp:new Date().toISOString(),
+    method:req.method, route:req.path, status:500, code:err?.code || 'INTERNAL_ERROR', userId:req.user?.id || undefined,
+  }));
   if (err.code === 'CUSTOMER_EXISTS') return res.status(409).json({ error: { code: err.code, message: 'A customer with those credentials already exists.' } });
   if (err.code === 'INVALID_CREDENTIALS') return res.status(401).json({ error: { code: err.code, message: 'Phone or password is incorrect.' } });
   if (err.code === 'PAYMENT_PROVIDER_UNSUPPORTED') return res.status(500).json({ error: { code: err.code, message: 'Unsupported payment provider configuration.' } });
