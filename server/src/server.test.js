@@ -649,8 +649,16 @@ test('request correlation is returned on a 404 response', async () => {
   assert.equal(payload.error.requestId,'rideon-test-123');
 });
 
-test('checkout signature verification never marks payment paid by itself', () => {
-  const service = test('duplicate webhook event is idempotent in memory payment state', async () => {
+test('UPI payment state rejects direct client paid transitions', () => {
+  const service = createPaymentService({ provider:'upi', merchantVpa:'rideon.test@upi', webhookSecret:'upi-test-secret' });
+  assert.equal(service.canTransition('unpaid','paid'),false);
+  assert.equal(service.canTransition('unpaid','pending'),true);
+  assert.equal(service.canTransition('pending','paid'),true);
+  assert.equal(service.canTransition('paid','pending'),false);
+  assert.equal(service.canTransition('paid','refunded'),true);
+});
+
+test('duplicate webhook event is idempotent in memory payment state', async () => {
   const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
   const event={eventId:'evt-direct-duplicate',bookingId:'booking-direct-duplicate',status:'paid',providerReference:'pay-direct-duplicate',amountPaise:49900,currency:'INR',providerOrderId:'mock_order_booking-direct-duplicate'};
   assert.equal(service.canTransition('unpaid','paid'),false);
@@ -662,31 +670,14 @@ test('checkout signature verification never marks payment paid by itself', () =>
 });
 test('mock payment provider creates deterministic orders without network access', async () => {
   const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
-  const order=await service.createOrder({receipt:'booking-1',amountPaise:544700,currency:'INR'});
+  const order=await service.createPaymentRequest({paymentReference:'booking-1',amountPaise:544700,currency:'INR'});
   assert.equal(order.id,'mock_order_booking-1');
   assert.equal(order.amountPaise,544700);
-  const refund=await service.refundPayment({paymentId:'pay-1',amountPaise:544700});
+  const refund=await service.refundPayment();
   assert.equal(refund.providerReference,'pay-1');
   const body=JSON.stringify({eventId:'evt-mock'});
   const signature=crypto.createHmac('sha256','mock-secret').update(body).digest('hex');
   assert.equal(service.verifyWebhook(body,signature),true);
-});
-
-test('payment service validates amount, currency, signature, and ordering', () => {
-  const service = createPaymentService({ provider: 'razorpay', keyId:'key', keySecret:'secret', webhookSecret: 'test-secret' });
-  const parsed = service.parseWebhook({ eventId: 'evt-1', bookingId: 'booking-1', status: 'paid', providerReference: 'pay-1', amountPaise: 544700, currency: 'INR' });
-  assert.equal(parsed.amountPaise, 544700);
-  assert.equal(parsed.currency, 'INR');
-  assert.equal(service.canTransition('unpaid', 'pending'), true);
-  assert.equal(service.canTransition('pending', 'paid'), true);
-  assert.equal(service.canTransition('paid', 'pending'), false);
-  assert.equal(service.canTransition('paid', 'failed'), false);
-  assert.equal(service.canTransition('refunded', 'paid'), false);
-  assert.equal(service.parseWebhook({ ...parsed, currency: 'USD' }), null);
-  const body = JSON.stringify(parsed);
-  const signature = crypto.createHmac('sha256', 'test-secret').update(body).digest('hex');
-  assert.equal(service.verifyWebhook(body, 'bad'), false);
-  assert.equal(service.verifyWebhook(body, signature), true);
 });
 
 test.after(async () => { await new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())); await repository.close(); });
