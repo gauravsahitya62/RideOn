@@ -39,7 +39,10 @@ export default function AuthScreen({onAuthenticated}) {
     try{
       await authService.sendEmailOtp({email:e,fullName:mode==='register'?name.trim():undefined});
       setEmail(e);setOtpSent(true);setOtp('');
-    }catch(x){setError(normalizeAuthError(x));}
+    }catch(x){
+      console.error('[RideOnAuth][SCREEN_ERROR]', JSON.stringify({ status:x?.status, code:x?.code, path:x?.path, message:x?.message }));
+      setError(normalizeAuthError(x));
+    }
     finally{setBusy(false);}
   };
 
@@ -48,7 +51,9 @@ export default function AuthScreen({onAuthenticated}) {
     if(!/^\d{6}$/.test(otp.trim())) return setError('Enter the 6-digit verification code.');
     setBusy(true);setError('');
     try{
+      console.log('[RideOnAuth][OTP_VERIFY_START]', JSON.stringify({ email: e, mode, accountType }));
       const session=await authService.verifyEmailOtp(e,otp.trim());
+      console.log('[RideOnAuth][OTP_VERIFY_SUCCESS]', JSON.stringify({ hasAccessToken: Boolean(session?.access_token) }));
       let user;
       if(mode==='register'){
                 const completed=await authService.completeRegistration({
