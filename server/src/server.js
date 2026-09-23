@@ -245,33 +245,54 @@ const supabaseRequireAuth = async (req, res, next) => {
   const header = req.get('Authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (!token) return res.status(401).json({ error:{ code:'AUTH_REQUIRED', message:'Authentication required.' } });
-  // Legacy phone/password JWT remains available only for the test suite/local compatibility.
-  // Production/mobile authentication continues through Supabase when configured.
+
   if (process.env.NODE_ENV === 'test' && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) {
     return auth.middleware()(req, res, next);
   }
+
   try {
     const user = await verifySupabaseAccessToken(token);
     if (!user?.id || !user?.email) return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+
     const metadata = user.user_metadata || {};
-    const customer = await repository.findCustomerBySupabaseUserId(user.id);
-    const ensured = customer || await repository.createOrLinkCustomerFromSupabase({
-      supabaseUserId: user.id,
-      email: user.email,
-      fullName: metadata.full_name || metadata.name || user.email.split('@')[0],
-    });
-    const identity = await repository.findCustomerById(ensured.id);
-    if (!identity?.id) return res.status(401).json({ error:{ code:'USER_NOT_FOUND', message:'RideOn user identity could not be resolved.' } });
+    let identity = await repository.findCustomerBySupabaseUserId(user.id);
+
+    // Backward-compatible linking for existing RideOn identities that predate
+    // the Supabase user link. Their stored RideOn role remains authoritative.
+    if (!identity) {
+      const existingByEmail = await repository.findCustomerByEmail(user.email);
+      if (existingByEmail) {
+        identity = await repository.createOrLinkCustomerFromSupabase({
+          supabaseUserId:user.id,
+          email:user.email,
+          fullName:existingByEmail.fullName || metadata.full_name || metadata.name || user.email.split('@')[0],
+          phone:existingByEmail.phone,
+          role:existingByEmail.role || 'customer',
+        });
+      }
+    }
+
+    // Do not manufacture a customer identity during ordinary authenticated
+    // API requests. Registration completion is the only path that creates a
+    // new RideOn identity after successful Supabase verification.
+    if (!identity?.id || !['customer','vendor'].includes(identity.role)) {
+      return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
+    }
+
     req.user = {
-      id: identity.id,
-      name: identity.fullName,
-      role: identity.role || 'customer',
-      supabaseUserId: user.id,
-      email: identity.email || user.email,
+      id:identity.id,
+      name:identity.fullName,
+      role:identity.role,
+      supabaseUserId:user.id,
+      email:identity.email || user.email,
     };
     next();
-  } catch {
-    return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+  } catch (error) {
+    if (error.code==='ACCOUNT_TYPE_CONFLICT') {
+      return res.status(409).json({ error:{code:error.code,message:'A RideOn account already exists under a different account type.'} });
+    }
+    console.error(JSON.stringify({level:'error',event:'supabase_identity_error',requestId:req.requestId,code:error?.code||'INVALID_TOKEN'}));
+    return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or could not be mapped to a RideOn account.' } });
   }
 };
 
