@@ -483,7 +483,7 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
 });
 
 app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
-  const parsed = z.object({ email:z.string().trim().email().max(254), token:z.string().trim().regex(/^\\d{6}$/) }).safeParse(req.body);
+  const parsed = z.object({ email:z.string().trim().email().max(254), token:z.string().trim().regex(/^\d{6}$/) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Provide the email address and 6-digit verification code.' } });
   const supabaseUrl = process.env.SUPABASE_URL;
   const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
