@@ -503,6 +503,53 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
   }
 });
 
+app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) => {
+  const header=req.get('Authorization')||'';
+  const token=header.startsWith('Bearer ')?header.slice(7).trim():'';
+  if(!token) return res.status(401).json({error:{code:'AUTH_REQUIRED',message:'Authentication required.'}});
+  const parsed=z.object({
+    accountType:z.enum(['customer','vendor']),
+    fullName:z.string().trim().min(2).max(100),
+    phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
+  }).superRefine((value,ctx)=>{
+    if(value.accountType==='vendor' && !value.phone){
+      ctx.addIssue({code:z.ZodIssueCode.custom,path:['phone'],message:'Vendor phone number is required.'});
+    }
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid account type and registration details.'}});
+  try{
+    const supa=await verifySupabaseAccessToken(token);
+    if(!supa?.id||!supa?.email) return res.status(401).json({error:{code:'INVALID_TOKEN',message:'Session is invalid or expired.'}});
+    const customer=await repository.createOrLinkCustomerFromSupabase({
+      supabaseUserId:supa.id,
+      email:supa.email,
+      fullName:parsed.data.fullName,
+      phone:parsed.data.phone,
+      role:parsed.data.accountType,
+    });
+    let vendor=null;
+    if(parsed.data.accountType==='vendor'){
+      vendor=await repository.ensureVendorForCustomer(customer.id,{
+        businessName:parsed.data.fullName,
+        contactName:parsed.data.fullName,
+        phone:parsed.data.phone,
+        email:supa.email,
+        serviceCity:'Jaipur'
+      });
+      if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
+    }
+    return res.json({
+      user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},
+      customer,
+      vendor,
+    });
+  }catch(error){
+    if(error.code==='ACCOUNT_TYPE_CONFLICT') return res.status(409).json({error:{code:error.code,message:error.message}});
+    console.error(JSON.stringify({level:'error',event:'registration_completion_failed',requestId:req.requestId,code:error?.code||'REGISTRATION_COMPLETION_FAILED'}));
+    return res.status(500).json({error:{code:'REGISTRATION_COMPLETION_FAILED',message:'We could not complete your RideOn registration right now.'}});
+  }
+});
+
 app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
   const parsed = z.object({ email:z.string().trim().email().max(254), token:z.string().trim().regex(/^\d{6}$/) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Provide the email address and 6-digit verification code.' } });
