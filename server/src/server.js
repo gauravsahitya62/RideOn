@@ -147,14 +147,14 @@ function publicBooking(booking) {
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
 const paymentProvider = (process.env.PAYMENT_PROVIDER || 'unconfigured').toLowerCase();
-const paymentKeyId = process.env.RAZORPAY_KEY_ID || '';
-const paymentKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
-const paymentWebhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '';
+const upiMerchantVpa = process.env.UPI_VPA || '';
+const upiMerchantName = process.env.UPI_MERCHANT_NAME || 'RideOn';
+const paymentWebhookSecret = process.env.UPI_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '';
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && paymentProvider !== 'razorpay') throw new Error('PAYMENT_PROVIDER must be razorpay in production; mock/unconfigured providers are not allowed');
-if (isProduction && paymentProvider === 'razorpay' && (!paymentKeyId || !paymentKeySecret || !paymentWebhookSecret)) throw new Error('Razorpay credentials and webhook secret are required in production');
+if (isProduction && paymentProvider !== 'upi') throw new Error('PAYMENT_PROVIDER must be upi in production; mock/unconfigured providers are not allowed');
+if (isProduction && paymentProvider === 'upi' && (!upiMerchantVpa || !paymentWebhookSecret)) throw new Error('UPI_VPA and UPI_WEBHOOK_SECRET are required in production');
 
 
 function normalizeOtpDestination({ channel, value }) {
@@ -216,8 +216,8 @@ const auth = createAuth({
 });
 const payments = createPaymentService({
   provider: paymentProvider,
-  keyId: paymentKeyId,
-  keySecret: paymentKeySecret,
+  merchantVpa: upiMerchantVpa,
+  merchantName: upiMerchantName,
   webhookSecret: paymentWebhookSecret,
 });
 
@@ -596,19 +596,50 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
   if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
   if(['cancelled','rejected','completed'].includes(booking.status)) return res.status(409).json({error:{code:'BOOKING_NOT_PAYABLE',message:'This booking cannot be paid.'}});
   if(booking.paymentStatus==='paid') return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This booking is already paid.'}});
-  try{
-    return await repository.withPaymentLock(booking.id, async ()=>{
+  try {
+    return await repository.withPaymentLock(booking.id, async () => {
       const amountPaise=Math.round(Number(booking.pricing.total)*100);
       const existing=await repository.findPaymentByBooking(booking.id);
-      if(existing?.providerOrderId && ['unpaid','pending'].includes(existing.status)){
-        return res.json({payment:{id:existing.id,provider:'razorpay',orderId:existing.providerOrderId,amount:existing.amountPaise,currency:'INR',status:existing.status},keyId:paymentKeyId});
+      if(existing && ['unpaid','pending'].includes(existing.status)) {
+        return res.json({payment:{
+          id:existing.id, bookingId:existing.bookingId, provider:'upi',
+          amount:existing.amountPaise, amountPaise:existing.amountPaise,
+          currency:'INR', status:existing.status,
+          paymentReference:existing.providerOrderId || existing.providerReference,
+          upiVpa:upiMerchantVpa,
+        }});
       }
-      const order=await payments.createOrder({receipt:`rideon_${booking.id}`,amountPaise,currency:'INR',notes:{bookingId:booking.id,customerId:req.user.id}});
-      const result=await repository.createOrGetPaymentOrder({bookingId:booking.id,customerId:req.user.id,provider:'razorpay',amountPaise,currency:'INR',idempotencyKey:parsed.data.idempotencyKey,providerOrder:order});
-      return res.status(201).json({payment:{id:result.payment.id,provider:'razorpay',orderId:result.payment.providerOrderId,amount:result.payment.amountPaise,currency:'INR',status:result.payment.status},keyId:paymentKeyId});
+      const paymentReference = `rideon_${booking.id}`;
+      const paymentRequest=await payments.createPaymentRequest({
+        paymentReference,
+        amountPaise,
+        currency:'INR',
+        note:`RideOn booking ${booking.id}`,
+      });
+      const result=await repository.createOrGetPaymentOrder({
+        bookingId:booking.id,
+        customerId:req.user.id,
+        provider:'upi',
+        amountPaise,
+        currency:'INR',
+        idempotencyKey:parsed.data.idempotencyKey,
+        providerOrder:{id:paymentRequest.paymentReference || paymentRequest.id,amountPaise:paymentRequest.amountPaise,currency:'INR'},
+      });
+      return res.status(201).json({payment:{
+        id:result.payment.id,
+        bookingId:result.payment.bookingId,
+        provider:'upi',
+        amount:result.payment.amountPaise,
+        amountPaise:result.payment.amountPaise,
+        currency:'INR',
+        status:result.payment.status,
+        paymentReference:result.payment.providerOrderId,
+        upiVpa:upiMerchantVpa,
+        upiUri:paymentRequest.upiUri,
+      }});
     });
-  }catch(error){
-    if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_NOT_CONFIGURED',message:'Payment provider is not configured.'}});
+  } catch(error) {
+    if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_NOT_CONFIGURED',message:'UPI payments are not configured on the RideOn server.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
@@ -616,13 +647,28 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
 });
 
 app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, async (req,res) => {
-  const parsed=z.object({bookingId:z.string().uuid(),razorpayOrderId:z.string().min(1),razorpayPaymentId:z.string().min(1),razorpaySignature:z.string().min(1)}).safeParse(req.body);
-  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Incomplete payment verification data.'}});
-  if(!payments.verifyCheckoutSignature({orderId:parsed.data.razorpayOrderId,paymentId:parsed.data.razorpayPaymentId,signature:parsed.data.razorpaySignature})) return res.status(401).json({error:{code:'PAYMENT_VERIFICATION_FAILED',message:'Payment signature verification failed.'}});
-  try{
-    const payment=await repository.verifyPayment({paymentId:req.params.id,bookingId:parsed.data.bookingId,customerId:req.user.id,providerPaymentId:parsed.data.razorpayPaymentId,providerOrderId:parsed.data.razorpayOrderId,providerSignature:parsed.data.razorpaySignature});
-    return res.json({payment,verification:'accepted',message:'Payment accepted and awaiting provider webhook confirmation.',bookingPaymentStatus:'pending'});
-  }catch(error){
+  const parsed=z.object({
+    bookingId:z.string().uuid(),
+    transactionReference:z.string().trim().min(4).max(255),
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'A UPI transaction reference is required.'}});
+  const payment=await repository.findPaymentById(req.params.id, req.user.id);
+  if(!payment || String(payment.bookingId)!==String(parsed.data.bookingId)) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
+  if(payment.status==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
+  try {
+    const updated=await repository.submitPaymentReference({
+      paymentId:payment.id,
+      bookingId:parsed.data.bookingId,
+      customerId:req.user.id,
+      providerReference:parsed.data.transactionReference,
+    });
+    return res.json({
+      payment:updated,
+      verification:'pending_verification',
+      message:'Payment reference submitted. RideOn will mark the payment paid only after authoritative UPI verification.',
+      bookingPaymentStatus:'pending',
+    });
+  } catch(error) {
     if(error.code==='PAYMENT_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Payment not found.'}});
     if(error.code==='PAYMENT_VERIFICATION_FAILED') return res.status(400).json({error:{code:error.code,message:error.message}});
     throw error;
@@ -656,19 +702,19 @@ app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req
 });
 
 app.post('/api/v1/payments/webhook', async (req, res) => {
-  const signature = req.get('X-Razorpay-Signature') || req.get('X-Payment-Signature');
+  const signature = req.get('X-UPI-Signature') || req.get('X-Payment-Signature');
   const body = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
-  if (!payments.verifyWebhook(body, signature)) return res.status(401).json({ error: { code: 'INVALID_WEBHOOK_SIGNATURE' } });
-  const event = payments.parseWebhook(req.body, { eventId: req.get('X-Razorpay-Event-Id') || undefined });
-  if (!event) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT' } });
+  if (!payments.verifyWebhook(body, signature)) return res.status(401).json({ error:{code:'INVALID_WEBHOOK_SIGNATURE'} });
+  const event = payments.parseWebhook(req.body, { eventId: req.get('X-UPI-Event-Id') || undefined });
+  if (!event) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT'} });
   if (!event.bookingId && event.providerOrderId) {
     const payment = await repository.findPaymentByProviderOrder(event.providerOrderId);
     if (payment) event.bookingId = payment.bookingId;
   }
-  if (!event.bookingId) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT' } });
+  if (!event.bookingId) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT'} });
   const result = await repository.applyPaymentEvent(event);
-  if (result.invalid) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT', message: 'Payment event does not match the booking payment.' } });
-  res.json({ received: true, applied: result.applied, duplicate: result.duplicate });
+  if (result.invalid) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT',message:'Payment event does not match the booking payment.'} });
+  res.json({received:true,applied:result.applied,duplicate:result.duplicate});
 });
 
 app.use((req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found', requestId:req.requestId } }));
