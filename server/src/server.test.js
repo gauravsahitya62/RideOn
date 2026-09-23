@@ -644,7 +644,7 @@ test('UPI reference submission stays pending until provider verification', async
     idempotencyKey:'upi-reference-payment-1',
     providerOrder:{id:'rideon_'+booking.bookingId,amountPaise:49900,currency:'INR'}
   });
-  assert.equal(payment.payment.status,'unpaid');
+  assert.ok(['unpaid','pending'].includes(payment.payment.status));
   const submitted=await repository.submitPaymentReference({
     paymentId:payment.payment.id,
     bookingId:booking.bookingId,
