@@ -763,6 +763,58 @@ export function createRepository({ databaseUrl, fleet }) {
     }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
   }
 
+  async function submitPaymentReference({ paymentId, bookingId, customerId, providerReference }) {
+    if (!providerReference || String(providerReference).trim().length < 4) {
+      const e=new Error('A UPI transaction reference is required.');
+      e.code='PAYMENT_VERIFICATION_FAILED';
+      throw e;
+    }
+    if (!useDatabase) {
+      const p=memory.payments?.get(String(bookingId));
+      if(!p || p.id!==String(paymentId) || String(p.customerId)!==String(customerId)) {
+        const e=new Error('Payment not found.'); e.code='PAYMENT_NOT_FOUND'; throw e;
+      }
+      p.providerReference=String(providerReference).trim();
+      p.status='pending';
+      p.updatedAt=new Date().toISOString();
+      return p;
+    }
+    const client=await pool.connect();
+    try {
+      await client.query('begin');
+      const {rows}=await client.query(
+        'select p.*,b.customer_id,b.total_paise from payments p join bookings b on b.id=p.booking_id where p.id=$1 and p.booking_id=$2 and b.customer_id=$3 for update',
+        [paymentId,bookingId,customerId]
+      );
+      if(!rows[0]){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
+      const p=rows[0];
+      if(Number(p.amount_paise)!==Number(p.total_paise)) {
+        const e=new Error('Payment amount mismatch.');e.code='PAYMENT_VERIFICATION_FAILED';throw e;
+      }
+      await client.query(
+        'update payments set provider_payment_id=$2,provider_reference=$2,status=case when status=\'unpaid\' then \'pending\' else status end,updated_at=now() where id=$1',
+        [paymentId,String(providerReference).trim()]
+      );
+      await client.query(
+        'update bookings set payment_status=\'pending\',payment_provider_reference=$2,updated_at=now() where id=$1 and payment_status<>\'paid\'',
+        [bookingId,String(providerReference).trim()]
+      );
+      await client.query('commit');
+      return {
+        id:String(p.id),bookingId:String(p.booking_id),provider:p.provider,
+        providerOrderId:p.provider_order_id || undefined,
+        providerPaymentId:String(providerReference).trim(),
+        providerReference:String(providerReference).trim(),
+        amountPaise:Number(p.amount_paise),currency:p.currency,status:'pending'
+      };
+    } catch(e) {
+      try{await client.query('rollback')}catch{}
+      throw e;
+    } finally {
+      client.release();
+    }
+  }
+
   async function refundPayment({ paymentId, customerId = null, providerReference, amountPaise, status='refunded' }) {
     if (!useDatabase) {
       const p=[...(memory.payments?.values()||[])].find(x=>x.id===String(paymentId));
