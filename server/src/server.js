@@ -13,6 +13,9 @@ const fleet = [];
 
 const app = express();
 
+// Deployment fingerprint: helps confirm the mobile app is talking to the current Render build.
+const buildCommit = process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'unknown';
+
 // Lightweight request correlation and structured HTTP access logging.
 // Never log request bodies, query strings, credentials, OTPs, or payment data.
 app.use((req, res, next) => {
