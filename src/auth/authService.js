@@ -122,6 +122,10 @@ export const authService = {
 export function normalizeAuthError(error) {
   const message = String(error?.message || 'Unable to authenticate with RideOn.');
 
+  if (/unexpected_failure|error sending confirmation email/i.test(message)) {
+    return 'Supabase could not send the confirmation email. Configure/check the Supabase Auth email SMTP provider, then try again.';
+  }
+
   if (/network|unreachable|timed out|failed to fetch|network request failed/i.test(message)) {
     return 'Authentication network request failed. Check your connection and try again.';
   }
