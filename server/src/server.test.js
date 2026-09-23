@@ -730,7 +730,7 @@ test('mock payment provider creates deterministic UPI requests without network a
   assert.equal(service.verifyWebhook(body,signature),true);
 });
 
-test.after(async () => { if (serverStarted && server?.listening) { await new Promise((resolve) => server.close(() => resolve())); } await repository.close(); });test('UPI payment service creates deterministic payment requests in test mode', async () => {
+test.after(async () => { try { if (server?.listening) { await new Promise((resolve) => server.close(() => resolve())); } } finally { await repository.close(); } });test('UPI payment service creates deterministic payment requests in test mode', async () => {
   const service = createPaymentService({
     provider:'upi',
     merchantVpa:'rideon.test@upi',
