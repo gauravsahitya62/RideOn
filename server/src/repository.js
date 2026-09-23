@@ -232,7 +232,7 @@ export function createRepository({ databaseUrl, fleet }) {
         customerId,
         input.businessName || customer.fullName || 'RideOn Vendor',
         input.contactName || customer.fullName || 'Vendor',
-        input.phone || (customer.phone?.startsWith('supabase-') ? '' : customer.phone) || '',
+        input.phone || (customer.phone?.startsWith('supa-') ? '' : customer.phone) || '',
         input.email || customer.email || '',
         input.address || input.serviceCity || '',
         input.serviceCity || 'Jaipur',
