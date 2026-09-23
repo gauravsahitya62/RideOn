@@ -57,6 +57,11 @@ export const authService = {
     catch(error){ await this.signOut(); throw error; }
   },
 
+  async completeRegistration({accessToken,accountType,fullName,phone}) {
+    setAccessToken(accessToken);
+    return rideOnApi.completeRegistration({accountType,fullName,phone});
+  },
+
   async currentUser({requestedRole,registrationProfile}={}) {
     try {
       const result=await rideOnApi.me();
