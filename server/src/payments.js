@@ -1,18 +1,30 @@
 import crypto from 'node:crypto';
 
-const VALID_STATUSES = new Set(['unpaid', 'pending', 'paid', 'failed', 'refunded']);
+const VALID_STATUSES = new Set(['unpaid','pending','paid','failed','refunded']);
 const TERMINAL_STATUS = new Set(['refunded']);
-const PROVIDERS = new Set(['razorpay', 'mock', 'unconfigured']);
+const PROVIDERS = new Set(['upi','mock','unconfigured']);
 
 function paiseFromRupees(value) {
   const n = Number(value);
   return Number.isSafeInteger(Math.round(n * 100)) ? Math.round(n * 100) : null;
 }
 
+function stableUpiUri({ vpa, name, amountPaise, transactionRef, note }) {
+  const params = new URLSearchParams({
+    pa: vpa,
+    pn: name || 'RideOn',
+    am: (Number(amountPaise) / 100).toFixed(2),
+    cu: 'INR',
+    tr: transactionRef,
+    tn: note || 'RideOn vehicle rental',
+  });
+  return `upi://pay?${params.toString()}`;
+}
+
 export function createPaymentService({
   provider = 'unconfigured',
-  keyId = '',
-  keySecret = '',
+  merchantVpa = '',
+  merchantName = 'RideOn',
   webhookSecret = '',
   fetchImpl = globalThis.fetch,
 } = {}) {
@@ -23,12 +35,11 @@ export function createPaymentService({
     throw error;
   }
 
+  const upiConfigured = selectedProvider === 'upi' && Boolean(merchantVpa && webhookSecret);
   const configured = selectedProvider !== 'unconfigured' && selectedProvider !== 'mock';
-  const razorpayPaymentConfigured = selectedProvider === 'razorpay' && Boolean(keyId && keySecret);
-  const razorpayConfigured = razorpayPaymentConfigured && Boolean(webhookSecret);
 
   function verifyWebhook(body, signature) {
-    if (!['razorpay','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
+    if (!['upi','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
     const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
     const given = String(signature).trim();
     const a = Buffer.from(expected, 'utf8');
@@ -36,68 +47,22 @@ export function createPaymentService({
     return a.length === b.length && crypto.timingSafeEqual(a, b);
   }
 
-  function verifyCheckoutSignature({ orderId, paymentId, signature }) {
-    if (selectedProvider !== 'razorpay' || !keySecret || !orderId || !paymentId || !signature) return false;
-    const expected = crypto.createHmac('sha256', keySecret).update(`${orderId}|${paymentId}`).digest('hex');
-    const a = Buffer.from(expected, 'utf8');
-    const b = Buffer.from(String(signature).trim(), 'utf8');
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
-  }
-
   function parseWebhook(payload = {}, { eventId: suppliedEventId } = {}) {
     const eventId = suppliedEventId || payload.eventId || payload.providerEventId;
     if (!eventId) return null;
-
-    // Accept the normalized internal format used by tests/mocks.
-    if (payload.bookingId || payload.status || payload.amountPaise) {
-      const bookingId = payload.bookingId;
-      const providerReference = payload.providerReference || payload.paymentId || payload.orderId;
-      if (!bookingId || !providerReference || !VALID_STATUSES.has(String(payload.status))) return null;
-      const amountPaise = Number(payload.amountPaise);
-      if (!Number.isSafeInteger(amountPaise) || amountPaise < 0 || payload.currency !== 'INR') return null;
-      return {
-        eventId: String(eventId),
-        bookingId: String(bookingId),
-        status: String(payload.status),
-        providerReference: String(providerReference),
-        providerOrderId: payload.providerOrderId ? String(payload.providerOrderId) : undefined,
-        amountPaise,
-        currency: 'INR',
-      };
-    }
-
-    const event = String(payload.event || '').toLowerCase();
-    const paymentEntity = payload?.payload?.payment?.entity;
-    const refundEntity = payload?.payload?.refund?.entity;
-    const orderEntity = payload?.payload?.order?.entity;
-    const entity = paymentEntity || refundEntity || null;
-    if (!entity) return null;
-
-    const eventStatus =
-      event === 'payment.captured' || event === 'order.paid' ? 'paid' :
-      event === 'payment.authorized' ? 'pending' :
-      event === 'payment.failed' ? 'failed' :
-      event === 'refund.processed' ? 'refunded' :
-      null;
-    if (!eventStatus) return null;
-
-    const bookingId =
-      entity.notes?.bookingId ||
-      orderEntity?.notes?.bookingId ||
-      payload?.payload?.order?.entity?.notes?.bookingId ||
-      null;
-    const providerOrderId = entity.order_id || orderEntity?.id || undefined;
-    const providerReference = entity.id || entity.payment_id;
-    const amountPaise = Number(entity.amount);
-    const currency = entity.currency || 'INR';
-    if (!providerReference || !Number.isSafeInteger(amountPaise) || amountPaise < 0 || currency !== 'INR') return null;
-
+    const bookingId = payload.bookingId ? String(payload.bookingId) : undefined;
+    const paymentId = payload.paymentId ? String(payload.paymentId) : undefined;
+    const providerReference = payload.providerReference || payload.transactionReference || payload.utr || payload.paymentId;
+    const status = String(payload.status || '').toLowerCase();
+    const amountPaise = Number(payload.amountPaise);
+    if (!providerReference || !VALID_STATUSES.has(status) || !Number.isSafeInteger(amountPaise) || amountPaise <= 0 || payload.currency !== 'INR') return null;
     return {
       eventId: String(eventId),
-      bookingId: bookingId ? String(bookingId) : undefined,
-      status: eventStatus,
+      bookingId,
+      paymentId,
+      status,
       providerReference: String(providerReference),
-      providerOrderId: providerOrderId ? String(providerOrderId) : undefined,
+      providerOrderId: payload.providerOrderId ? String(payload.providerOrderId) : undefined,
       amountPaise,
       currency: 'INR',
     };
@@ -106,7 +71,6 @@ export function createPaymentService({
   function canTransition(currentStatus, nextStatus) {
     if (!VALID_STATUSES.has(nextStatus)) return false;
     if (currentStatus === nextStatus) return true;
-    if (TERMINAL_STATUS.has(currentStatus)) return false;
     if (currentStatus === 'unpaid') return nextStatus === 'pending' || nextStatus === 'failed';
     if (currentStatus === 'pending') return nextStatus === 'paid' || nextStatus === 'failed';
     if (currentStatus === 'failed') return nextStatus === 'pending';
@@ -114,119 +78,55 @@ export function createPaymentService({
     return false;
   }
 
-  async function createOrder({ receipt, amountPaise, currency = 'INR', notes = {} } = {}) {
-    if (selectedProvider === 'mock') {
-      if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
-        const error = new Error('Invalid payment amount or currency.'); error.code = 'PAYMENT_CREATION_FAILED'; throw error;
-      }
-      return { id: `mock_order_${String(receipt)}`, amountPaise:Number(amountPaise), currency:'INR', status:'created', provider:'mock' };
-    }
-    if (!razorpayPaymentConfigured) {
-      const error = new Error('Payment provider is not configured.');
-      error.code = 'PAYMENT_NOT_CONFIGURED';
-      throw error;
-    }
+  async function createPaymentRequest({ paymentReference, amountPaise, currency='INR', note } = {}) {
     if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
       const error = new Error('Invalid payment amount or currency.');
       error.code = 'PAYMENT_CREATION_FAILED';
       throw error;
     }
-
-    const authorization = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-    let response;
-    try {
-      response = await fetchImpl('https://api.razorpay.com/v1/orders', {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${authorization}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          amount: Number(amountPaise),
-          currency: 'INR',
-          receipt: String(receipt),
-          notes,
-        }),
-      });
-    } catch {
-      const error = new Error('Unable to reach the payment provider.');
-      error.code = 'PAYMENT_CREATION_FAILED';
-      throw error;
+    if (selectedProvider === 'mock') {
+      return {
+        id: `mock_payment_${String(paymentReference)}`,
+        provider: 'mock',
+        amountPaise: Number(amountPaise),
+        currency: 'INR',
+        status: 'pending',
+        paymentReference: String(paymentReference),
+        upiUri: stableUpiUri({ vpa: merchantVpa || 'rideon.test@upi', name: merchantName, amountPaise, transactionRef: String(paymentReference), note }),
+      };
     }
-    if (!response?.ok) {
-      const error = new Error('Payment order creation failed.');
-      error.code = 'PAYMENT_CREATION_FAILED';
-      throw error;
-    }
-    const payload = await response.json();
-    if (!payload?.id || Number(payload.amount) !== Number(amountPaise) || payload.currency !== 'INR') {
-      const error = new Error('Payment provider returned an invalid order.');
-      error.code = 'PAYMENT_CREATION_FAILED';
-      throw error;
-    }
-    return {
-      id: String(payload.id),
-      amountPaise: Number(payload.amount),
-      currency: 'INR',
-      status: String(payload.status || 'created'),
-      provider: 'razorpay',
-    };
-  }
-
-  async function refundPayment({ paymentId, amountPaise } = {}) {
-    if (selectedProvider === 'mock') return { id:`mock_refund_${String(paymentId)}`, providerReference:String(paymentId) };
-    if (!razorpayPaymentConfigured) {
-      const error = new Error('Payment provider is not configured.');
+    if (!upiConfigured) {
+      const error = new Error('UPI payment provider is not configured.');
       error.code = 'PAYMENT_NOT_CONFIGURED';
       throw error;
     }
-    if (!paymentId) {
-      const error = new Error('Provider payment reference is required.');
-      error.code = 'REFUND_FAILED';
-      throw error;
-    }
-    const authorization = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-    const body = Number.isSafeInteger(Number(amountPaise)) && Number(amountPaise) > 0
-      ? JSON.stringify({ amount: Number(amountPaise) })
-      : '{}';
-    let response;
-    try {
-      response = await fetchImpl(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${authorization}`,
-          'Content-Type': 'application/json',
-        },
-        body,
-      });
-    } catch {
-      const error = new Error('Unable to reach the payment provider.');
-      error.code = 'REFUND_FAILED';
-      throw error;
-    }
-    if (!response?.ok) {
-      const error = new Error('Provider refund failed.');
-      error.code = 'REFUND_FAILED';
-      throw error;
-    }
-    const payload = await response.json();
-    if (!payload?.id) {
-      const error = new Error('Provider returned an invalid refund.');
-      error.code = 'REFUND_FAILED';
-      throw error;
-    }
-    return { id: String(payload.id), providerReference: String(payload.payment_id || paymentId) };
+    const reference = String(paymentReference);
+    return {
+      id: reference,
+      provider: 'upi',
+      amountPaise: Number(amountPaise),
+      currency: 'INR',
+      status: 'pending',
+      paymentReference: reference,
+      upiVpa: merchantVpa,
+      upiUri: stableUpiUri({ vpa: merchantVpa, name: merchantName, amountPaise, transactionRef: reference, note }),
+    };
+  }
+
+  async function refundPayment() {
+    const error = new Error('Refund requires the configured UPI provider reconciliation/refund mechanism.');
+    error.code = 'REFUND_NOT_CONFIGURED';
+    throw error;
   }
 
   return {
     name: configured ? selectedProvider : 'unconfigured',
     provider: selectedProvider,
-    configured: razorpayConfigured,
+    configured: selectedProvider === 'mock' || upiConfigured,
     verifyWebhook,
-    verifyCheckoutSignature,
     parseWebhook,
     canTransition,
-    createOrder,
+    createPaymentRequest,
     refundPayment,
     paiseFromRupees,
   };
