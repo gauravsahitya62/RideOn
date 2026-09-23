@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -11,13 +12,44 @@ import { createPaymentService } from './payments.js';
 const fleet = [];
 
 const app = express();
-app.set('trust proxy', 1);
+
+// Lightweight request correlation and structured HTTP access logging.
+// Never log request bodies, query strings, credentials, OTPs, or payment data.
+app.use((req, res, next) => {
+  const supplied = req.get('X-Request-Id') || '';
+  const requestId = /^[A-Za-z0-9._:-]{1,128}$/.test(supplied) ? supplied : crypto.randomUUID();
+  const startedAt = process.hrtime.bigint();
+  req.requestId = requestId;
+  res.setHeader('X-Request-Id', requestId);
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    console.log(JSON.stringify({
+      level:'info', event:'http_request', requestId, timestamp:new Date().toISOString(),
+      method:req.method, route:req.path, status:res.statusCode,
+      durationMs:Math.round(durationMs * 100) / 100,
+      userId:req.user?.id || undefined,
+    }));
+  });
+  next();
+});
+app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
 app.use(helmet());
 app.disable('x-powered-by');
-const allowedOrigin = process.env.CLIENT_ORIGIN || '*';
-app.use(cors({ origin: allowedOrigin === '*' ? true : allowedOrigin }));
+const allowedOrigins = String(process.env.CLIENT_ORIGIN || '*')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const isProduction = process.env.NODE_ENV === 'production';
+if (isProduction && allowedOrigins.includes('*')) throw new Error('CLIENT_ORIGIN must be explicit in production');
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('CORS origin not allowed'));
+  },
+  credentials: false,
+}));
 app.use(express.json({ limit: '64kb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
-app.use(rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
+app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
 const bookingSchema = z.object({
@@ -118,8 +150,11 @@ const paymentProvider = (process.env.PAYMENT_PROVIDER || 'unconfigured').toLower
 const paymentKeyId = process.env.RAZORPAY_KEY_ID || '';
 const paymentKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
 const paymentWebhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '';
-if (process.env.NODE_ENV === 'production' && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
-if (process.env.NODE_ENV === 'production' && (!process.env.CLIENT_ORIGIN || process.env.CLIENT_ORIGIN === '*')) throw new Error('CLIENT_ORIGIN must be explicitly configured in production');
+if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
+if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
+if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
+if (isProduction && paymentProvider !== 'razorpay') throw new Error('PAYMENT_PROVIDER must be razorpay in production; mock/unconfigured providers are not allowed');
+if (isProduction && paymentProvider === 'razorpay' && (!paymentKeyId || !paymentKeySecret || !paymentWebhookSecret)) throw new Error('Razorpay credentials and webhook secret are required in production');
 
 
 function normalizeOtpDestination({ channel, value }) {
@@ -636,9 +671,12 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
   res.json({ received: true, applied: result.applied, duplicate: result.duplicate });
 });
 
-app.use((_req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found' } }));
-app.use((err, _req, res, _next) => {
-  console.error('[rideon-api]', err?.code || 'INTERNAL_ERROR');
+app.use((req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found', requestId:req.requestId } }));
+app.use((err, req, res, _next) => {
+  console.error(JSON.stringify({
+    level:'error', event:'api_error', requestId:req.requestId, timestamp:new Date().toISOString(),
+    method:req.method, route:req.path, status:500, code:err?.code || 'INTERNAL_ERROR', userId:req.user?.id || undefined,
+  }));
   if (err.code === 'CUSTOMER_EXISTS') return res.status(409).json({ error: { code: err.code, message: 'A customer with those credentials already exists.' } });
   if (err.code === 'INVALID_CREDENTIALS') return res.status(401).json({ error: { code: err.code, message: 'Phone or password is incorrect.' } });
   if (err.code === 'PAYMENT_PROVIDER_UNSUPPORTED') return res.status(500).json({ error: { code: err.code, message: 'Unsupported payment provider configuration.' } });

@@ -18,12 +18,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
       - name: Install API dependencies
         working-directory: server
-        run: npm install
+        run: npm ci
       - name: Run memory-path API tests
         working-directory: server
         run: npm test
@@ -52,12 +52,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
       - name: Install API dependencies
         working-directory: server
-        run: npm install
+        run: npm ci
       - name: Apply PostgreSQL migrations
         working-directory: server
         run: npm run db:migrate

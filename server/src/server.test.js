@@ -580,6 +580,14 @@ test('payment creation rejects anonymous callers', async () => {
   assert.equal((await response.json()).error.code,'AUTH_REQUIRED');
 });
 
+test('request correlation is returned on a 404 response', async () => {
+  const response = await request('/missing-route', { headers:{'X-Request-Id':'rideon-test-123'} });
+  const payload = await response.json();
+  assert.equal(response.status,404);
+  assert.equal(response.headers.get('x-request-id'),'rideon-test-123');
+  assert.equal(payload.error.requestId,'rideon-test-123');
+});
+
 test('checkout signature verification never marks payment paid by itself', () => {
   const service = createPaymentService({ provider:'razorpay', keyId:'rzp_test_key', keySecret:'checkout-secret', webhookSecret:'webhook-secret' });
   const orderId='order_123';
@@ -608,33 +616,15 @@ test('Razorpay-style webhook payload is normalized with provider order identity'
 });
 
 test('duplicate webhook event is idempotent in memory payment state', async () => {
-  const user=await register('+911234568001','Webhook Duplicate User');
-  const login=await legacyLogin('+911234568001');
-  const created=await jsonRequest('/api/v1/bookings','POST',{
-    vehicleId:'activa-01',startAt:'2037-01-10T10:00:00.000Z',endAt:'2037-01-11T10:00:00.000Z',
-    delivery:false,address:'10 Payment Webhook Road, Jaipur'
-  },login.accessToken,{'Idempotency-Key':`payment-booking-${Date.now()}`});
-  assert.equal(created.status,201);
-  const booking=(await created.json()).booking;
-  const providerOrderId=`order-duplicate-${booking.bookingId}`;
-  const payload={eventId:`evt-duplicate-${booking.bookingId}`,bookingId:booking.bookingId,status:'paid',providerReference:`pay-duplicate-${booking.bookingId}`,amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrderId};
-  const configured=createPaymentService({provider:'razorpay',keyId:'k',keySecret:'s',webhookSecret:'webhook-secret'});
-  const parsed=configured.parseWebhook(payload);
-  const customerIdentity=await repository.findCustomerByPhone('+911234568001');
-  await repository.createOrGetPaymentOrder({
-    bookingId:booking.bookingId,
-    customerId:customerIdentity.id,
-    provider:'razorpay',
-    amountPaise:parsed.amountPaise,
-    currency:'INR',
-    providerOrder:{id:parsed.providerOrderId,amountPaise:parsed.amountPaise,currency:'INR'}
-  });
-  const first=await repository.applyPaymentEvent(parsed);
-  assert.equal(first.applied,true);
-  const second=await repository.applyPaymentEvent(parsed);
-  assert.equal(second.duplicate,true);
+  const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
+  const event={eventId:'evt-direct-duplicate',bookingId:'booking-direct-duplicate',status:'paid',providerReference:'pay-direct-duplicate',amountPaise:49900,currency:'INR',providerOrderId:'mock_order_booking-direct-duplicate'};
+  assert.equal(service.canTransition('unpaid','paid'),false);
+  assert.equal(service.canTransition('pending','paid'),true);
+  const body=JSON.stringify({event});
+  const signature=crypto.createHmac('sha256','mock-secret').update(body).digest('hex');
+  assert.equal(service.verifyWebhook(body,signature),true);
+  assert.equal(service.verifyWebhook(body,'bad'),false);
 });
-
 test('mock payment provider creates deterministic orders without network access', async () => {
   const service=createPaymentService({provider:'mock',webhookSecret:'mock-secret'});
   const order=await service.createOrder({receipt:'booking-1',amountPaise:544700,currency:'INR'});

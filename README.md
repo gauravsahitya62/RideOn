@@ -223,3 +223,9 @@ RideOn should not be treated as production-ready solely because CI is green. Rem
 - commercial inventory/rates, tax rules, cancellation/refund policy, and any required identity/licence verification.
 
 No device-level UI test, production deployment, or real payment transaction is claimed by this repository.
+
+## Production hardening
+
+The launch-hardening work is tracked in [docs/PRODUCTION_RUNBOOK.md](docs/PRODUCTION_RUNBOOK.md). Production startup now fails fast for missing database/auth/payment configuration, CORS is explicit, proxy trust is opt-in, API requests receive correlation IDs, and API CI uses deterministic `npm ci` installs.
+
+EAS builds expose explicit development/preview/production channels. Production builds require `EXPO_PUBLIC_API_URL` and reject local API hosts.
