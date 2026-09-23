@@ -9,6 +9,21 @@ if (isProduction) {
   }
 }
 
+const run = (script) => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, [script], {
+    stdio: 'inherit',
+    env: process.env,
+  });
+  child.on('error', reject);
+  child.on('exit', (code, signal) => {
+    if (signal) return reject(new Error(`${script} exited on ${signal}`));
+    if (code !== 0) return reject(new Error(`${script} exited with code ${code}`));
+    resolve();
+  });
+});
+
+await run('scripts/migrate.js');
+
 const child = spawn(process.execPath, ['src/server.js'], {
   stdio: 'inherit',
   env: process.env,
