@@ -49,14 +49,22 @@ export default function AuthScreen({onAuthenticated}) {
     setBusy(true);setError('');
     try{
       const session=await authService.verifyEmailOtp(e,otp.trim());
-      const user=await authService.currentUser({
-        requestedRole: mode==='register' ? accountType : undefined,
-        registrationProfile: mode==='register' ? {
+      let user;
+      if(mode==='register'){
+        if(accountType==='vendor' && !/^\+?[0-9]{10,15}$/.test(phone.trim())){
+          throw new Error('Enter a valid phone number for vendor registration.');
+        }
+        const completed=await authService.completeRegistration({
+          accessToken:session.access_token,
+          accountType,
           fullName:name.trim(),
           phone:phone.trim() || undefined,
-          accountType,
-        } : undefined,
-      });
+        });
+        user=completed?.user;
+      } else {
+        user=await authService.currentUser();
+      }
+      if(!user?.id||!['customer','vendor'].includes(user.role)) throw new Error('We could not determine your RideOn account type.');
       onAuthenticated({...user,token:session.access_token});
     }catch(x){setError(normalizeAuthError(x));}
     finally{setBusy(false);}
