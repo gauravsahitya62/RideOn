@@ -17,34 +17,15 @@ async function verifySupabaseEmailOtp(email, token) {
 
 export const authService = {
   async sendEmailOtp({ email, fullName }) {
-    if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
-      throw new Error('Supabase authentication is not configured in this build.');
-    }
-    const response = await fetch(SUPABASE_URL + '/auth/v1/otp', {
-      method: 'POST',
-      headers: {
-        apikey: SUPABASE_PUBLISHABLE_KEY,
-        Authorization: 'Bearer ' + SUPABASE_PUBLISHABLE_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        email,
-        create_user: true,
-        data: fullName ? { full_name: fullName } : undefined,
-      }),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(payload?.msg || payload?.message || payload?.error_description || 'Supabase could not send the verification email.');
-    }
-    return payload;
+    return rideOnApi.requestOtp({ email, fullName });
   },
   async verifyEmailOtp(email, token) {
-    const session = await verifySupabaseEmailOtp(email, token);
-    if (!session?.access_token) throw new Error('Supabase did not return a valid session.');
-    await persistAccessToken(session.access_token);
-    setAccessToken(session.access_token);
-    return session;
+    const result = await rideOnApi.verifyOtp({ email, token });
+    const accessToken = result?.accessToken || result?.data?.accessToken;
+    if (!accessToken) throw new Error('RideOn did not return a valid authentication session.');
+    await persistAccessToken(accessToken);
+    setAccessToken(accessToken);
+    return { access_token:accessToken, refresh_token:result?.data?.refreshToken, expires_in:result?.data?.expiresIn };
   },
   async restoreSession() {
     const token = await restoreAccessToken();
