@@ -3,6 +3,6 @@ services:
     name: rideon-api
     env: docker
     rootDir: server
-    dockerfilePath: server/Dockerfile
+    dockerfilePath: Dockerfile
     healthCheckPath: /health
     autoDeploy: true
