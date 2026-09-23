@@ -458,7 +458,24 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
       headers:{ apikey:publishableKey, Authorization:`Bearer ${publishableKey}`, 'Content-Type':'application/json' },
       body:JSON.stringify({ email, create_user:true, data: parsed.data.fullName ? { full_name: parsed.data.fullName } : undefined })
     });
-    if (!response.ok) return res.status(response.status===429?429:502).json({ error:{ code:'OTP_REQUEST_FAILED', message:'Unable to send the RideOn verification email right now.' } });
+    if (!response.ok) {
+      const providerPayload = await response.text().catch(() => '');
+      let providerError = {};
+      try { providerError = providerPayload ? JSON.parse(providerPayload) : {}; } catch {}
+      console.error('[rideon-auth] Supabase OTP request failed', {
+        status: response.status,
+        code: providerError?.error_code || providerError?.error,
+        message: providerError?.msg || providerError?.message || providerError?.error_description,
+      });
+      return res.status(response.status === 429 ? 429 : 502).json({
+        error:{
+          code:'OTP_REQUEST_FAILED',
+          message: providerError?.msg || providerError?.message || providerError?.error_description || 'Unable to send the RideOn verification email right now.',
+          providerCode: providerError?.error_code || providerError?.error || undefined,
+          providerStatus: response.status,
+        }
+      });
+    }
     return res.json({ data:{ challenge:true, channel:'email', destination:email, expiresInSeconds:600 } });
   } catch {
     return res.status(502).json({ error:{ code:'OTP_REQUEST_FAILED', message:'Unable to send the RideOn verification email right now.' } });
