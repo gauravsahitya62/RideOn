@@ -680,17 +680,7 @@ app.post('/api/v1/vendor/bookings/:bookingId/refund', supabaseRequireAuth, requi
   if(!scopedBooking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
   const payment=await repository.findPaymentByBooking(req.params.bookingId);
   if(!payment || payment.status!=='paid') return res.status(409).json({error:{code:'INVALID_PAYMENT_STATE',message:'Only a paid booking can enter the refund flow.'}});
-  const booking=await repository.getBooking(req.params.bookingId);
-  try{
-    const refund=await payments.refundPayment({paymentId:payment.providerPaymentId,amountPaise:payment.amountPaise});
-    const updated=await repository.refundPayment({paymentId:payment.id,providerReference:refund.providerReference,status:'refunded'});
-    return res.json({payment:updated,refund:{id:refund.id,status:'refunded'}});
-  }catch(error){
-    if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:error.code,message:'Payment provider is not configured.'}});
-    if(error.code==='REFUND_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
-    if(error.code==='INVALID_PAYMENT_STATE') return res.status(409).json({error:{code:error.code,message:error.message}});
-    throw error;
-  }
+  return res.status(409).json({error:{code:'REFUND_PROVIDER_REQUIRED',message:'UPI refund requires provider reconciliation and cannot be marked refunded by a client action.'}});
 });
 
 app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req,res) => {
