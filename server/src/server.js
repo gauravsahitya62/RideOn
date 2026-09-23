@@ -153,7 +153,7 @@ const paymentWebhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && !['razorpay'].includes(paymentProvider)) throw new Error('PAYMENT_PROVIDER must be razorpay in production; mock/unconfigured providers are not allowed');
+if (isProduction && paymentProvider !== 'razorpay') throw new Error('PAYMENT_PROVIDER must be razorpay in production; mock/unconfigured providers are not allowed');
 if (isProduction && paymentProvider === 'razorpay' && (!paymentKeyId || !paymentKeySecret || !paymentWebhookSecret)) throw new Error('Razorpay credentials and webhook secret are required in production');
 
 
