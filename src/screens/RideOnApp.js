@@ -123,6 +123,7 @@ export default function RideOnApp({ authenticatedUser, onLogout }) {
      const payment=orderResult?.payment;
      if(!payment?.id||!payment?.amount)throw new Error('UPI payment request was not created by the server.');
      setPaymentState('pending');
+     setPaymentError('');
      const upiUri=payment.upiUri;
      if(upiUri) {
        try {
