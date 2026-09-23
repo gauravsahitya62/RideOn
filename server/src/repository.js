@@ -221,13 +221,12 @@ export function createRepository({ databaseUrl, fleet }) {
       memory.vendors.set(customerId, vendor);
       return vendor;
     }
-    const existing = await findVendorByCustomerId(customerId);
-    if (existing) return existing;
     const customer = await findCustomerById(customerId);
     if (!customer) return null;
     const { rows } = await pool.query(
       `insert into vendors(owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area)
        values($1,$2,$3,$4,$5,$6,$4,$5,'active',$7,$8)
+       on conflict (owner_customer_id) do update set updated_at=now()
        returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,created_at,updated_at`,
       [
         customerId,
@@ -425,25 +424,68 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
 
-  async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName}) {
+  async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
+    if (!['customer','vendor'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
+
+    const placeholderPhone = () => 'supa-' + crypto.createHash('sha256').update(String(supabaseUserId)).digest('hex').slice(0,11);
+
     if (useDatabase) {
+      const existingBySupabaseId = await findCustomerBySupabaseUserId(supabaseUserId);
+      if (existingBySupabaseId) {
+        if ((existingBySupabaseId.role || 'customer') !== role) {
+          const e=new Error('A RideOn account already exists under a different account type.'); e.code='ACCOUNT_TYPE_CONFLICT'; throw e;
+        }
+        return existingBySupabaseId;
+      }
+
       const existingByEmail = await findCustomerByEmail(email);
       if (existingByEmail) {
-        await pool.query('update customers set supabase_user_id=$2, email=coalesce(email,$3), full_name=coalesce(full_name,$4), updated_at=now() where id=$1',[existingByEmail.id,supabaseUserId,email,fullName]);
-        return { ...existingByEmail, supabaseUserId };
+        if ((existingByEmail.role || 'customer') !== role) {
+          const e=new Error('A RideOn account already exists with this email under a different account type.'); e.code='ACCOUNT_TYPE_CONFLICT'; throw e;
+        }
+        const resolvedPhone = phone || (existingByEmail.phone?.startsWith('supa-') ? placeholderPhone() : existingByEmail.phone);
+        const { rows } = await pool.query(
+          `update customers set supabase_user_id=$2,email=coalesce(email,$3),full_name=coalesce(full_name,$4),phone=$5
+           where id=$1 returning id,full_name,phone,email,role,supabase_user_id`,
+          [existingByEmail.id,supabaseUserId,email,fullName || existingByEmail.fullName,resolvedPhone]
+        );
+        return mapCustomer(rows[0]);
       }
-      const phone = 'supabase-' + supabaseUserId;
-      const { rows } = await pool.query('insert into customers(full_name,phone,email,password_hash,supabase_user_id) values($1,$2,$3,$4,$5) returning id,full_name,phone,email,supabase_user_id',[fullName,phone,email,'supabase-auth-managed',supabaseUserId]);
+
+      const resolvedPhone = phone || placeholderPhone();
+      const { rows } = await pool.query(
+        `insert into customers(full_name,phone,email,password_hash,supabase_user_id,role)
+         values($1,$2,$3,$4,$5,$6)
+         returning id,full_name,phone,email,role,supabase_user_id`,
+        [fullName || email.split('@')[0],resolvedPhone,email,'supabase-auth-managed',supabaseUserId,role]
+      );
       return mapCustomer(rows[0]);
     }
-    const existing=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(supabaseUserId)||String(v.email||'').toLowerCase()===String(email).toLowerCase());
-    if(existing){existing.supabaseUserId=supabaseUserId;existing.email=email;existing.fullName=existing.fullName||fullName;return {id:existing.id,fullName:existing.fullName,phone:existing.phone,email:existing.email,supabaseUserId};}
-    const id=crypto.randomUUID(); const phone='supabase-'+supabaseUserId; memory.customers.set(id,{id,fullName,phone,email,passwordHash:'supabase-auth-managed',supabaseUserId}); return {id,fullName,phone,email,supabaseUserId};
+
+    const bySupabase=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(supabaseUserId));
+    if(bySupabase){
+      if ((bySupabase.role||'customer')!==role) { const e=new Error('A RideOn account already exists under a different account type.'); e.code='ACCOUNT_TYPE_CONFLICT'; throw e; }
+      return {...bySupabase};
+    }
+    const byEmail=[...memory.customers.values()].find(v=>String(v.email||'').toLowerCase()===String(email).toLowerCase());
+    if(byEmail){
+      if ((byEmail.role||'customer')!==role) { const e=new Error('A RideOn account already exists with this email under a different account type.'); e.code='ACCOUNT_TYPE_CONFLICT'; throw e; }
+      byEmail.supabaseUserId=supabaseUserId;
+      byEmail.email=email;
+      byEmail.fullName=byEmail.fullName||fullName;
+      if(phone && byEmail.phone?.startsWith('supa-')) byEmail.phone=phone;
+      return {...byEmail};
+    }
+    const id=crypto.randomUUID();
+    const resolvedPhone=phone || placeholderPhone();
+    const customer={id,fullName:fullName||email.split('@')[0],phone:resolvedPhone,email,passwordHash:'supabase-auth-managed',supabaseUserId,role};
+    memory.customers.set(id,customer);
+    return {...customer};
   }
 
   async function findCustomerBySupabaseUserId(id) {
     if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,supabaseUserId:c.supabaseUserId}:null; }
-    const { rows } = await pool.query('select id,full_name,phone,email,supabase_user_id from customers where supabase_user_id=$1',[id]);
+    const { rows } = await pool.query('select id,full_name,phone,email,role,supabase_user_id from customers where supabase_user_id=$1',[id]);
     return rows[0]?mapCustomer(rows[0]):null;
   }
 
@@ -845,7 +887,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function findCustomerByEmail(email) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where lower(email)=lower($1::text)', [email]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,supabase_user_id from customers where lower(email)=lower($1::text)', [email]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = [...memory.customers.values()].find(v => String(v.email || '').toLowerCase() === String(email).toLowerCase());
@@ -854,7 +896,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function findCustomerById(id) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash from customers where id=$1', [id]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,supabase_user_id from customers where id=$1', [id]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = memory.customers.get(id);
