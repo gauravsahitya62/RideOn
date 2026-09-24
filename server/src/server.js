@@ -64,6 +64,8 @@ const bookingSchema = z.object({
   delivery: z.boolean().default(true),
   address: z.string().trim().min(8).max(300),
   notes: z.string().max(500).optional(),
+  deliveryLatitude: z.union([z.number(), z.string()]).nullable().optional(),
+  deliveryLongitude: z.union([z.number(), z.string()]).nullable().optional(),
 }).refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt', path: ['endAt'] });
 
 function normalizeBookingInput(body = {}) {
@@ -159,6 +161,13 @@ function publicBooking(booking) {
     securityDepositInspectedAt: booking.securityDepositInspectedAt,
     securityDepositInspectedBy: booking.securityDepositInspectedBy,
     rejectionReason: booking.rejectionReason,
+    deliveryLatitude: booking.deliveryLatitude,
+    deliveryLongitude: booking.deliveryLongitude,
+    vendorServiceLatitude: booking.vendorServiceLatitude,
+    vendorServiceLongitude: booking.vendorServiceLongitude,
+    routeDistanceMeters: booking.routeDistanceMeters,
+    routeDurationSeconds: booking.routeDurationSeconds,
+    routeProvider: booking.routeProvider,
   };
 }
 
@@ -397,6 +406,17 @@ app.get('/health', async (_req, res) => {
   });
 });
 
+app.get('/api/v1/vendors/map', async (req, res) => {
+  try {
+    const city = req.query.city?.toString().trim() || undefined;
+    const vendors = await repository.listMarketplaceVendors({ city });
+    res.json({ data: vendors, vendors, meta:{ count:vendors.length } });
+  } catch (error) {
+    console.error(JSON.stringify({level:'error',event:'vendor_map_failed',requestId:req.requestId,code:error?.code||'VENDOR_MAP_FAILED',message:error?.message}));
+    res.status(503).json({error:{code:'VENDOR_MAP_UNAVAILABLE',message:'Vendor map data is temporarily unavailable. Please retry.'}});
+  }
+});
+
 app.get('/api/v1/locations', async (_req, res) => {
   try {
     const locations = await repository.listLocations();
@@ -438,6 +458,36 @@ app.get('/api/v1/vehicles/:id', async (req, res) => {
 // Vendor profile and fleet management.
 app.get('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
   res.json({ user: { id:req.user.id, name:req.user.name, email:req.user.email, role:'vendor' }, vendor:req.vendor });
+});
+
+app.get('/api/v1/vendor/service-location', supabaseRequireAuth, requireVendor, async (req,res) => {
+  try {
+    const location = await repository.getVendorServiceLocation(req.user.id);
+    if (!location) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor profile not found.'}});
+    res.json({data:location,location});
+  } catch (error) {
+    console.error(JSON.stringify({level:'error',event:'vendor_service_location_get_failed',requestId:req.requestId,code:error?.code||'VENDOR_SERVICE_LOCATION_GET_FAILED'}));
+    res.status(503).json({error:{code:'SERVICE_LOCATION_UNAVAILABLE',message:'We could not load your service location right now.'}});
+  }
+});
+
+app.patch('/api/v1/vendor/service-location', supabaseRequireAuth, requireVendor, async (req,res) => {
+  const parsed=z.object({
+    latitude:z.union([z.number(),z.string()]).nullable().optional(),
+    longitude:z.union([z.number(),z.string()]).nullable().optional(),
+    address:z.string().trim().max(300).optional(),
+    serviceCity:z.string().trim().min(2).max(100).optional(),
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_SERVICE_LOCATION',message:'Please provide a valid service location.',details:parsed.error.flatten()}});
+  try {
+    const location=await repository.updateVendorServiceLocation(req.user.id,parsed.data);
+    if(!location) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor profile not found.'}});
+    res.json({data:{vendorId:location.id,serviceCity:location.serviceCity,address:location.serviceAddress||location.address,latitude:location.serviceLatitude,longitude:location.serviceLongitude},location:{vendorId:location.id,serviceCity:location.serviceCity,address:location.serviceAddress||location.address,latitude:location.serviceLatitude,longitude:location.serviceLongitude}});
+  } catch(error) {
+    if(error.code==='INVALID_SERVICE_LOCATION') return res.status(400).json({error:{code:error.code,message:'Please provide a valid latitude and longitude.'}});
+    console.error(JSON.stringify({level:'error',event:'vendor_service_location_update_failed',requestId:req.requestId,code:error?.code||'SERVICE_LOCATION_UPDATE_FAILED'}));
+    res.status(503).json({error:{code:'SERVICE_LOCATION_UPDATE_FAILED',message:'We could not save your service location right now. Please try again.'}});
+  }
 });
 
 app.patch('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
@@ -781,6 +831,8 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
       delivery: parsed.data.delivery,
       address: parsed.data.address,
       notes: parsed.data.notes,
+      deliveryLatitude: parsed.data.deliveryLatitude,
+      deliveryLongitude: parsed.data.deliveryLongitude,
       pricing: pricingData,
       idempotencyKey,
     });
