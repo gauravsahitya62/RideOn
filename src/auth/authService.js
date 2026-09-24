@@ -45,21 +45,11 @@ export const authService = {
   },
 
   async completeRegistration({accessToken,accountType,fullName,phone}) {
-    console.log('[RideOnAuth][COMPLETE_REGISTRATION_START]', JSON.stringify({
-      accountType, fullNameLength: String(fullName || '').length, hasPhone: Boolean(phone),
-      hasAccessToken: Boolean(accessToken)
-    }));
     setAccessToken(accessToken);
     try {
       const result = await rideOnApi.completeRegistration({accountType,fullName,phone});
-      console.log('[RideOnAuth][COMPLETE_REGISTRATION_SUCCESS]', JSON.stringify({
-        role: result?.user?.role, userId: result?.user?.id || null
-      }));
       return result;
     } catch (error) {
-      console.error('[RideOnAuth][COMPLETE_REGISTRATION_ERROR]', JSON.stringify({
-        status: error?.status, code: error?.code, path: error?.path, message: error?.message
-      }));
       throw error;
     }
   },
