@@ -135,6 +135,26 @@ export const rideOnApi = {
   updateVendorMe: (payload) => request('/api/v1/vendor/me', { method:'PATCH', body:JSON.stringify(payload) }),
   listVendorVehicles: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/vendor/vehicles${query ? `?${query}` : ''}`); },
   createVendorVehicle: (payload) => request('/api/v1/vendor/vehicles', { method:'POST', body:JSON.stringify(payload) }),
+  uploadVehicleImage: async (uri) => {
+    if (!accessToken) throw new Error('Vendor session expired. Please sign in again.');
+    const requestId = `mobile-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+    const response = await fetch(`${API_URL}/api/v1/vendor/vehicle-images`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}`, 'Content-Type': 'image/jpeg' },
+      body: await (await fetch(uri)).blob(),
+    });
+    let payload = {};
+    try { payload = await response.json(); } catch {}
+    if (!response.ok) {
+      const message = payload?.error?.message || 'Vehicle image upload failed.';
+      const error = new Error(`${message} [${response.status} /api/v1/vendor/vehicle-images]`);
+      error.code = payload?.error?.code || null; error.status = response.status; error.path = '/api/v1/vendor/vehicle-images';
+      console.error('[RideOnNetwork][UPLOAD_ERROR]', JSON.stringify({requestId,status:response.status,errorCode:error.code,message}));
+      throw error;
+    }
+    return payload;
+  },
+
   getVendorVehicle: (id) => request(`/api/v1/vendor/vehicles/${encode(id)}`),
   updateVendorVehicle: (id,payload) => request(`/api/v1/vendor/vehicles/${encode(id)}`, { method:'PATCH', body:JSON.stringify(payload) }),
   deleteVendorVehicle: (id) => request(`/api/v1/vendor/vehicles/${encode(id)}`, { method:'DELETE' }),
