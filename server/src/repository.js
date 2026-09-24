@@ -125,7 +125,7 @@ export function createRepository({ databaseUrl, fleet }) {
       pool.query(`select id as booking_id,'payment_stuck_pending' as type,updated_at from bookings where payment_status in ('pending','refund_pending') and updated_at < now()-interval '30 minutes' order by updated_at asc limit $1`,[max]),
       pool.query(`select booking_id,'tracking_stale' as type,last_location_at as updated_at from tracking_sessions where status='active' and (last_location_at is null or last_location_at < now()-interval '3 minutes') order by last_location_at asc nulls first limit $1`,[max]),
       pool.query(`select booking_id,'tracking_session_expired' as type,expires_at as updated_at from tracking_sessions where status='active' and expires_at < now() order by expires_at asc limit $1`,[max]),
-      pool.query(`select id as notification_id,'notification_delivery_failed' as type,updated_at from push_devices where consecutive_failures >= 5 and enabled=true order by updated_at asc limit $1`,[max]),
+      pool.query(`select id as notification_id,'notification_delivery_failed' as type,updated_at from push_devices where failure_count >= 5 and enabled=true order by updated_at asc limit $1`,[max]),
     ]);
     return {generatedAt:new Date().toISOString(),alerts:[...pending.rows,...stale.rows,...expired.rows,...notificationsFailed.rows].sort((a,b)=>new Date(a.updated_at)-new Date(b.updated_at))};
   }
