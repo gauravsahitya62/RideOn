@@ -803,6 +803,7 @@ app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVend
     if(error.code==='PAYMENT_REQUIRED_FOR_ACCEPTANCE') return res.status(409).json({error:{code:error.code,message:'Payment must be confirmed before this booking can be accepted.'}});
     if(error.code==='INVALID_BOOKING_STATUS') return res.status(400).json({error:{code:error.code,message:'Invalid booking status.'}});
     if(error.code==='REJECTION_REASON_REQUIRED') return res.status(400).json({error:{code:error.code,message:'A rejection reason is required.'}});
+    if(error.code==='DELIVERY_NOT_COMPLETED') return res.status(409).json({error:{code:error.code,message:'Mark the vehicle delivered before completing the rental.'}});
     throw error;
   }
 });
