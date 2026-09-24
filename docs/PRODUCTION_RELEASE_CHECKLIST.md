@@ -90,3 +90,18 @@ Before submission, verify:
 10. Store privacy, metadata, icon and screenshot requirements.
 
 See `RELEASE_CHECKLIST.md` and `docs/MOBILE_PRODUCTION_RELEASE.md`.
+
+
+## Notifications release gate
+
+Migration `025_notifications.sql` adds in-app notifications, push-device registrations and basic transactional/promotional preference storage.
+
+Before production:
+- Apply migration 025 after the existing migration chain.
+- Verify Expo/EAS notification configuration on physical Android and iOS devices.
+- Test permission grant, denial and later re-enable.
+- Test booking, payment, refund, delivery and support notifications from authoritative backend events.
+- Test notification tap navigation and stale/deleted target handling.
+- Verify invalid Expo tokens are disabled.
+- Never add `EXPO_ACCESS_TOKEN` to an Expo public variable.
+- Do not expect security-deposit hold/release notifications until the deployed security-deposit workflow exposes authoritative hold/release state transitions; the current release does not invent those events.
