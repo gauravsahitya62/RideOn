@@ -527,6 +527,7 @@ app.get('/health/ready', async (_req,res)=>{
 
 app.get('/api/v1/admin/metrics', supabaseRequireAuth, requireAdmin, async (req,res)=>{
   try{
+    observability.log('info','admin_action',{action:'view_metrics',actorUserId:req.user.id});
     const result=await repository.getAdminMetrics({from:req.query.from,to:req.query.to});
     res.json({metrics:result});
   }catch(error){
@@ -534,11 +535,11 @@ app.get('/api/v1/admin/metrics', supabaseRequireAuth, requireAdmin, async (req,r
   }
 });
 app.get('/api/v1/admin/reconciliation', supabaseRequireAuth, requireAdmin, async (req,res)=>{
-  try{res.json({reconciliation:await repository.getFinancialReconciliation({limit:req.query.limit})});}
+  try{observability.log('info','admin_action',{action:'view_reconciliation',actorUserId:req.user.id});res.json({reconciliation:await repository.getFinancialReconciliation({limit:req.query.limit})});}
   catch{res.status(503).json({error:{code:'RECONCILIATION_UNAVAILABLE',message:'Financial reconciliation is temporarily unavailable. Please retry.'}});}
 });
 app.get('/api/v1/admin/operational-alerts', supabaseRequireAuth, requireAdmin, async (req,res)=>{
-  try{res.json({alerts:await repository.getOperationalAlerts({limit:req.query.limit})});}
+  try{observability.log('info','admin_action',{action:'view_operational_alerts',actorUserId:req.user.id});res.json({alerts:await repository.getOperationalAlerts({limit:req.query.limit})});}
   catch{res.status(503).json({error:{code:'OPERATIONAL_ALERTS_UNAVAILABLE',message:'Operational alerts are temporarily unavailable. Please retry.'}});}
 });
 
