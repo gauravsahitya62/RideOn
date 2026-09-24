@@ -7,7 +7,17 @@ ALTER TABLE bookings
   ADD COLUMN IF NOT EXISTS delivery_final_latitude NUMERIC(9,6),
   ADD COLUMN IF NOT EXISTS delivery_final_longitude NUMERIC(9,6);
 
-DO $$ BEGIN
+-- Some production databases may already contain a legacy delivery_status
+-- column with values outside the new tracking lifecycle. Normalize those
+-- existing rows before adding the constraint. New rows keep the scheduled
+-- default. This is deliberately non-destructive: no booking is marked as
+-- in-flight or delivered merely because of migration.
+UPDATE bookings
+SET delivery_status = 'scheduled'
+WHERE delivery_status IS NULL
+   OR delivery_status NOT IN ('scheduled','in_delivery','delivered','aborted');
+
+DO $ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='bookings_delivery_status_allowed') THEN
     ALTER TABLE bookings ADD CONSTRAINT bookings_delivery_status_allowed
       CHECK (delivery_status IN ('scheduled','in_delivery','delivered','aborted'));
