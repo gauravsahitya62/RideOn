@@ -5,18 +5,12 @@ import * as SecureStore from 'expo-secure-store';
 // iOS simulator uses localhost. A physical device needs your computer's LAN IP.
 // EXPO_PUBLIC_API_URL overrides this. The hosted API fallback keeps physical iOS devices and production builds off localhost/emulator-only addresses.
 const DEFAULT_API_URL = 'https://rideon-api.onrender.com';
-const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;
-const isLocalhostUrl = (() => { try { const url = new URL(configuredApiUrl); const host = url.hostname.toLowerCase(); return host === 'localhost' || host === '127.0.0.1' || host === '10.0.2.2'; } catch { return false; } })();
-
-// Expo Go on a physical iPhone cannot reach the developer machine's localhost.
-// Unless the developer explicitly opts into a local API, always use the hosted API
-// when a localhost/emulator URL has leaked into the Expo environment.
-const useLocalApi = process.env.EXPO_PUBLIC_USE_LOCAL_API === 'true';
-const resolvedApiUrl = (!useLocalApi && isLocalhostUrl ? DEFAULT_API_URL : configuredApiUrl);
-const API_URL = resolvedApiUrl.endsWith('/') ? resolvedApiUrl.slice(0, -1) : resolvedApiUrl;
+const configuredApiUrl = String(process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL).trim();
+const API_URL = configuredApiUrl.replace(/\/+$/, '');
 
 console.log('[RideOnAPI] configured:', configuredApiUrl);
 console.log('[RideOnAPI] resolved:', API_URL);
+console.log('[RideOnAPI] mode:', process.env.EXPO_PUBLIC_API_URL ? 'explicit' : 'hosted-default');
 console.log('[RideOnAPI] platform:', Platform.OS);
 const REQUEST_TIMEOUT_MS = 20000;
 let accessToken = null;
