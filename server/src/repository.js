@@ -60,66 +60,77 @@ export function createRepository({ databaseUrl, fleet }) {
   async function listVehicles({ type, city, q } = {}) {
     if (!useDatabase) {
       const typeValue = type?.toLowerCase();
-      const cityValue = city?.toLowerCase();
-      const qValue = q?.toLowerCase();
+      const cityValue = city?.trim().toLowerCase();
+      const qValue = q?.trim().toLowerCase();
       return [...fleet, ...memory.vehicles.values()].filter((v) =>
         v.active !== false &&
         (!typeValue || typeValue === 'all' || String(v.type).toLowerCase() === typeValue) &&
-        (!cityValue || String(v.city).toLowerCase() === cityValue) &&
-        (!qValue || `${v.name} ${v.subtitle || ''} ${v.make || ''} ${v.model || ''}`.toLowerCase().includes(qValue))
+        (!cityValue || String(v.city || '').trim().toLowerCase() === cityValue) &&
+        (!qValue || `${v.name || ''} ${v.subtitle || ''} ${v.make || ''} ${v.model || ''}`.toLowerCase().includes(qValue))
       );
     }
 
-    // Public marketplace reads must depend only on columns from the original
-    // vehicle schema. Optional vendor metadata was added by later migrations
-    // and must never make the customer catalogue unavailable.
+    // Public marketplace inventory is intentionally city-agnostic. A vendor's
+    // primary service_city does not restrict the marketplace. Each vehicle's
+    // own city is the source of truth for customer search/filtering.
+    //
+    // Keep the base query limited to columns guaranteed by the original
+    // vehicles schema. Optional vendor metadata must never turn a valid
+    // inventory row into a 503.
     const params = [];
     const where = ['active = true'];
+
     if (type && type.toLowerCase() !== 'all') {
       params.push(type.toLowerCase());
-      where.push(`type = ${params.length}`);
+      where.push(`type = $${params.length}`);
     }
-    if (city) {
-      params.push(city);
-      where.push(`lower(trim(city)) = lower(trim(${params.length}))`);
+    if (city?.trim()) {
+      params.push(city.trim());
+      where.push(`lower(trim(city)) = lower(trim($${params.length}))`);
     }
-    if (q) {
-      params.push(`%${q}%`);
-      where.push(`(coalesce(name, '') ilike ${params.length}::text or coalesce(make, '') ilike ${params.length}::text or coalesce(model, '') ilike ${params.length}::text)`);
+    if (q?.trim()) {
+      params.push(`%${q.trim()}%`);
+      where.push(`(
+        coalesce(name, '') ilike $${params.length}::text
+        or coalesce(make, '') ilike $${params.length}::text
+        or coalesce(model, '') ilike $${params.length}::text
+      )`);
     }
+
+    const baseSql = `
+      select id, type, name, make, model, year, city,
+             daily_rate_paise, security_deposit_paise, active,
+             transmission, fuel, seats
+      from vehicles
+      where ${where.join(' and ')}
+      order by name asc
+    `;
 
     let rows;
     try {
-      const result = await pool.query(
-        `select id, type, name, make, model, year, city, daily_rate_paise,
-                security_deposit_paise, active, transmission, fuel, seats
-         from vehicles
-         where ${where.join(' and ')}
-         order by name asc`,
-        params
-      );
-      rows = result.rows;
-    } catch (queryError) {
-      // Production databases can temporarily be on an older vehicle schema.
-      // Do not make the entire public marketplace unavailable because an
-      // optional vehicle column is missing/incompatible. Fall back to the
-      // core marketplace columns that have existed since the initial schema.
+      ({ rows } = await pool.query(baseSql, params));
+    } catch (primaryError) {
+      // Schema drift can leave optional columns unavailable in an older
+      // production database. Retry with only the immutable core catalogue
+      // columns; city filtering must still work.
       console.error(JSON.stringify({
         level: 'error',
         event: 'vehicles_primary_query_failed',
-        message: queryError?.message || 'Vehicle query failed',
-        code: queryError?.code || null,
+        message: primaryError?.message || 'Vehicle query failed',
+        code: primaryError?.code || null,
       }));
+
+      const coreSql = `
+        select id, type, name, make, model, year, city,
+               daily_rate_paise, security_deposit_paise, active
+        from vehicles
+        where ${where.join(' and ')}
+        order by name asc
+      `;
+
       try {
-        const fallback = await pool.query(
-          `select id, type, name, make, model, year, city, daily_rate_paise,
-                  security_deposit_paise, active
-           from vehicles
-           where ${where.join(' and ')}
-           order by name asc`,
-          params
-        );
-        rows = fallback.rows.map(row => ({
+        ({ rows } = await pool.query(coreSql, params));
+        rows = rows.map(row => ({
           ...row,
           transmission: null,
           fuel: null,
@@ -128,32 +139,34 @@ export function createRepository({ databaseUrl, fleet }) {
       } catch (fallbackError) {
         console.error(JSON.stringify({
           level: 'error',
-          event: 'vehicles_fallback_query_failed',
-          message: fallbackError?.message || 'Vehicle fallback query failed',
+          event: 'vehicles_core_query_failed',
+          message: fallbackError?.message || 'Core vehicle query failed',
           code: fallbackError?.code || null,
         }));
         throw fallbackError;
       }
     }
 
-    // Optional fields are enriched independently. If an older production
-    // schema does not have them yet, the public inventory still works.
+    // Optional fields are enriched only after the core inventory query has
+    // succeeded. If this metadata is missing in production, the vehicle still
+    // remains visible to customers.
     let optionalById = new Map();
     try {
-      const ids = rows.map((row) => row.id).filter(Boolean);
+      const ids = rows.map(row => String(row.id)).filter(Boolean);
       if (ids.length) {
         const optional = await pool.query(
           `select id, description, image_urls, delivery_available, owner_id
-           from vehicles where id = any($1::text[])`,
+           from vehicles where id::text = any(${1}::text[])`,
           [ids]
         );
-        optionalById = new Map(optional.rows.map((row) => [String(row.id), row]));
+        optionalById = new Map(optional.rows.map(row => [String(row.id), row]));
       }
     } catch (optionalError) {
       console.warn(JSON.stringify({
         level: 'warn',
         event: 'vehicle_optional_metadata_unavailable',
         message: optionalError?.message || 'Optional vehicle metadata query failed',
+        code: optionalError?.code || null,
       }));
     }
 
