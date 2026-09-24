@@ -135,13 +135,14 @@ export const rideOnApi = {
   updateVendorMe: (payload) => request('/api/v1/vendor/me', { method:'PATCH', body:JSON.stringify(payload) }),
   listVendorVehicles: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/vendor/vehicles${query ? `?${query}` : ''}`); },
   createVendorVehicle: (payload) => request('/api/v1/vendor/vehicles', { method:'POST', body:JSON.stringify(payload) }),
-  uploadVehicleImage: async (uri) => {
+  uploadVehicleImage: async ({ base64, contentType = 'image/jpeg' } = {}) => {
     if (!accessToken) throw new Error('Vendor session expired. Please sign in again.');
+    if (!base64) throw new Error('No image data was selected.');
     const requestId = `mobile-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
     const response = await fetch(`${API_URL}/api/v1/vendor/vehicle-images`, {
       method: 'POST',
-      headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}`, 'Content-Type': 'image/jpeg' },
-      body: await (await fetch(uri)).blob(),
+      headers: { Accept: 'application/json', Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base64, contentType }),
     });
     let payload = {};
     try { payload = await response.json(); } catch {}
