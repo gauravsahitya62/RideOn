@@ -136,3 +136,21 @@ Repeat the same matrix, specifically checking:
 **Another production deployment is required after the current QA fixes are validated.**
 
 Do not promote the current branch to live production yet. The current implementation intentionally blocks live payment success until a verified provider adapter exists, and the full Admin/Ops foundation is still separate.
+
+
+## Observability pass — 2026-09-25
+
+Implemented on this branch:
+- privacy-safe structured request/error logging with request IDs and durations
+- liveness `/health` and dependency readiness `/health/ready`
+- forward-only analytics ledger migration 026 with idempotent event keys
+- server-side admin metrics aggregation
+- read-only financial reconciliation
+- operational alerts for pending payments/refunds, stale/expired tracking and repeated push failures
+- authoritative booking/payment/delivery/support/review/registration analytics events
+- mobile error-reporting integration point with redaction of sensitive and location fields
+- production operations runbook
+- observability release gates and OpenAPI documentation
+- observability privacy tests and readiness tests
+
+Validation limitation remains: GitHub Actions must execute the current branch before any automated test or build result is marked PASS. Physical Android/iOS and live provider verification remain manual release gates.
