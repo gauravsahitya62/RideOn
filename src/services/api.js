@@ -112,6 +112,32 @@ const encode = (value) => encodeURIComponent(String(value));
 
 export const rideOnApi = {
   health: () => request('/health'),
+  // Admin / Operations (server-side RBAC is enforced for every call).
+  adminDashboard: () => request('/api/v1/admin/dashboard'),
+  adminBookings: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/bookings${query?`?${query}`:''}`); },
+  adminBooking: (id) => request(`/api/v1/admin/bookings/${encode(id)}`),
+  adminUsers: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/users${query?`?${query}`:''}`); },
+  adminUser: (id) => request(`/api/v1/admin/users/${encode(id)}`),
+  adminUserStatus: (id,status) => request(`/api/v1/admin/users/${encode(id)}/status`, {method:'PATCH',body:JSON.stringify({status})}),
+  adminVendors: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/vendors${query?`?${query}`:''}`); },
+  adminVendor: (id) => request(`/api/v1/admin/vendors/${encode(id)}`),
+  adminVendorStatus: (id,status) => request(`/api/v1/admin/vendors/${encode(id)}/status`, {method:'PATCH',body:JSON.stringify({status})}),
+  adminVehicles: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/vehicles${query?`?${query}`:''}`); },
+  adminVehicle: (id) => request(`/api/v1/admin/vehicles/${encode(id)}`),
+  adminVehicleStatus: (id,active) => request(`/api/v1/admin/vehicles/${encode(id)}/status`, {method:'PATCH',body:JSON.stringify({active})}),
+  adminPayments: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/payments${query?`?${query}`:''}`); },
+  adminRefunds: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/refunds${query?`?${query}`:''}`); },
+  adminSecurityDeposits: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/security-deposits${query?`?${query}`:''}`); },
+  adminSupportTickets: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/support/tickets${query?`?${query}`:''}`); },
+  adminSupportAssign: (id,assignedToUserId) => request(`/api/v1/admin/support/tickets/${encode(id)}/assignment`, {method:'PATCH',body:JSON.stringify({assignedToUserId})}),
+  adminSupportStatus: (id,payload) => request(`/api/v1/admin/support/tickets/${encode(id)}/status`, {method:'PATCH',body:JSON.stringify(payload)}),
+  adminSupportMessage: (id,message,isInternal=false) => request(`/api/v1/admin/support/tickets/${encode(id)}/messages`, {method:'POST',body:JSON.stringify({message,isInternal})}),
+  adminSupportResolve: (id,resolution) => request(`/api/v1/admin/support/tickets/${encode(id)}/resolve`, {method:'POST',body:JSON.stringify({resolution})}),
+  adminReviews: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/reviews${query?`?${query}`:''}`); },
+  adminReviewModeration: (id,status,reason) => request(`/api/v1/admin/reviews/${encode(id)}/moderation`, {method:'PATCH',body:JSON.stringify({status,reason})}),
+  adminDeliveries: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/deliveries${query?`?${query}`:''}`); },
+  adminAuditLogs: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/admin/audit-logs${query?`?${query}`:''}`); },
+
   listLocations: () => request('/api/v1/locations'),
   listMapVendors: (params = {}) => {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString();

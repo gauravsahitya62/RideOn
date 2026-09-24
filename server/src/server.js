@@ -264,6 +264,7 @@ const auth = createAuth({
   jwtSecret: process.env.JWT_SECRET,
   accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3600),
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS || 12),
+  identityResolver: repository.findCustomerById,
 });
 const payments = createPaymentService({
   provider: paymentProvider,
@@ -358,13 +359,23 @@ const supabaseRequireAuth = async (req, res, next) => {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
 
+    // Re-read the canonical database identity after any Supabase linking so
+    // account status/role changes made by Ops are authoritative immediately.
+    const currentIdentity = await repository.findCustomerById(identity.id);
+    if (!currentIdentity?.id || !['customer','vendor','support','admin'].includes(currentIdentity.role)) {
+      return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
+    }
     req.user = {
-      id:identity.id,
-      name:identity.fullName,
-      role:identity.role,
+      id:currentIdentity.id,
+      name:currentIdentity.fullName,
+      role:currentIdentity.role,
+      accountStatus:currentIdentity.accountStatus || 'active',
       supabaseUserId:user.id,
-      email:identity.email || user.email,
+      email:currentIdentity.email || user.email,
     };
+    if (['customer','vendor'].includes(req.user.role) && req.user.accountStatus === 'suspended') {
+      return res.status(403).json({error:{code:'ACCOUNT_SUSPENDED',message:'This RideOn account is suspended.'}});
+    }
     next();
   } catch (error) {
     if (error.code==='ACCOUNT_TYPE_CONFLICT') {
@@ -400,6 +411,36 @@ const requireRole = (...roles) => (req, res, next) => {
 
 const requireCustomer = requireRole('customer');
 const requireSupport = requireRole('support','admin');
+const requireAdminOperator = requireRole('support','admin');
+const requireAdminMutation = requireRole('admin');
+const adminRateLimit = rateLimit({ windowMs: 60_000, limit: Number(process.env.ADMIN_RATE_LIMIT || 60), standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+
+const adminResponse = (res, error) => {
+  const map = {
+    FORBIDDEN:[403,'FORBIDDEN','You do not have access to this admin resource.'],
+    USER_NOT_FOUND:[404,'USER_NOT_FOUND','User not found.'],
+    VENDOR_NOT_FOUND:[404,'VENDOR_NOT_FOUND','Vendor not found.'],
+    VEHICLE_NOT_FOUND:[404,'VEHICLE_NOT_FOUND','Vehicle not found.'],
+    REVIEW_NOT_FOUND:[404,'REVIEW_NOT_FOUND','Review not found.'],
+    INVALID_ACCOUNT_STATUS:[400,'INVALID_ACCOUNT_STATUS','Choose active or suspended.'],
+    SELF_SUSPENSION_NOT_ALLOWED:[409,'SELF_SUSPENSION_NOT_ALLOWED','You cannot suspend your own admin account.'],
+    STAFF_STATUS_MANAGEMENT_REQUIRED:[409,'STAFF_STATUS_MANAGEMENT_REQUIRED','Staff accounts must be managed through the controlled identity process.'],
+    INVALID_VENDOR_STATUS:[400,'INVALID_VENDOR_STATUS','Choose a valid vendor status.'],
+    INVALID_MODERATION_STATUS:[400,'INVALID_MODERATION_STATUS','Choose visible or hidden.'],
+    MODERATION_REASON_REQUIRED:[400,'MODERATION_REASON_REQUIRED','A moderation reason is required when hiding a review.'],
+    INVALID_SUPPORT_CATEGORY:[400,'INVALID_SUPPORT_CATEGORY','Choose a valid support category.'],
+    INVALID_SUPPORT_PRIORITY:[400,'INVALID_SUPPORT_PRIORITY','Choose a valid priority.'],
+    INVALID_SUPPORT_STATUS:[400,'INVALID_SUPPORT_STATUS','Choose a valid support status.'],
+    INVALID_ASSIGNEE:[400,'INVALID_ASSIGNEE','Tickets can only be assigned to support staff.'],
+    SUPPORT_TICKET_NOT_FOUND:[404,'SUPPORT_TICKET_NOT_FOUND','Support ticket not found.'],
+    INVALID_SUPPORT_TRANSITION:[409,'INVALID_SUPPORT_TRANSITION','That support status change is not available.'],
+    RESOLUTION_REQUIRED:[400,'RESOLUTION_REQUIRED','A resolution is required.'],
+    SUPPORT_TICKET_CLOSED:[409,'SUPPORT_TICKET_CLOSED','Reopen the ticket before replying.'],
+  };
+  const [status,code,message]=map[error?.code] || [500,'ADMIN_OPERATION_FAILED','We could not complete that admin operation right now.'];
+  console.error(JSON.stringify({level:'error',event:'admin_operation_failed',requestId:res.req?.requestId,code:error?.code||'ADMIN_OPERATION_FAILED',message:error?.message}));
+  return res.status(status).json({error:{code,message}});
+};
 
 const requireVendor = async (req, res, next) => {
   if (!req.user || req.user.role !== 'vendor') {
@@ -539,8 +580,122 @@ app.get('/api/v1/vehicles', async (req, res) => {
 app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
   const customer = await repository.findCustomerById(req.user.id);
   if (!customer) return res.status(404).json({ error:{ code:'USER_NOT_FOUND' } });
-  const user={id:customer.id,name:customer.fullName,email:customer.email||req.user.email,role:req.user.role};
+  const user={id:customer.id,name:customer.fullName,email:customer.email||req.user.email,role:req.user.role,accountStatus:customer.accountStatus||'active'};
   res.json({user,customer});
+});
+
+
+// ---------------- Admin / Operations ----------------
+app.get('/api/v1/admin/dashboard', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.getAdminDashboard());}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/bookings', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminBookings({q:req.query.q,status:req.query.status,dateFrom:req.query.dateFrom,dateTo:req.query.dateTo,customerId:req.query.customerId,vendorId:req.query.vendorId,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/bookings/:id', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{const result=await repository.getAdminBooking(req.params.id);if(!result)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});res.json(result);}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/users', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminUsers({q:req.query.q,role:req.query.role,status:req.query.status,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/users/:id', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{const result=await repository.getAdminUser(req.params.id);if(!result)return res.status(404).json({error:{code:'USER_NOT_FOUND',message:'User not found.'}});res.json(result);}catch(error){return adminResponse(res,error);}
+});
+
+app.patch('/api/v1/admin/users/:id/status', supabaseRequireAuth, requireAdminMutation, adminRateLimit, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['active','suspended'])}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_ACCOUNT_STATUS',message:'Choose active or suspended.'}});
+  try{res.json({user:await repository.updateAdminUserStatus({adminUserId:req.user.id,targetUserId:req.params.id,status:parsed.data.status})});}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/vendors', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminVendors({q:req.query.q,status:req.query.status,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/vendors/:id', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{const result=await repository.getAdminVendor(req.params.id);if(!result)return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor not found.'}});res.json(result);}catch(error){return adminResponse(res,error);}
+});
+
+app.patch('/api/v1/admin/vendors/:id/status', supabaseRequireAuth, requireAdminMutation, adminRateLimit, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['pending','approved','suspended','rejected'])}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_VENDOR_STATUS',message:'Choose a valid vendor status.'}});
+  try{res.json({vendor:await repository.updateAdminVendorStatus({adminUserId:req.user.id,vendorId:req.params.id,status:parsed.data.status})});}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/vehicles', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminVehicles({q:req.query.q,vendorId:req.query.vendorId,active:req.query.active,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/vehicles/:id', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{const result=await repository.getAdminVehicle(req.params.id);if(!result)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});res.json(result);}catch(error){return adminResponse(res,error);}
+});
+
+app.patch('/api/v1/admin/vehicles/:id/status', supabaseRequireAuth, requireAdminMutation, adminRateLimit, async (req,res)=>{
+  const parsed=z.object({active:z.boolean()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid active state.'}});
+  try{res.json({vehicle:await repository.updateAdminVehicleStatus({adminUserId:req.user.id,vehicleId:req.params.id,active:parsed.data.active})});}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/payments', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminPayments({q:req.query.q,status:req.query.status,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/refunds', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminRefunds({status:req.query.status,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/security-deposits', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminSecurityDeposits({q:req.query.q,status:req.query.status,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/support/tickets', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listSupportTickets({userId:req.user.id,status:req.query.status,category:req.query.category,priority:req.query.priority,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.patch('/api/v1/admin/support/tickets/:id/assignment', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  const parsed=z.object({assignedToUserId:z.string().uuid()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid support assignee.'}});
+  try{const ticket=await repository.assignSupportTicket({ticketId:req.params.id,assignedToUserId:parsed.data.assignedToUserId,actorUserId:req.user.id});await repository.recordAdminAudit({adminUserId:req.user.id,action:'support_ticket_assigned',entityType:'support_ticket',entityId:req.params.id,metadata:{assignedToUserId:parsed.data.assignedToUserId}});res.json({ticket});}catch(error){return adminResponse(res,error);}
+});
+
+app.patch('/api/v1/admin/support/tickets/:id/status', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['open','in_progress','waiting_for_user','resolved','closed']),resolution:z.string().trim().max(5000).optional().nullable()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid support status and optional resolution.'}});
+  try{const ticket=await repository.updateSupportTicketStatus({ticketId:req.params.id,userId:req.user.id,role:req.user.role,status:parsed.data.status,resolution:parsed.data.resolution});await repository.recordAdminAudit({adminUserId:req.user.id,action:'support_ticket_status_changed',entityType:'support_ticket',entityId:req.params.id,metadata:{status:parsed.data.status}});res.json({ticket});}catch(error){return adminResponse(res,error);}
+});
+
+app.post('/api/v1/admin/support/tickets/:id/messages', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
+  try{const message=await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal});await repository.recordAdminAudit({adminUserId:req.user.id,action:'support_message_added',entityType:'support_ticket',entityId:req.params.id,metadata:{internal:Boolean(parsed.data.isInternal)}});res.status(201).json({message});}catch(error){return adminResponse(res,error);}
+});
+
+app.post('/api/v1/admin/support/tickets/:id/resolve', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  const parsed=z.object({resolution:z.string().trim().min(3).max(5000)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'RESOLUTION_REQUIRED',message:'A resolution is required.'}});
+  try{const ticket=await repository.resolveSupportTicket({ticketId:req.params.id,userId:req.user.id,resolution:parsed.data.resolution});await repository.recordAdminAudit({adminUserId:req.user.id,action:'support_ticket_resolved',entityType:'support_ticket',entityId:req.params.id,metadata:{}});res.json({ticket});}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/reviews', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminReviews({q:req.query.q,rating:req.query.rating,moderationStatus:req.query.moderationStatus,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.patch('/api/v1/admin/reviews/:id/moderation', supabaseRequireAuth, requireAdminMutation, adminRateLimit, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['visible','hidden']),reason:z.string().trim().max(500).optional().nullable()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid moderation state.'}});
+  try{res.json({review:await repository.moderateAdminReview({adminUserId:req.user.id,reviewId:req.params.id,status:parsed.data.status,reason:parsed.data.reason})});}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/deliveries', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminDeliveries({q:req.query.q,status:req.query.status||'active',limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
+});
+
+app.get('/api/v1/admin/audit-logs', supabaseRequireAuth, requireAdminOperator, adminRateLimit, async (req,res)=>{
+  try{res.json(await repository.listAdminAuditLogs({adminUserId:req.user.id,action:req.query.action,entityType:req.query.entityType,limit:req.query.limit,offset:req.query.offset}));}catch(error){return adminResponse(res,error);}
 });
 
 app.get('/api/v1/vehicles/:id', async (req, res) => {
