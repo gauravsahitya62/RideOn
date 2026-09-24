@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import { reportClientError, reportClientEvent } from './observability.js';
 
 // Set EXPO_PUBLIC_API_URL in your local .env. Android emulator uses 10.0.2.2;
 // iOS simulator uses localhost. A physical device needs your computer's LAN IP.
@@ -23,6 +24,7 @@ const API_URL = (configuredApiUrl || localDefaultApi).replace(/\/+$/, '');
 if (!API_URL) throw new Error('EXPO_PUBLIC_API_URL is required. Local API access must be explicitly enabled with EXPO_PUBLIC_USE_LOCAL_API=true.');
 if (isLocalApiUrl && !explicitLocalApi) throw new Error('A local RideOn API URL requires EXPO_PUBLIC_USE_LOCAL_API=true.');
 const REQUEST_TIMEOUT_MS = 20000;
+let requestSequence=0;
 let accessToken = null;
 const ACCESS_TOKEN_KEY = 'rideon_access_token';
 const REFRESH_TOKEN_KEY = 'rideon_refresh_token';
@@ -80,11 +82,11 @@ export async function clearStoredAccessToken() {
 }
 
 async function request(path, options = {}) {
-  const requestId = `mobile-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+  const requestId = `mobile-${Date.now()}-${++requestSequence}`;
   const method = options.method || 'GET';
   const url = `${API_URL}${path}`;
   const startedAt = Date.now();
-  console.log('[RideOnNetwork][REQUEST]', JSON.stringify({ requestId, method, url, hasAuthToken: Boolean(accessToken) }));
+  reportClientEvent('api_request',{requestId,method,path,hasAuthToken:Boolean(accessToken)});
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   let timeoutId;
   let response;
@@ -101,7 +103,7 @@ async function request(path, options = {}) {
       },
     });
   } catch (error) {
-    console.error('[RideOnNetwork][FETCH_ERROR]', JSON.stringify({ requestId, method, url, elapsedMs: Date.now() - startedAt, name: error?.name, message: error?.message }));
+    reportClientError(error,{requestId,method,path,elapsedMs:Date.now()-startedAt});
     if (error?.name === 'AbortError') {
       throw new Error(`RideOn API request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds. Check your connection and retry.`);
     }
@@ -127,6 +129,7 @@ async function request(path, options = {}) {
     error.status = response.status;
     error.path = path;
     error.details = payload?.error?.details;
+    reportClientError(error,{requestId,method,path,status:response.status});
     throw error;
   }
   return payload;
