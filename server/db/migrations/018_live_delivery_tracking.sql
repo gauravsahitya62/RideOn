@@ -8,8 +8,16 @@ ALTER TABLE bookings
   ADD COLUMN IF NOT EXISTS delivery_final_longitude NUMERIC(9,6);
 
 -- Some production databases may already contain a legacy delivery_status
+-- column and constraint from an earlier deployment. Replace that legacy
+-- constraint before normalizing rows so the new scheduled lifecycle value
+-- can be written safely. This is forward-only and does not delete booking
+-- data.
+ALTER TABLE bookings
+  DROP CONSTRAINT IF EXISTS bookings_delivery_status_check;
+
+-- Some production databases may already contain a legacy delivery_status
 -- column with values outside the new tracking lifecycle. Normalize those
--- existing rows before adding the constraint. New rows keep the scheduled
+-- existing rows before adding the new constraint. New rows keep the scheduled
 -- default. This is deliberately non-destructive: no booking is marked as
 -- in-flight or delivered merely because of migration.
 UPDATE bookings
