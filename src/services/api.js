@@ -19,7 +19,7 @@ const isLocalApiUrl = (() => {
 
 // Expo Go on a physical iPhone must not use localhost: that resolves to the phone itself.
 // Hosted Render is the safe default. Local development is opt-in with EXPO_PUBLIC_USE_LOCAL_API=true.
-const API_URL = (explicitLocalApi && configuredApiUrl ? configuredApiUrl : DEFAULT_API_URL).replace(/\\/+$/, '');
+const API_URL = (explicitLocalApi && configuredApiUrl ? configuredApiUrl : DEFAULT_API_URL).replace(/\/+$/, '');
 console.log('[RideOnAPI] configured:', configuredApiUrl || '(none)');
 console.log('[RideOnAPI] resolved:', API_URL);
 console.log('[RideOnAPI] localOverride:', explicitLocalApi && isLocalApiUrl);
