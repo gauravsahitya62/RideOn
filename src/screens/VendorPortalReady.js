@@ -62,7 +62,22 @@ export default function VendorPortalReady({user,onLogout}){
      const result=await ImagePicker.launchImageLibraryAsync({mediaTypes:['images'],allowsMultipleSelection:true,selectionLimit:8,quality:0.85});
      if(result.canceled)return;
      const selected=result.assets.map(asset=>asset.uri).filter(Boolean);
-     setImageUrls(old=>[...old,...selected].filter((uri,index,all)=>all.indexOf(uri)===index).slice(0,8));
+     if(!selected.length)return;
+     setBusy(true);
+     setBanner('Uploading vehicle photos…');
+     try{
+       const uploaded=[];
+       for(const uri of selected){
+         const response=await rideOnApi.uploadVehicleImage(uri);
+         const url=response?.url||response?.data?.url;
+         if(url)uploaded.push(url);
+       }
+       if(!uploaded.length)throw new Error('The server did not return image URLs.');
+       setImageUrls(old=>[...old,...uploaded].filter((uri,index,all)=>all.indexOf(uri)===index).slice(0,8));
+       setBanner(`${uploaded.length} photo${uploaded.length===1?'':'s'} uploaded successfully.`);
+     }catch(e){
+       setBanner(friendlyVendorError(e,'We could not upload the selected photos. Please try again.'));
+     }finally{setBusy(false);}
    }catch(e){setBanner('We could not open your photo gallery. Please try again.');}
  };
  const saveVehicle=async()=>{
