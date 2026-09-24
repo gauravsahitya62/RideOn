@@ -887,7 +887,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
 
 app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, async (req,res) => {
   const parsed=z.object({ bookingId:z.string().uuid() }).safeParse(req.body);
-  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid bookingId and transaction reference.'}});
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid bookingId.'}});
   let payment=await repository.findPaymentById(req.params.id, req.user.id);
   if(!payment || String(payment.bookingId)!==String(parsed.data.bookingId)) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
   if(String(payment.status).toLowerCase()==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
@@ -924,10 +924,10 @@ app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req
 });
 
 app.post('/api/v1/payments/webhook', async (req, res) => {
-  const signature = req.get('X-Paytm-Signature') || req.get('X-Payment-Signature');
+  const signature = req.get('X-Payment-Signature') || req.get('X-Paytm-Signature');
   const body = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
   if (!payments.verifyWebhook(body, signature)) return res.status(401).json({ error:{code:'INVALID_WEBHOOK_SIGNATURE'} });
-  const event = payments.parseWebhook(req.body, { eventId: req.get('X-Paytm-Event-Id') || undefined });
+  const event = payments.parseWebhook(req.body, { eventId: req.get('X-Payment-Event-Id') || req.get('X-Paytm-Event-Id') || undefined });
   if (!event) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT'} });
   if (!event.bookingId && event.providerOrderId) {
     const payment = await repository.findPaymentByProviderOrder(event.providerOrderId);
