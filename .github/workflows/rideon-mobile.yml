@@ -34,7 +34,13 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: npm ci --no-audit --no-fund
+      - run: npm install --no-audit --no-fund
+      - name: Upload generated lockfile for synchronization
+        uses: actions/upload-artifact@v4
+        with:
+          name: rideon-generated-package-lock
+          path: package-lock.json
+          if-no-files-found: error
       - run: npx expo-doctor
       - name: Validate production Expo configuration
         env:
