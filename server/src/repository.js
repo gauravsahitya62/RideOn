@@ -1521,7 +1521,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const booking=memory.bookings.get(String(bookingId));
       if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       if(booking.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
-      const vendor=memory.vendors?.get(String(booking.vendorId)) || [...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(booking.vendorId));
+      const vendor=[...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(booking.vendorId));
       const vendorOwnerId=vendor?.ownerCustomerId||vendor?.owner_customer_id;
       let reviewType,revieweeId;
       if(reviewerRole==='customer'){
