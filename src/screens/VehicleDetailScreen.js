@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ReviewsSection } from '../components';
 
 const COLORS = { ink: '#17202D', muted: '#78818E', orange: '#E85D35', bg: '#F6F7F9', line: '#E8EAF0', white: '#FFFFFF' };
 const money = value => `₹${Number(value || 0).toLocaleString('en-IN')}`;
@@ -132,6 +133,9 @@ export default function VehicleDetailScreen({
         </View>}
 
         {features.length > 0 && <View style={styles.section}><Text style={styles.sectionTitle}>Features</Text><View style={styles.features}>{features.map((feature, index) => <View key={`${feature}-${index}`} style={styles.feature}><Text style={styles.featureDot}>•</Text><Text style={styles.featureText}>{feature}</Text></View>)}</View></View>}
+
+        <ReviewsSection vehicleId={vehicle.id} title="Vehicle reviews" onWriteReview={onWriteReview}/>
+        {vehicle.vendorId ? <ReviewsSection vendorId={vehicle.vendorId} title={vehicle.vendorName ? vehicle.vendorName+' · reviews' : 'Vendor reviews'} compact onWriteReview={onWriteReview}/> : null}
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Pickup & delivery</Text>
