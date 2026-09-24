@@ -58,9 +58,6 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function listVehicles({ type, city, q } = {}) {
-    const serviceCity = 'Udaipur';
-    if (city && String(city).trim().toLowerCase() !== serviceCity.toLowerCase()) return [];
-
     if (!useDatabase) {
       const typeValue = type?.toLowerCase();
       const cityValue = city?.toLowerCase();
@@ -149,17 +146,18 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function listLocations() {
-    const serviceCity = 'Udaipur';
+    // Locations are derived from the active fleet. There is no global service-city
+    // restriction: a vendor's primary service city does not limit where its
+    // individual vehicles can be listed.
     if (!useDatabase) {
       return [...new Set([...fleet, ...memory.vehicles.values()]
-        .filter(v => v.active !== false && String(v.city || '').trim().toLowerCase() === serviceCity.toLowerCase())
+        .filter(v => v.active !== false)
         .map(v => String(v.city || '').trim())
         .filter(Boolean))]
         .sort((a,b)=>a.localeCompare(b));
     }
     const { rows } = await pool.query(
-      "select distinct trim(city) as city from vehicles where active=true and lower(trim(city))=lower($1) order by trim(city) asc",
-      [serviceCity]
+      "select distinct trim(city) as city from vehicles where active=true and trim(city) <> '' order by trim(city) asc"
     );
     return rows.map(row => row.city).filter(Boolean);
   }
@@ -334,7 +332,6 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createVendorVehicle(vendorId, input) {
-    input = { ...input, city: 'Udaipur' };
     if (!useDatabase) {
       if (!memory.vehicles) memory.vehicles = new Map();
       const id = crypto.randomUUID();
@@ -361,7 +358,6 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function updateVendorVehicle(vendorId, vehicleId, input) {
-    input = { ...input, ...(input.city ? { city: 'Udaipur' } : {}) };
     if (!useDatabase) {
       const vehicle = await getVendorVehicle(vendorId, vehicleId);
       if (!vehicle) return null;
