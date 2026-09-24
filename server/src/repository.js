@@ -1983,7 +1983,9 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function resolveSupportTicket({ticketId,userId,resolution}) {
-    return updateSupportTicketStatus({ticketId,userId,role:'support',status:'resolved',resolution});
+    const actor=await findCustomerById(userId);
+    if (!SUPPORT_ROLES.has(actor?.role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
+    return updateSupportTicketStatus({ticketId,userId,role:actor.role,status:'resolved',resolution});
   }
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
