@@ -1,14 +1,17 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
-const RIDEON_SERVICE_CITY='Udaipur';
 const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',line:'#E8EAF0',white:'#FFFFFF',green:'#258565'};
 
 export default function LocationSelector({visible,selectedCity,onConfirm,onCancel,locations,loading=false,error='',onRetry}){
   const [query,setQuery]=useState('');
   const [draft,setDraft]=useState(selectedCity||'');
-  useEffect(()=>{if(visible){setDraft(RIDEON_SERVICE_CITY);setQuery('');}},[visible,selectedCity]);
-  const options=useMemo(()=>[RIDEON_SERVICE_CITY].filter(city=>city.toLowerCase().includes(query.trim().toLowerCase())),[query]);
+  useEffect(()=>{if(visible){setDraft(selectedCity || locations?.[0] || '');setQuery('');}},[visible,selectedCity,locations]);
+  const options=useMemo(()=>{
+    const list=Array.isArray(locations)?locations:[];
+    const q=query.trim().toLowerCase();
+    return list.filter(city=>String(city).toLowerCase().includes(q));
+  },[locations,query]);
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
     <View style={styles.shade}><View style={styles.sheet}><View style={styles.handle}/>
       <View style={styles.header}><View><Text style={styles.eyebrow}>RIDEON LOCATION</Text><Text style={styles.title}>Where are you riding?</Text></View><TouchableOpacity onPress={onCancel}><Text style={styles.close}>✕</Text></TouchableOpacity></View>
