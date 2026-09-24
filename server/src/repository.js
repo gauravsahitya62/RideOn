@@ -124,7 +124,7 @@ export function createRepository({ databaseUrl, fleet }) {
         .sort((a,b)=>a.localeCompare(b));
     }
     const { rows } = await pool.query(
-      'select distinct trim(city) as city from vehicles where active=true and city is not null and trim(city)<>'''' order by trim(city) asc'
+      "select distinct trim(city) as city from vehicles where active=true and city is not null and trim(city)<>'' order by trim(city) asc"
     );
     return rows.map(row => row.city).filter(Boolean);
   }
