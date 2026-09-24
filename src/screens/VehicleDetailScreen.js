@@ -1,9 +1,41 @@
 import React, { useMemo, useState } from 'react';
-import { Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 const COLORS = { ink: '#17202D', muted: '#78818E', orange: '#E85D35', bg: '#F6F7F9', line: '#E8EAF0', white: '#FFFFFF' };
 const money = value => `₹${Number(value || 0).toLocaleString('en-IN')}`;
 const asText = value => value == null || value === '' ? null : String(value);
+const optimizeVehicleImageUrl = (url, width = 1200) => {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return url;
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^(.*\/storage\/v1\/)object\/public\/(.+)$/);
+    if (!match) return url;
+    const query = new URLSearchParams(parsed.search);
+    query.set('width', String(width));
+    query.set('quality', '78');
+    return `${parsed.origin}${match[1]}render/image/public/${match[2]}${query.toString() ? `?${query.toString()}` : ''}`;
+  } catch { return url; }
+};
+const FastImage = ({ uri, style, resizeMode = 'cover' }) => {
+  const [sourceUri, setSourceUri] = useState(() => optimizeVehicleImageUrl(uri));
+  const [loading, setLoading] = useState(Boolean(uri));
+  const [failed, setFailed] = useState(!uri);
+  useEffect(() => {
+    setSourceUri(optimizeVehicleImageUrl(uri));
+    setLoading(Boolean(uri));
+    setFailed(!uri);
+  }, [uri]);
+  if (!uri || failed) return null;
+  return <View style={{position:'relative'}}>
+    <Image source={{uri:sourceUri,cache:'force-cache'}} style={style} resizeMode={resizeMode}
+      onLoadStart={()=>setLoading(true)} onLoad={()=>setLoading(false)}
+      onError={()=>{
+        if(sourceUri !== uri){setSourceUri(uri);setLoading(true);}
+        else {setLoading(false);setFailed(true);}
+      }}/>
+    {loading && <View style={{position:'absolute',left:0,right:0,top:0,bottom:0,alignItems:'center',justifyContent:'center'}}><ActivityIndicator size="small" color={COLORS.orange}/></View>}
+  </View>;
+};
 
 /**
  * Reusable vehicle details view. Pass the selected API vehicle, the existing
@@ -68,7 +100,7 @@ export default function VehicleDetailScreen({
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.gallery}>
           {images.length ? <TouchableOpacity activeOpacity={0.95} onPress={() => setImageViewerOpen(true)} accessibilityRole="button" accessibilityLabel="Open larger vehicle image">
-            <Image source={{ uri: images[Math.min(activeImage, images.length - 1)] }} style={styles.heroImage} resizeMode="cover" onError={() => setActiveImage(0)} />
+            <FastImage uri={images[Math.min(activeImage, images.length - 1)]} style={styles.heroImage} />
           </TouchableOpacity> : <View style={styles.imageFallback}><Text style={styles.fallbackIcon}>{vehicle.emoji || '🚘'}</Text><Text style={styles.muted}>Vehicle image not provided</Text></View>}
           {images.length > 1 && <View style={styles.galleryControls}>
             <TouchableOpacity onPress={() => moveImage(-1)} style={styles.galleryButton} accessibilityRole="button" accessibilityLabel="Previous image"><Text style={styles.galleryGlyph}>‹</Text></TouchableOpacity>
@@ -123,7 +155,7 @@ export default function VehicleDetailScreen({
 
       <Modal visible={imageViewerOpen} transparent animationType="fade" onRequestClose={() => setImageViewerOpen(false)}>
         <View style={styles.viewer}><TouchableOpacity style={styles.viewerClose} onPress={() => setImageViewerOpen(false)} accessibilityRole="button" accessibilityLabel="Close image viewer"><Text style={styles.viewerCloseText}>✕</Text></TouchableOpacity>
-          {images.length > 0 && <Image source={{ uri: images[Math.min(activeImage, images.length - 1)] }} style={styles.viewerImage} resizeMode="contain" />}
+          {images.length > 0 && <FastImage uri={images[Math.min(activeImage, images.length - 1)]} style={styles.viewerImage} resizeMode="contain" />}
           {images.length > 1 && <View style={styles.viewerControls}><Action title="‹ Previous" ghost onPress={() => moveImage(-1)} /><Text style={styles.imageCount}>{activeImage + 1} / {images.length}</Text><Action title="Next ›" ghost onPress={() => moveImage(1)} /></View>}
         </View>
       </Modal>
