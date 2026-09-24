@@ -354,6 +354,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function ensureVendorForCustomer(customerId, input = {}) {
+    const serviceCity = input.serviceCity || (process.env.NODE_ENV === 'test' ? (process.env.TEST_SERVICE_CITY || 'Test City') : null);
     if (!useDatabase) {
       if (!memory.vendors) memory.vendors = new Map();
       const existing = memory.vendors.get(customerId);
@@ -367,7 +368,7 @@ export function createRepository({ databaseUrl, fleet }) {
         email: input.email || '',
         address: input.address || input.serviceCity || '',
         status: 'active',
-        serviceCity: input.serviceCity || '',
+        serviceCity: serviceCity || '',
         serviceArea: input.serviceArea || {},
       };
       memory.vendors.set(customerId, vendor);
@@ -387,7 +388,7 @@ export function createRepository({ databaseUrl, fleet }) {
         input.phone || (customer.phone?.startsWith('supa-') ? '' : customer.phone) || '',
         input.email || customer.email || '',
         input.address || input.serviceCity || '',
-        input.serviceCity || null,
+        serviceCity,
         input.serviceArea || {},
       ]
     );
