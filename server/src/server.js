@@ -835,6 +835,12 @@ app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCu
   }catch(error){return reviewResponse(res,error);}
 });
 
+app.post('/api/v1/vendor/bookings/:id/review', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});res.status(201).json({review});}catch(error){return reviewResponse(res,error);}
+});
+
 app.post('/api/v1/vendor/bookings/:id/reviews/customer', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
   const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
   if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
