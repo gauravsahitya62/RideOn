@@ -77,7 +77,14 @@ export const authService = {
     }
   },
 
-  async signOut(){await clearStoredAccessToken();setAccessToken(null);},
+  async signOut(){
+    const token=await restoreAccessToken();
+    if(token && SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY){
+      try{await fetch(SUPABASE_URL+'/auth/v1/logout',{method:'POST',headers:{apikey:SUPABASE_PUBLISHABLE_KEY,Authorization:'Bearer '+token}});}catch{}
+    }
+    await clearStoredAccessToken();
+    setAccessToken(null);
+  },
 };
 
 export function normalizeAuthError(error) {
