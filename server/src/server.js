@@ -12,6 +12,7 @@ import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
 import { createTrackingRealtimeServer } from './trackingRealtime.js';
+import { createNotificationService } from './notifications.js';
 
 const fleet = [];
 
@@ -184,6 +185,7 @@ function publicBooking(booking) {
 }
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
+const notifications = createNotificationService({ repository });
 console.log('[RideOnServer][ROUTES_READY]', JSON.stringify({ routes:['GET /health','GET /api/v1/version','GET /api/v1/me','POST /api/v1/auth/request-otp','POST /api/v1/auth/verify-otp','POST /api/v1/auth/complete-registration'] }));
 console.log('[RideOnServer][BOOT]', JSON.stringify({
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -422,6 +424,67 @@ const requireRole = (...roles) => (req, res, next) => {
 
 const requireCustomer = requireRole('customer');
 const requireSupport = requireRole('support','admin');
+
+app.get('/api/v1/notifications', supabaseRequireAuth, async (req,res)=>{
+  try {
+    const limit=Math.min(50,Math.max(1,Number(req.query.limit)||20));
+    const offset=Math.max(0,Number(req.query.offset)||0);
+    res.json(await repository.listNotifications({userId:req.user.id,limit,offset}));
+  } catch(error) { res.status(503).json({error:{code:'NOTIFICATIONS_UNAVAILABLE',message:'Notifications are temporarily unavailable. Please retry.'}}); }
+});
+
+app.get('/api/v1/notifications/unread-count', supabaseRequireAuth, async (req,res)=>{
+  try { res.json({count:await repository.countUnreadNotifications(req.user.id)}); }
+  catch { res.status(503).json({error:{code:'NOTIFICATIONS_UNAVAILABLE',message:'Notifications are temporarily unavailable. Please retry.'}}); }
+});
+
+app.patch('/api/v1/notifications/:id/read', supabaseRequireAuth, async (req,res)=>{
+  try {
+    const notification=await repository.markNotificationRead({userId:req.user.id,notificationId:req.params.id});
+    if(!notification) return res.status(404).json({error:{code:'NOTIFICATION_NOT_FOUND',message:'Notification not found.'}});
+    res.json({notification});
+  } catch { res.status(503).json({error:{code:'NOTIFICATIONS_UNAVAILABLE',message:'Notifications are temporarily unavailable. Please retry.'}}); }
+});
+
+app.patch('/api/v1/notifications/read-all', supabaseRequireAuth, async (req,res)=>{
+  try { res.json({updated:await repository.markAllNotificationsRead(req.user.id)}); }
+  catch { res.status(503).json({error:{code:'NOTIFICATIONS_UNAVAILABLE',message:'Notifications are temporarily unavailable. Please retry.'}}); }
+});
+
+app.post('/api/v1/notifications/push-token', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({token:z.string().trim().min(10).max(512),platform:z.enum(['ios','android','web','unknown']).default('unknown'),deviceId:z.string().trim().max(255).nullable().optional()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_PUSH_TOKEN',message:'Invalid notification device registration.'}});
+  try {
+    const device=await notifications.notifyPushRegistration({userId:req.user.id,...parsed.data});
+    res.status(201).json({device:{id:device.id,platform:device.platform,enabled:device.enabled}});
+  } catch(error) { res.status(error?.code==='INVALID_PUSH_TOKEN'?400:503).json({error:{code:error?.code||'PUSH_REGISTRATION_FAILED',message:error?.code==='INVALID_PUSH_TOKEN'?'Invalid notification device registration.':'Push notifications are temporarily unavailable.'}}); }
+});
+
+app.delete('/api/v1/notifications/push-token', supabaseRequireAuth, async (req,res)=>{
+  const token=String(req.body?.token||'').trim();
+  if(!token) return res.status(400).json({error:{code:'INVALID_PUSH_TOKEN',message:'Push token is required.'}});
+  try {
+    const device=await repository.listEnabledPushDevices(req.user.id);
+    const target=device.find(x=>x.pushToken===token);
+    if(target) await repository.disablePushDevice(target.id);
+    res.json({removed:Boolean(target)});
+  } catch { res.status(503).json({error:{code:'PUSH_REGISTRATION_FAILED',message:'Push notifications are temporarily unavailable.'}}); }
+});
+
+app.get('/api/v1/notifications/preferences', supabaseRequireAuth, async (req,res)=>{
+  try { res.json({preferences:await repository.getNotificationPreferences(req.user.id)}); }
+  catch { res.status(503).json({error:{code:'NOTIFICATION_PREFERENCES_UNAVAILABLE',message:'Notification preferences are temporarily unavailable.'}}); }
+});
+
+app.patch('/api/v1/notifications/preferences', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({transactionalEnabled:z.boolean().optional(),promotionalEnabled:z.boolean().optional()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_NOTIFICATION_PREFERENCES',message:'Invalid notification preferences.'}});
+  try {
+    const current=await repository.getNotificationPreferences(req.user.id);
+    const preferences=await repository.updateNotificationPreferences(req.user.id,{transactionalEnabled:parsed.data.transactionalEnabled??current.transactionalEnabled,promotionalEnabled:parsed.data.promotionalEnabled??current.promotionalEnabled});
+    res.json({preferences});
+  } catch { res.status(503).json({error:{code:'NOTIFICATION_PREFERENCES_UNAVAILABLE',message:'Notification preferences are temporarily unavailable.'}}); }
+});
 
 const requireVendor = async (req, res, next) => {
   if (!req.user || req.user.role !== 'vendor') {
