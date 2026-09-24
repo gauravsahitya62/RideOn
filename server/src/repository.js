@@ -88,16 +88,53 @@ export function createRepository({ databaseUrl, fleet }) {
       where.push(`(coalesce(name, '') ilike ${params.length}::text or coalesce(make, '') ilike ${params.length}::text or coalesce(model, '') ilike ${params.length}::text)`);
     }
 
-    const result = await pool.query(
-      `select id, type, name, make, model, year, city, daily_rate_paise,
-              security_deposit_paise, active, transmission, fuel, seats
-       from vehicles
-       where ${where.join(' and ')}
-       order by name asc`,
-      params
-    );
-
-    const rows = result.rows;
+    let rows;
+    try {
+      const result = await pool.query(
+        `select id, type, name, make, model, year, city, daily_rate_paise,
+                security_deposit_paise, active, transmission, fuel, seats
+         from vehicles
+         where ${where.join(' and ')}
+         order by name asc`,
+        params
+      );
+      rows = result.rows;
+    } catch (queryError) {
+      // Production databases can temporarily be on an older vehicle schema.
+      // Do not make the entire public marketplace unavailable because an
+      // optional vehicle column is missing/incompatible. Fall back to the
+      // core marketplace columns that have existed since the initial schema.
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'vehicles_primary_query_failed',
+        message: queryError?.message || 'Vehicle query failed',
+        code: queryError?.code || null,
+      }));
+      try {
+        const fallback = await pool.query(
+          `select id, type, name, make, model, year, city, daily_rate_paise,
+                  security_deposit_paise, active
+           from vehicles
+           where ${where.join(' and ')}
+           order by name asc`,
+          params
+        );
+        rows = fallback.rows.map(row => ({
+          ...row,
+          transmission: null,
+          fuel: null,
+          seats: null,
+        }));
+      } catch (fallbackError) {
+        console.error(JSON.stringify({
+          level: 'error',
+          event: 'vehicles_fallback_query_failed',
+          message: fallbackError?.message || 'Vehicle fallback query failed',
+          code: fallbackError?.code || null,
+        }));
+        throw fallbackError;
+      }
+    }
 
     // Optional fields are enriched independently. If an older production
     // schema does not have them yet, the public inventory still works.
