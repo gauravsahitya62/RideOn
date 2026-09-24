@@ -53,7 +53,7 @@ export async function getDrivingRoute(originInput,destinationInput){
       headers:{
         'Content-Type':'application/json',
         'X-Goog-Api-Key':apiKey,
-        'X-Goog-FieldMask':'routes.distanceMeters,routes.duration,routes.staticDuration',
+        'X-Goog-FieldMask':'routes.distanceMeters,routes.duration,routes.staticDuration,routes.polyline.encodedPolyline',
       },
       body:JSON.stringify({
         origin:{location:{latLng:{latitude:origin.latitude,longitude:origin.longitude}}},
@@ -77,6 +77,7 @@ export async function getDrivingRoute(originInput,destinationInput){
       durationSeconds,
       staticDurationSeconds:route.staticDuration ? Math.max(0,Math.round(Number(String(route.staticDuration).replace(/s$/,'')))) : null,
       provider:'google_routes',
+      encodedPolyline:route.polyline?.encodedPolyline || null,
     };
     writeCache(key(origin,destination),result);
     return result;
