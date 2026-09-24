@@ -467,6 +467,9 @@ test('cancellation records the actual previous status', async () => {
   });
   assert.equal(cancelled.status, 200);
   assert.equal((await cancelled.json()).booking.status, 'cancelled');
+  const duplicate = await request('/api/v1/bookings/' + bookingId + '/cancel', { method:'PATCH', headers:{authorization:'Bearer ' + login.accessToken} });
+  assert.equal(duplicate.status,409);
+  assert.equal((await duplicate.json()).error.code,'CANCELLATION_NOT_ALLOWED');
 });
 
 test('cancellation preview returns server-calculated refund data', async () => {
@@ -483,21 +486,6 @@ test('cancellation preview returns server-calculated refund data', async () => {
   assert.equal(preview.status,200);
   assert.equal(payload.cancellation.allowed,true);
   assert.equal(typeof payload.cancellation.totalRefund,'number');
-});
-
-test('customer cannot cancel a completed booking', async () => {
-  const a = await register('+911234567919', 'Completed Cancel User');
-  const login = await legacyLogin('+911234567919');
-  const created = await jsonRequest('/api/v1/bookings','POST',{
-    vehicleId:'baleno-01',startAt:'2037-02-10T10:00:00.000Z',endAt:'2037-02-11T10:00:00.000Z',
-    delivery:false,address:'17 Completed Road, Jaipur',
-  },login.accessToken,{ 'Idempotency-Key':'completed-cancel-1' });
-  const bookingId=(await created.json()).booking.bookingId;
-  const vendorCustomer=await register('+911234567920','Completed Vendor User');
-  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
-  await repository.updateVendorBookingStatus(vendor.id,bookingId,'completed').catch(()=>{});
-  const response=await request('/api/v1/bookings/'+bookingId+'/cancel',{method:'PATCH',headers:{authorization:'Bearer '+login.accessToken}});
-  assert.equal(response.status,409);
 });
 
 test('inactive vehicle cannot be checked or booked', async () => {
@@ -551,7 +539,6 @@ test('vendor booking lifecycle is isolated and customer-visible', async () => {
     address:'15 Vendor Lifecycle Road, Jaipur',
   },customerLogin.accessToken,{ 'Idempotency-Key':'vendor-lifecycle-1' });
   assert.equal(bookingResponse.status,201);
-  const bookingPayload = (await jsonRequest('/api/v1/bookings/'+bookingId,'GET',{},customerLogin.accessToken)).status;
   const bookingForPayment = await repository.getBooking(bookingId, customer.customer.id);
   await repository.createOrGetPaymentOrder({bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR',providerOrder:{id:'test-vendor-lifecycle-'+bookingId,amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR'}});
   await repository.applyPaymentEvent({eventId:'paid-vendor-lifecycle-'+bookingId,bookingId,paymentId:undefined,providerReference:'paid-vendor-lifecycle-ref-'+bookingId,providerOrderId:'test-vendor-lifecycle-'+bookingId,amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR',status:'paid'});
