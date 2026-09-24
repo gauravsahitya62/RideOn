@@ -13,7 +13,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map() };
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
 
   const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
@@ -1622,6 +1622,368 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function listReviewsReceived(userId,{limit=20,offset=0}={}) {
     return listReviews({scope:'user',id:userId,limit,offset});
+  }
+
+  const SUPPORT_CATEGORIES = new Set(['Payment','Refund','Security Deposit','Booking','Vehicle','Delivery','Pickup/Return','Damage','Cancellation','Account','Technical Issue','Other']);
+  const SUPPORT_PRIORITIES = new Set(['low','normal','high','urgent']);
+  const SUPPORT_STATUSES = new Set(['open','in_progress','waiting_for_user','resolved','closed']);
+  const SUPPORT_ROLES = new Set(['support','admin']);
+
+  const sanitizeSupportText = (value, max) => String(value ?? '')
+    .replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '')
+    .replace(/[<>]/g, '')
+    .replace(/\\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+
+  const supportError = (message, code) => { const e = new Error(message); e.code = code; return e; };
+
+  const mapSupportTicket = (row, includePrivate = false) => {
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      ticketNumber: row.ticket_number,
+      bookingId: row.booking_id ? String(row.booking_id) : null,
+      raisedByUserId: row.raised_by_user_id ? String(row.raised_by_user_id) : null,
+      raisedByRole: row.raised_by_role || row.raisedByRole || null,
+      raisedByName: row.raised_by_name || null,
+      assignedToUserId: row.assigned_to_user_id ? String(row.assigned_to_user_id) : null,
+      assignedToName: row.assigned_to_name || null,
+      category: row.category,
+      subject: row.subject,
+      description: row.description,
+      priority: row.priority,
+      status: row.status,
+      resolution: row.resolution || null,
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at),
+      resolvedAt: iso(row.resolved_at),
+      booking: row.booking_id ? {
+        id: String(row.booking_id),
+        vehicleId: row.vehicle_id ? String(row.vehicle_id) : null,
+        vehicleName: row.vehicle_name || null,
+        startAt: iso(row.start_at),
+        endAt: iso(row.end_at),
+        status: row.booking_status || null,
+        delivery: row.delivery_required == null ? null : Boolean(row.delivery_required),
+        address: row.delivery_address || null,
+      } : null,
+      ...(includePrivate ? { internalMessageCount: Number(row.internal_message_count || 0) } : {}),
+    };
+  };
+
+  const supportTicketSelect = `
+    select t.*,
+           raised.full_name as raised_by_name,
+           raised.role as raised_by_role,
+           assigned.full_name as assigned_to_name,
+           b.vehicle_id,
+           b.start_at,
+           b.end_at,
+           b.status as booking_status,
+           b.delivery_required,
+           b.delivery_address,
+           v.name as vehicle_name,
+           (select count(*) from ticket_messages tm where tm.ticket_id=t.id and tm.is_internal=true) as internal_message_count
+    from support_tickets t
+    join customers raised on raised.id=t.raised_by_user_id
+    left join customers assigned on assigned.id=t.assigned_to_user_id
+    left join bookings b on b.id=t.booking_id
+    left join vehicles v on v.id=b.vehicle_id
+  `;
+
+  function validateSupportInput({ category, subject, description, priority = 'normal' }) {
+    if (!SUPPORT_CATEGORIES.has(category)) throw supportError('Unsupported support category.', 'INVALID_SUPPORT_CATEGORY');
+    if (!SUPPORT_PRIORITIES.has(priority)) throw supportError('Unsupported support priority.', 'INVALID_SUPPORT_PRIORITY');
+    const normalizedSubject = sanitizeSupportText(subject, 160);
+    const normalizedDescription = sanitizeSupportText(description, 5000);
+    if (normalizedSubject.length < 3) throw supportError('Subject must be at least 3 characters.', 'INVALID_SUPPORT_SUBJECT');
+    if (normalizedDescription.length < 10) throw supportError('Please describe the issue in at least 10 characters.', 'INVALID_SUPPORT_DESCRIPTION');
+    return { category, priority, subject: normalizedSubject, description: normalizedDescription };
+  }
+
+  const canTransitionSupportStatus = (from, to) => {
+    if (!SUPPORT_STATUSES.has(to)) return false;
+    if (from === to) return true;
+    const allowed = {
+      open: new Set(['in_progress','waiting_for_user','resolved','closed']),
+      in_progress: new Set(['open','waiting_for_user','resolved','closed']),
+      waiting_for_user: new Set(['open','in_progress','resolved','closed']),
+      resolved: new Set(['open','closed']),
+      closed: new Set(['open']),
+    };
+    return Boolean(allowed[from]?.has(to));
+  };
+
+  async function getSupportBookingForUser(bookingId, userId, role) {
+    if (!bookingId) return null;
+    if (role === 'customer') {
+      const booking = await getBooking(bookingId, userId);
+      if (!booking) throw supportError('Booking not found.', 'BOOKING_NOT_FOUND');
+      return booking;
+    }
+    if (role === 'vendor') {
+      const vendor = await findVendorByCustomerId(userId);
+      if (!vendor) throw supportError('Vendor profile not found.', 'VENDOR_NOT_FOUND');
+      const booking = await getVendorBooking(vendor.id, bookingId);
+      if (!booking) throw supportError('Booking not found.', 'BOOKING_NOT_FOUND');
+      return booking;
+    }
+    if (SUPPORT_ROLES.has(role)) {
+      if (!useDatabase) return memory.bookings.get(String(bookingId)) || null;
+      const booking = await pool.query('select id from bookings where id=$1', [bookingId]);
+      if (!booking.rows[0]) throw supportError('Booking not found.', 'BOOKING_NOT_FOUND');
+      return booking.rows[0];
+    }
+    throw supportError('You do not have access to this booking.', 'FORBIDDEN');
+  }
+
+  async function createSupportTicket({ bookingId = null, raisedByUserId, raisedByRole, category, subject, description, priority = 'normal', idempotencyKey = null }) {
+    if (!['customer','vendor'].includes(raisedByRole)) throw supportError('Support tickets can only be raised by customers or vendors.', 'FORBIDDEN');
+    const input = validateSupportInput({ category, subject, description, priority });
+    const key = idempotencyKey ? String(idempotencyKey).trim() : null;
+    if (key && (key.length < 8 || key.length > 128)) throw supportError('Invalid support request key.', 'INVALID_IDEMPOTENCY_KEY');
+
+    if (bookingId) await getSupportBookingForUser(bookingId, raisedByUserId, raisedByRole);
+
+    if (!useDatabase) {
+      const existing = key ? [...memory.supportTickets.values()].find(t => String(t.raisedByUserId) === String(raisedByUserId) && t.idempotencyKey === key) : null;
+      if (existing) return { ticket: existing, idempotentReplay: true };
+      const now = new Date().toISOString();
+      const ticket = {
+        id: crypto.randomUUID(),
+        ticketNumber: `RID-${now.slice(0,10).replace(/-/g,'')}-${String(memory.supportTickets.size + 1).padStart(6,'0')}`,
+        bookingId: bookingId ? String(bookingId) : null,
+        raisedByUserId: String(raisedByUserId),
+        raisedByRole,
+        assignedToUserId: null,
+        category: input.category,
+        subject: input.subject,
+        description: input.description,
+        priority: input.priority,
+        status: 'open',
+        resolution: null,
+        idempotencyKey: key,
+        createdAt: now,
+        updatedAt: now,
+        resolvedAt: null,
+      };
+      memory.supportTickets.set(ticket.id, ticket);
+      return { ticket, idempotentReplay: false };
+    }
+
+    if (key) {
+      const existing = await pool.query(supportTicketSelect + ' where t.raised_by_user_id=$1 and t.idempotency_key=$2 limit 1', [raisedByUserId, key]);
+      if (existing.rows[0]) return { ticket: mapSupportTicket(existing.rows[0]), idempotentReplay: true };
+    }
+    try {
+      const inserted = await pool.query(
+        'insert into support_tickets(booking_id,raised_by_user_id,category,subject,description,priority,idempotency_key) values($1,$2,$3,$4,$5,$6,$7) returning id',
+        [bookingId, raisedByUserId, input.category, input.subject, input.description, input.priority, key]
+      );
+      const loaded = await pool.query(supportTicketSelect + ' where t.id=$1', [inserted.rows[0].id]);
+      return { ticket: mapSupportTicket(loaded.rows[0]), idempotentReplay: false };
+    } catch (error) {
+      if (error.code === '23505' && key) {
+        const existing = await pool.query(supportTicketSelect + ' where t.raised_by_user_id=$1 and t.idempotency_key=$2 limit 1', [raisedByUserId, key]);
+        if (existing.rows[0]) return { ticket: mapSupportTicket(existing.rows[0]), idempotentReplay: true };
+      }
+      throw error;
+    }
+  }
+
+  async function listMySupportTickets({ userId, role, status, category, limit = 20, offset = 0 }) {
+    if (!['customer','vendor'].includes(role)) throw supportError('You do not have access to support tickets.', 'FORBIDDEN');
+    const safeLimit = Math.max(1, Math.min(50, Number(limit) || 20));
+    const safeOffset = Math.max(0, Number(offset) || 0);
+    if (!useDatabase) {
+      let rows = [...memory.supportTickets.values()].filter(t => String(t.raisedByUserId) === String(userId));
+      if (status) rows = rows.filter(t => t.status === status);
+      if (category) rows = rows.filter(t => t.category === category);
+      rows.sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
+      return { tickets: rows.slice(safeOffset,safeOffset+safeLimit), pagination:{limit:safeLimit,offset:safeOffset,count:rows.length} };
+    }
+    const clauses = ['t.raised_by_user_id=$1'], params=[userId];
+    if (status) { if (!SUPPORT_STATUSES.has(status)) throw supportError('Unsupported support status.', 'INVALID_SUPPORT_STATUS'); params.push(status); clauses.push('t.status= if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
+}
++params.length); }
+    if (category) { if (!SUPPORT_CATEGORIES.has(category)) throw supportError('Unsupported support category.', 'INVALID_SUPPORT_CATEGORY'); params.push(category); clauses.push('t.category= if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++params.length); }
+    params.push(safeLimit,safeOffset);
+    const q=await pool.query(supportTicketSelect+' where '+clauses.join(' and ')+' order by t.updated_at desc limit  if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++(params.length-1)+' offset  if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++params.length, params);
+    return {tickets:q.rows.map(row=>mapSupportTicket(row)),pagination:{limit:safeLimit,offset:safeOffset,count:q.rows.length}};
+  }
+
+  async function getSupportTicket({ ticketId, userId, role }) {
+    if (!useDatabase) {
+      const ticket=memory.supportTickets.get(String(ticketId));
+      if (!ticket) return null;
+      if (!SUPPORT_ROLES.has(role) && String(ticket.raisedByUserId)!==String(userId)) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+      return ticket;
+    }
+    const q=await pool.query(supportTicketSelect+' where t.id=$1 limit 1',[ticketId]);
+    const ticket=q.rows[0];
+    if (!ticket) return null;
+    if (!SUPPORT_ROLES.has(role) && String(ticket.raised_by_user_id)!==String(userId)) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    return mapSupportTicket(ticket, SUPPORT_ROLES.has(role));
+  }
+
+  async function listSupportMessages({ ticketId, userId, role }) {
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) return null;
+    if (!useDatabase) {
+      return [...memory.supportMessages.values()]
+        .filter(m=>String(m.ticketId)===String(ticketId) && (SUPPORT_ROLES.has(role) || !m.isInternal))
+        .sort((a,b)=>new Date(a.createdAt)-new Date(b.createdAt));
+    }
+    const q=await pool.query(
+      'select tm.id,tm.ticket_id,tm.sender_user_id,tm.message,tm.is_internal,tm.created_at,c.full_name as sender_name,c.role as sender_role from ticket_messages tm join customers c on c.id=tm.sender_user_id where tm.ticket_id=$1 '+(SUPPORT_ROLES.has(role)?'':'and tm.is_internal=false')+' order by tm.created_at asc',
+      [ticketId]
+    );
+    return q.rows.map(row=>({id:String(row.id),ticketId:String(row.ticket_id),senderUserId:String(row.sender_user_id),senderName:SUPPORT_ROLES.has(role)?row.sender_name:(String(row.sender_user_id)===String(userId)?'You':(row.sender_role==='vendor'?'RideOn vendor':'RideOn support')),senderRole:row.sender_role,message:row.message,isInternal:Boolean(row.is_internal),createdAt:iso(row.created_at)}));
+  }
+
+  async function addSupportMessage({ ticketId, userId, role, message, isInternal = false }) {
+    const normalized=sanitizeSupportText(message,5000);
+    if (!normalized) throw supportError('Please enter a message.', 'INVALID_SUPPORT_MESSAGE');
+    if (normalized.length > 5000) throw supportError('Message is too long.', 'INVALID_SUPPORT_MESSAGE');
+    if (isInternal && !SUPPORT_ROLES.has(role)) throw supportError('Internal responses are restricted to support staff.', 'FORBIDDEN');
+
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    if (ticket.status === 'closed' && !SUPPORT_ROLES.has(role)) throw supportError('Reopen the ticket before replying.', 'SUPPORT_TICKET_CLOSED');
+
+    if (!useDatabase) {
+      const msg={id:crypto.randomUUID(),ticketId:String(ticketId),senderUserId:String(userId),senderRole:role,message:normalized,isInternal:Boolean(isInternal),createdAt:new Date().toISOString()};
+      memory.supportMessages.set(msg.id,msg);
+      if (!SUPPORT_ROLES.has(role) && ticket.status==='waiting_for_user') ticket.status='open';
+      ticket.updatedAt=msg.createdAt;
+      return msg;
+    }
+
+    const client=await pool.connect();
+    try {
+      await client.query('begin');
+      const locked=await client.query('select id,status from support_tickets where id=$1 for update',[ticketId]);
+      if (!locked.rows[0]) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+      if (locked.rows[0].status==='closed' && !SUPPORT_ROLES.has(role)) throw supportError('Reopen the ticket before replying.', 'SUPPORT_TICKET_CLOSED');
+      const inserted=await client.query('insert into ticket_messages(ticket_id,sender_user_id,message,is_internal) values($1,$2,$3,$4) returning id,ticket_id,sender_user_id,message,is_internal,created_at',[ticketId,userId,normalized,Boolean(isInternal)]);
+      const nextStatus=!SUPPORT_ROLES.has(role) && locked.rows[0].status==='waiting_for_user' ? 'open' : locked.rows[0].status;
+      await client.query('update support_tickets set status=$2,updated_at=now() where id=$1',[ticketId,nextStatus]);
+      await client.query('commit');
+      const row=inserted.rows[0];
+      return {id:String(row.id),ticketId:String(row.ticket_id),senderUserId:String(row.sender_user_id),senderName:'You',senderRole:role,message:row.message,isInternal:Boolean(row.is_internal),createdAt:iso(row.created_at)};
+    } catch(error){try{await client.query('rollback')}catch{};throw error;} finally{client.release();}
+  }
+
+  async function updateSupportTicketStatus({ ticketId, userId, role, status, resolution = null }) {
+    if (!SUPPORT_STATUSES.has(status)) throw supportError('Unsupported support status.', 'INVALID_SUPPORT_STATUS');
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    if (!SUPPORT_ROLES.has(role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
+    if (!canTransitionSupportStatus(ticket.status,status)) throw supportError('That ticket status transition is not allowed.', 'INVALID_SUPPORT_TRANSITION');
+    const normalizedResolution=resolution==null?null:sanitizeSupportText(resolution,5000);
+    if (status==='resolved' && (!normalizedResolution || normalizedResolution.length<3)) throw supportError('A resolution is required before resolving a ticket.', 'RESOLUTION_REQUIRED');
+    if (!useDatabase) {
+      ticket.status=status;ticket.resolution=normalizedResolution;ticket.updatedAt=new Date().toISOString();ticket.resolvedAt=['resolved','closed'].includes(status)?ticket.updatedAt:null;
+      return ticket;
+    }
+    const q=await pool.query('update support_tickets set status=$2,resolution=$3,resolved_at=case when $2 in (\'resolved\',\'closed\') then coalesce(resolved_at,now()) else null end,updated_at=now() where id=$1 returning id',[ticketId,status,normalizedResolution]);
+    const loaded=await pool.query(supportTicketSelect+' where t.id=$1',[q.rows[0].id]);
+    return mapSupportTicket(loaded.rows[0],true);
+  }
+
+  async function closeSupportTicket({ticketId,userId,role}) {
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    if (SUPPORT_ROLES.has(role)) return updateSupportTicketStatus({ticketId,userId,role,status:'closed',resolution:ticket.resolution||'Closed by support.'});
+    if (ticket.status==='closed') return ticket;
+    if (!['open','in_progress','waiting_for_user','resolved'].includes(ticket.status)) throw supportError('This ticket cannot be closed right now.', 'INVALID_SUPPORT_TRANSITION');
+    if (!useDatabase) { ticket.status='closed';ticket.resolvedAt=new Date().toISOString();ticket.updatedAt=ticket.resolvedAt;return ticket; }
+    const q=await pool.query('update support_tickets set status=\'closed\',resolved_at=coalesce(resolved_at,now()),updated_at=now() where id=$1 returning id',[ticketId]);
+    const loaded=await pool.query(supportTicketSelect+' where t.id=$1',[q.rows[0].id]);
+    return mapSupportTicket(loaded.rows[0]);
+  }
+
+  async function reopenSupportTicket({ticketId,userId,role}) {
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    if (!['closed','resolved'].includes(ticket.status)) throw supportError('Only resolved or closed tickets can be reopened.', 'INVALID_SUPPORT_TRANSITION');
+    if (!useDatabase) { ticket.status='open';ticket.resolution=null;ticket.resolvedAt=null;ticket.updatedAt=new Date().toISOString();return ticket; }
+    const q=await pool.query('update support_tickets set status=\'open\',resolution=null,resolved_at=null,updated_at=now() where id=$1 returning id',[ticketId]);
+    const loaded=await pool.query(supportTicketSelect+' where t.id=$1',[q.rows[0].id]);
+    return mapSupportTicket(loaded.rows[0]);
+  }
+
+  async function listSupportTickets({ userId, status, category, priority, limit=50, offset=0 }) {
+    if (!SUPPORT_ROLES.has((await findCustomerById(userId))?.role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
+    if (!useDatabase) {
+      let rows=[...memory.supportTickets.values()];
+      if(status)rows=rows.filter(t=>t.status===status);
+      if(category)rows=rows.filter(t=>t.category===category);
+      if(priority)rows=rows.filter(t=>t.priority===priority);
+      rows.sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
+      return {tickets:rows.slice(safeOffset,safeOffset+safeLimit),pagination:{limit:safeLimit,offset:safeOffset,count:rows.length}};
+    }
+    const clauses=['1=1'],params=[];
+    if(status){if(!SUPPORT_STATUSES.has(status))throw supportError('Unsupported support status.','INVALID_SUPPORT_STATUS');params.push(status);clauses.push('t.status= if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++params.length);}
+    if(category){if(!SUPPORT_CATEGORIES.has(category))throw supportError('Unsupported support category.','INVALID_SUPPORT_CATEGORY');params.push(category);clauses.push('t.category= if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++params.length);}
+    if(priority){if(!SUPPORT_PRIORITIES.has(priority))throw supportError('Unsupported support priority.','INVALID_SUPPORT_PRIORITY');params.push(priority);clauses.push('t.priority= if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++params.length);}
+    params.push(safeLimit,safeOffset);
+    const q=await pool.query(supportTicketSelect+' where '+clauses.join(' and ')+' order by t.updated_at desc limit  if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++(params.length-1)+' offset  if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++params.length,params);
+    return {tickets:q.rows.map(r=>mapSupportTicket(r,true)),pagination:{limit:safeLimit,offset:safeOffset,count:q.rows.length}};
+  }
+
+  async function assignSupportTicket({ticketId,assignedToUserId,actorUserId}) {
+    const actor=await findCustomerById(actorUserId);
+    if (!SUPPORT_ROLES.has(actor?.role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
+    const assignee=await findCustomerById(assignedToUserId);
+    if (!SUPPORT_ROLES.has(assignee?.role)) throw supportError('Tickets can only be assigned to support staff.', 'INVALID_ASSIGNEE');
+    const ticket=await getSupportTicket({ticketId,userId:actorUserId,role:actor.role});
+    if(!ticket)throw supportError('Ticket not found.','SUPPORT_TICKET_NOT_FOUND');
+    if(!useDatabase){ticket.assignedToUserId=String(assignedToUserId);ticket.updatedAt=new Date().toISOString();return ticket;}
+    const q=await pool.query('update support_tickets set assigned_to_user_id=$2,updated_at=now() where id=$1 returning id',[ticketId,assignedToUserId]);
+    if(!q.rows[0])throw supportError('Ticket not found.','SUPPORT_TICKET_NOT_FOUND');
+    const loaded=await pool.query(supportTicketSelect+' where t.id=$1',[ticketId]);
+    return mapSupportTicket(loaded.rows[0],true);
+  }
+
+  async function resolveSupportTicket({ticketId,userId,resolution}) {
+    return updateSupportTicketStatus({ticketId,userId,role:'support',status:'resolved',resolution});
   }
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
