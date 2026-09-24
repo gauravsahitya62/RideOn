@@ -4,7 +4,7 @@ import * as SecureStore from 'expo-secure-store';
 // Set EXPO_PUBLIC_API_URL in your local .env. Android emulator uses 10.0.2.2;
 // iOS simulator uses localhost. A physical device needs your computer's LAN IP.
 // EXPO_PUBLIC_API_URL overrides this. The hosted API fallback keeps physical iOS devices and production builds off localhost/emulator-only addresses.
-const DEFAULT_API_URL = 'https://rideon-api.onrender.com';
+const DEFAULT_API_URL = 'https://rideon-api-262g.onrender.com';
 const configuredApiUrl = String(process.env.EXPO_PUBLIC_API_URL || '').trim();
 const explicitLocalApi = process.env.EXPO_PUBLIC_USE_LOCAL_API === 'true';
 const isLocalApiUrl = (() => {
