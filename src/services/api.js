@@ -136,6 +136,14 @@ const encode = (value) => encodeURIComponent(String(value));
 
 export const rideOnApi = {
   health: () => request('/health'),
+  listNotifications: ({limit=20,offset=0}={}) => request(`/api/v1/notifications?limit=${encode(limit)}&offset=${encode(offset)}`),
+  getNotificationUnreadCount: () => request('/api/v1/notifications/unread-count'),
+  markNotificationRead: (id) => request(`/api/v1/notifications/${encode(id)}/read`, {method:'PATCH',body:JSON.stringify({})}),
+  markAllNotificationsRead: () => request('/api/v1/notifications/read-all', {method:'PATCH',body:JSON.stringify({})}),
+  registerPushToken: (token,platform='unknown',deviceId=null) => request('/api/v1/notifications/push-token',{method:'POST',body:JSON.stringify({token,platform,deviceId})}),
+  unregisterPushToken: (token) => request('/api/v1/notifications/push-token',{method:'DELETE',body:JSON.stringify({token})}),
+  getNotificationPreferences: () => request('/api/v1/notifications/preferences'),
+  updateNotificationPreferences: (payload) => request('/api/v1/notifications/preferences',{method:'PATCH',body:JSON.stringify(payload)}),
   listLocations: () => request('/api/v1/locations'),
   listMapVendors: (params = {}) => {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString();
