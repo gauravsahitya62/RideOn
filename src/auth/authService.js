@@ -1,4 +1,4 @@
-import { clearStoredAccessToken, persistAccessToken, restoreAccessToken, setAccessToken, rideOnApi } from '../services/api';
+import { clearStoredAccessToken, persistAccessToken, refreshSession, restoreAccessToken, setAccessToken, rideOnApi } from '../services/api';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const SUPABASE_PUBLISHABLE_KEY =
@@ -27,7 +27,7 @@ export const authService = {
     const result=await rideOnApi.verifyOtp({ email, token });
     const accessToken=result?.accessToken||result?.data?.accessToken;
     if(!accessToken) throw new Error('RideOn did not return a valid authentication session.');
-    await persistAccessToken(accessToken);
+    await persistAccessToken(accessToken,result?.refreshToken||result?.data?.refreshToken);
     setAccessToken(accessToken);
     return {
       access_token:accessToken,
@@ -37,11 +37,16 @@ export const authService = {
   },
 
   async restoreSession() {
-    const token=await restoreAccessToken();
+    let token=await restoreAccessToken();
     if(!token) return null;
     setAccessToken(token);
     try { return {token,user:await this.currentUser()}; }
-    catch(error){ await this.signOut(); throw error; }
+    catch(error){
+      const refreshed=await refreshSession();
+      if(refreshed){ setAccessToken(refreshed); return {token:refreshed,user:await this.currentUser()}; }
+      await this.signOut();
+      throw error;
+    }
   },
 
   async completeRegistration({accessToken,accountType,fullName,phone}) {
