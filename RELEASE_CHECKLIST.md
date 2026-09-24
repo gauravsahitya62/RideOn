@@ -18,6 +18,9 @@ This checklist prepares the existing RideOn mobile/backend implementation for An
 - [ ] Live delivery tracking tested on physical Android/iOS devices
 - [ ] Reviews tested
 - [ ] Support tested
+- [ ] Push notification permission tested
+- [ ] In-app Notification Center tested
+- [ ] Notification deep-link handling tested
 - [ ] Admin/Ops tested
 - [ ] No localhost/development URLs in the production Expo config
 - [ ] No mock payment provider enabled in production
