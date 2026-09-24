@@ -13,6 +13,10 @@ module.exports = ({ config }) => {
   return {
     ...appJson.expo,
     ...config,
+    plugins: [
+      ...(Array.isArray(appJson.expo?.plugins) ? appJson.expo.plugins : []),
+      'expo-image-picker',
+    ].filter((item, index, all) => all.indexOf(item) === index),
     updates: projectId
       ? {
           url: `https://u.expo.dev/${projectId}`,
