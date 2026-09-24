@@ -636,9 +636,11 @@ app.get('/api/v1/vehicles', async (req, res) => {
     const type = req.query.type?.toString().toLowerCase();
     const city = req.query.city?.toString().trim();
     const q = req.query.q?.toString().trim();
-    const vehicles = await repository.listVehicles({ type, city, q });
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 100));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const vehicles = await repository.listVehicles({ type, city, q, limit, offset });
     const data = vehicles.map(mobileVehicle);
-    res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
+    res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR', limit, offset, hasMore: Boolean(vehicles.hasMore) } });
   } catch (error) {
     console.error(JSON.stringify({ level:'error', event:'vehicles_list_failed', requestId:req.requestId, code:error?.code || 'VEHICLES_LIST_FAILED', message:error?.message }));
     res.status(503).json({ error:{ code:'VEHICLES_UNAVAILABLE', message:'Vehicle inventory is temporarily unavailable. Please retry.' } });
@@ -844,7 +846,7 @@ app.post('/api/v1/vendor/bookings/:id/delivery/location', supabaseRequireAuth, r
     const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
     if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
     const before=await repository.getActiveTrackingSession(req.vendor.id,req.params.id);
-    const session=await repository.updateDeliveryLocation(req.vendor.id,req.params.id,parsed.data);
+    let session=await repository.updateDeliveryLocation(req.vendor.id,req.params.id,parsed.data);
     let route=null; let routeUnavailable=false;
     const movedMeters=before?.lastLatitude!=null?Math.sqrt(Math.pow((parsed.data.latitude-before.lastLatitude)*111320,2)+Math.pow((parsed.data.longitude-before.lastLongitude)*111320*Math.cos(parsed.data.latitude*Math.PI/180),2)):Infinity;
     const routeDue=!before?.lastRouteAt||Date.now()-new Date(before.lastRouteAt).getTime()>=Math.max(30,Number(process.env.TRACKING_ROUTE_REFRESH_SECONDS||60))*1000||movedMeters>=Math.max(100,Number(process.env.TRACKING_ROUTE_REFRESH_METERS||300));
@@ -852,14 +854,13 @@ app.post('/api/v1/vendor/bookings/:id/delivery/location', supabaseRequireAuth, r
       try{
         const calculated=await getDrivingRoute({latitude:parsed.data.latitude,longitude:parsed.data.longitude},{latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude});
         route={distanceMeters:calculated.distanceMeters,durationSeconds:calculated.durationSeconds,estimatedDeliveryMinutes:Math.max(1,Math.round(calculated.durationSeconds/60)),provider:calculated.provider,encodedPolyline:calculated.encodedPolyline||null};
-        await repository.updateTrackingRoute(req.vendor.id,req.params.id,route);
+        session=await repository.updateTrackingRoute(req.vendor.id,req.params.id,route) || session;
       }catch(routeError){
         routeUnavailable=true;
         if(routeError?.code!=='ROUTE_PROVIDER_NOT_CONFIGURED'&&routeError?.code!=='ROUTE_PROVIDER_UNAVAILABLE'&&routeError?.code!=='ROUTE_PROVIDER_TIMEOUT'&&routeError?.code!=='ROUTE_NOT_FOUND')throw routeError;
       }
     }
-    const latest=await repository.getActiveTrackingSession(req.vendor.id,req.params.id);
-    const payload={type:'tracking.update',tracking:{session:latest||session,location:{latitude:parsed.data.latitude,longitude:parsed.data.longitude,accuracyMeters:parsed.data.accuracyMeters||null,updatedAt:parsed.data.recordedAt||new Date().toISOString()},route,routeUnavailable}};
+    const payload={type:'tracking.update',tracking:{session,location:{latitude:parsed.data.latitude,longitude:parsed.data.longitude,accuracyMeters:parsed.data.accuracyMeters||null,updatedAt:parsed.data.recordedAt||new Date().toISOString()},route,routeUnavailable}};
     trackingRealtime.broadcast(req.params.id,payload);
     res.json({tracking:payload.tracking});
   }catch(error){
