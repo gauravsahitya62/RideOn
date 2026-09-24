@@ -586,6 +586,8 @@ test('vendor booking lifecycle is isolated and customer-visible', async () => {
     address:'15 Vendor Lifecycle Road, Jaipur',
   },customerLogin.accessToken,{ 'Idempotency-Key':'vendor-lifecycle-1' });
   assert.equal(bookingResponse.status,201);
+  const bookingPayload = await bookingResponse.json();
+  const bookingId = bookingPayload.booking.bookingId;
   const bookingForPayment = await repository.getBooking(bookingId, customer.customer.id);
   await repository.createOrGetPaymentOrder({bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR',providerOrder:{id:'test-vendor-lifecycle-'+bookingId,amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR'}});
   await repository.applyPaymentEvent({eventId:'paid-vendor-lifecycle-'+bookingId,bookingId,paymentId:undefined,providerReference:'paid-vendor-lifecycle-ref-'+bookingId,providerOrderId:'test-vendor-lifecycle-'+bookingId,amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR',status:'paid'});
@@ -629,6 +631,45 @@ test('vendor booking lifecycle is isolated and customer-visible', async () => {
     headers:{authorization:'Bearer '+customerLogin.accessToken},
   });
   assert.equal(cancelled.status,409);
+});
+
+test('active delivery tracking is vendor-authorized and stops on delivery completion', async () => {
+  const customer=await register('+911234567930','Tracking Customer');
+  const customerLogin=await legacyLogin('+911234567930');
+  const otherCustomer=await register('+911234567931','Other Tracking Customer');
+  const otherLogin=await legacyLogin('+911234567931');
+  const vendorCustomer=await register('+911234567932','Tracking Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Tracking Car',make:'Test',model:'T',year:2034,city:'Jaipur',dailyRate:1500,securityDeposit:0,transmission:'Automatic',fuel:'Petrol',seats:5,registrationNumber:'RJTRACK930',description:'Tracking vehicle',imageUrls:[],deliveryAvailable:true,active:true});
+  const bookingResponse=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2036-07-10T10:00:00.000Z',endAt:'2036-07-11T10:00:00.000Z',delivery:true,address:'10 Tracking Road, Jaipur',deliveryLatitude:26.9124,deliveryLongitude:75.7873},customerLogin.accessToken,{'Idempotency-Key':'tracking-booking-1'});
+  assert.equal(bookingResponse.status,201);
+  const booking=(await bookingResponse.json()).booking;
+  const payment=await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'tracking-order-'+booking.bookingId,amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
+  await repository.applyPaymentEvent({eventId:'tracking-paid-'+booking.bookingId,bookingId:booking.bookingId,paymentId:payment.id,providerReference:'tracking-ref-'+booking.bookingId,providerOrderId:'tracking-order-'+booking.bookingId,amountPaise:payment.amountPaise,currency:'INR',status:'paid'});
+  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  assert.equal((await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'confirmed'},vendorToken)).status,200);
+  const otherTrack=await request('/api/v1/bookings/'+booking.bookingId+'/tracking',{headers:{authorization:'Bearer '+otherLogin.accessToken}});
+  assert.equal(otherTrack.status,404);
+  const started=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/delivery/start','POST',{},vendorToken);
+  assert.equal(started.status,200);
+  const duplicate=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/delivery/start','POST',{},vendorToken);
+  assert.equal(duplicate.status,409);
+  const update=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/delivery/location','POST',{latitude:26.913,longitude:75.788,accuracyMeters:12},vendorToken);
+  assert.equal(update.status,200);
+  const tracking=await request('/api/v1/bookings/'+booking.bookingId+'/tracking',{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  assert.equal(tracking.status,200);
+  const trackingPayload=await tracking.json();
+  assert.equal(trackingPayload.tracking.active,true);
+  assert.equal(trackingPayload.tracking.session.lastLatitude,26.913);
+  const completed=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/delivery/complete','POST',{latitude:26.914,longitude:75.789},vendorToken);
+  assert.equal(completed.status,200);
+  const after=await request('/api/v1/bookings/'+booking.bookingId+'/tracking',{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  assert.equal(after.status,200);
+  const afterPayload=await after.json();
+  assert.equal(afterPayload.tracking.active,false);
+  assert.equal(afterPayload.tracking.booking.deliveryStatus,'delivered');
+  const lateUpdate=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/delivery/location','POST',{latitude:26.915,longitude:75.790},vendorToken);
+  assert.equal(lateUpdate.status,409);
 });
 
 test('vendor APIs reject anonymous callers', async () => {
