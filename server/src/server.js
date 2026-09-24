@@ -51,7 +51,7 @@ app.use(cors({
   },
   credentials: false,
 }));
-app.use(express.json({ limit: '64kb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
+app.use(express.json({ limit: '12mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
 app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
@@ -438,20 +438,25 @@ const vehicleInput=z.object({
   active:z.boolean().optional().default(true),
 });
 
-app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, express.raw({ type: ['image/jpeg','image/png','image/webp'], limit: '10mb' }), async (req,res)=>{
+app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, async (req,res)=>{
   try{
     const supabaseUrl=String(process.env.SUPABASE_URL||'').replace(/\/$/,'');
     const storageKey=process.env.SUPABASE_SERVICE_ROLE_KEY||process.env.SUPABASE_SECRET_KEY;
     const bucket=String(process.env.SUPABASE_VEHICLE_IMAGE_BUCKET||'vehicle-images').trim();
     if(!supabaseUrl||!storageKey) return res.status(503).json({error:{code:'STORAGE_NOT_CONFIGURED',message:'Vehicle image storage is not configured on the API.'}});
-    if(!Buffer.isBuffer(req.body)||req.body.length===0) return res.status(400).json({error:{code:'IMAGE_REQUIRED',message:'Please select a vehicle image to upload.'}});
-    const contentType=String(req.get('content-type')||'image/jpeg').split(';')[0].toLowerCase();
+    const base64=String(req.body?.base64||'').replace(/^data:image\/[^;]+;base64,/i,'').trim();
+    const contentType=String(req.body?.contentType||'image/jpeg').toLowerCase();
+    if(!base64) return res.status(400).json({error:{code:'IMAGE_REQUIRED',message:'Please select a vehicle image to upload.'}});
+    if(!['image/jpeg','image/png','image/webp'].includes(contentType)) return res.status(400).json({error:{code:'IMAGE_TYPE_UNSUPPORTED',message:'Please upload a JPG, PNG, or WebP image.'}});
+    const imageBuffer=Buffer.from(base64,'base64');
+    if(!imageBuffer.length) return res.status(400).json({error:{code:'IMAGE_INVALID',message:'The selected image could not be read. Please choose it again.'}});
+    if(imageBuffer.length>8*1024*1024) return res.status(413).json({error:{code:'IMAGE_TOO_LARGE',message:'Vehicle images must be 8 MB or smaller.'}});
     const extension=contentType==='image/png'?'png':contentType==='image/webp'?'webp':'jpg';
     const path=`vendors/${req.vendor.id}/${crypto.randomUUID()}.${extension}`;
     const response=await fetch(`${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`,{
       method:'POST',
       headers:{Authorization:`Bearer ${storageKey}`,apikey:storageKey,'Content-Type':contentType,'x-upsert':'false'},
-      body:req.body,
+      body:imageBuffer,
     });
     if(!response.ok){
       const details=await response.text().catch(()=> '');
