@@ -135,7 +135,7 @@ export default function AuthScreen({onAuthenticated}) {
           </View>
           <Field ref={nameRef} label="FULL NAME" value={name} onChangeText={setName} placeholder="Your full name" onFocus={()=>focusField(nameRef)} returnKeyType="next" onSubmitEditing={()=>focusField(phoneRef)}/>
           <Field ref={phoneRef} label="PHONE NUMBER" value={phone} onChangeText={setPhone} placeholder="+91 9876543210" keyboardType="phone-pad" onFocus={()=>focusField(phoneRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>
-          {accountType==='vendor'&&<Field label="SERVICE CITY" value={serviceCity} onChangeText={setServiceCity} placeholder="e.g. Udaipur" onFocus={()=>focusField(emailRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>} 
+          {accountType==='vendor'&&<Field label="SERVICE CITY" value={serviceCity} onChangeText={setServiceCity} placeholder="e.g. Your service city" onFocus={()=>focusField(emailRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>} 
         </>}
 
         <Field ref={emailRef} label="EMAIL ADDRESS" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" onFocus={()=>focusField(emailRef)} returnKeyType="done"/>
