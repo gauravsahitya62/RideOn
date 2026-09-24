@@ -21,7 +21,7 @@
     "expo-image-picker": "~17.0.7",
     "react-native-maps": "1.20.1",
     "expo-location": "~18.1.6",
-    "expo-task-manager": "~14.1.0"
+    "expo-task-manager": "~57.0.1"
   },
   "devDependencies": {}
 }
