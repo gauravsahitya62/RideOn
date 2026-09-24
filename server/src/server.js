@@ -1153,6 +1153,7 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid login details.' } });
   const customer = await repository.findCustomerByPhone(parsed.data.phone);
   if (!customer || !(await auth.verifyPassword(parsed.data.password, customer.passwordHash))) return res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'Phone or password is incorrect.' } });
+  if (customer.accountStatus === 'suspended') return res.status(403).json({ error:{code:'ACCOUNT_SUSPENDED',message:'This RideOn account is suspended.'} });
   const accessToken = auth.sign({ sub: customer.id, role: 'customer' });
   res.json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });
