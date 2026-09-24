@@ -809,7 +809,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function findCustomerBySupabaseUserId(id) {
-    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,role:c.role||'customer',supabaseUserId:c.supabaseUserId}:null; }
+    if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,role:c.role||'customer',accountStatus:c.accountStatus||'active',supabaseUserId:c.supabaseUserId}:null; }
     const { rows } = await pool.query('select id,full_name,phone,email,role,account_status,supabase_user_id from customers where supabase_user_id=$1',[id]);
     return rows[0]?mapCustomer(rows[0]):null;
   }
@@ -827,7 +827,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function findCustomerByPhone(phone) {
     if (useDatabase) { const {rows}=await pool.query('select id,full_name,phone,email,password_hash from customers where phone=$1',[phone]); return rows[0]?{...mapCustomer(rows[0]),passwordHash:rows[0].password_hash}:null; }
-    const c=[...memory.customers.values()].find(v=>v.phone===phone); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,passwordHash:c.passwordHash}:null;
+    const c=[...memory.customers.values()].find(v=>v.phone===phone); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,passwordHash:c.passwordHash,role:c.role||'customer',accountStatus:c.accountStatus||'active',supabaseUserId:c.supabaseUserId}:null;
   }
 
   async function isVehicleUnavailable(vehicleId,startAt,endAt) {
@@ -2284,7 +2284,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const search=String(q||'').trim().toLowerCase();
       if(search)rows=rows.filter(x=>[x.id,x.name,x.make,x.model,x.registrationNumber].some(v=>String(v||'').toLowerCase().includes(search)));
       if(vendorId)rows=rows.filter(x=>String(x.ownerId)===String(vendorId));
-      if(active!==undefined && active!=='')rows=rows.filter(x=>Boolean(x.active)===String(active)==='true');
+      if(active!==undefined && active!=='')rows=rows.filter(x=>Boolean(x.active)===('true'===String(active)));
       rows.sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
       return {vehicles:rows.slice(page.offset,page.offset+page.limit).map(x=>mapManagedVehicle({...x,owner_id:x.ownerId})),pagination:adminPagination(page.limit,page.offset,rows.length)};
     }
