@@ -60,6 +60,7 @@ export function createRepository({ databaseUrl, fleet }) {
   async function listVehicles({ type, city, q } = {}) {
     const serviceCity = 'Udaipur';
     if (city && String(city).trim().toLowerCase() !== serviceCity.toLowerCase()) return [];
+
     if (!useDatabase) {
       const typeValue = type?.toLowerCase();
       const cityValue = city?.toLowerCase();
@@ -72,6 +73,9 @@ export function createRepository({ databaseUrl, fleet }) {
       );
     }
 
+    // Public marketplace reads must depend only on columns from the original
+    // vehicle schema. Optional vendor metadata was added by later migrations
+    // and must never make the customer catalogue unavailable.
     const params = [];
     const where = ['active = true'];
     if (type && type.toLowerCase() !== 'all') {
@@ -80,82 +84,68 @@ export function createRepository({ databaseUrl, fleet }) {
     }
     if (city) {
       params.push(city);
-      where.push(`lower(city) = lower(${params.length})`);
+      where.push(`lower(trim(city)) = lower(trim(${params.length}))`);
     }
     if (q) {
       params.push(`%${q}%`);
-      where.push(`(name ilike ${params.length}::text or coalesce(make, '') ilike ${params.length}::text or coalesce(model, '') ilike ${params.length}::text)`);
+      where.push(`(coalesce(name, '') ilike ${params.length}::text or coalesce(make, '') ilike ${params.length}::text or coalesce(model, '') ilike ${params.length}::text)`);
     }
 
-    let rows;
-    let lastError;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        const result = await pool.query(
-          `select id, owner_id, type, name, make, model, year, city, daily_rate_paise, security_deposit_paise, active, transmission, fuel, seats, description, image_urls, delivery_available
-           from vehicles
-           where ${where.join(' and ')}
-           order by name asc`,
-          params
+    const result = await pool.query(
+      `select id, type, name, make, model, year, city, daily_rate_paise,
+              security_deposit_paise, active, transmission, fuel, seats
+       from vehicles
+       where ${where.join(' and ')}
+       order by name asc`,
+      params
+    );
+
+    const rows = result.rows;
+
+    // Optional fields are enriched independently. If an older production
+    // schema does not have them yet, the public inventory still works.
+    let optionalById = new Map();
+    try {
+      const ids = rows.map((row) => row.id).filter(Boolean);
+      if (ids.length) {
+        const optional = await pool.query(
+          `select id, description, image_urls, delivery_available, owner_id
+           from vehicles where id = any($1::text[])`,
+          [ids]
         );
-        rows = result.rows;
-        break;
-      } catch (error) {
-        lastError = error;
-        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+        optionalById = new Map(optional.rows.map((row) => [String(row.id), row]));
       }
-    }
-    if (!rows) {
-      // Some existing production databases may be one migration behind.
-      // Retry with only the core inventory columns so public marketplace
-      // browsing does not fail merely because optional vehicle metadata is
-      // missing.
-      try {
-        const fallback = await pool.query(
-          `select id, type, name, city, daily_rate_paise, security_deposit_paise, active
-           from vehicles
-           where ${where.join(' and ')}
-           order by name asc`,
-          params
-        );
-        rows = fallback.rows.map(row => ({
-          ...row,
-          transmission: null,
-          fuel: null,
-          seats: null,
-          make: null,
-          model: null,
-          year: null,
-          description: '',
-          image_urls: [],
-          delivery_available: true,
-          owner_id: null,
-        }));
-      } catch (fallbackError) {
-        throw lastError || fallbackError || new Error('Vehicle inventory query failed.');
-      }
+    } catch (optionalError) {
+      console.warn(JSON.stringify({
+        level: 'warn',
+        event: 'vehicle_optional_metadata_unavailable',
+        message: optionalError?.message || 'Optional vehicle metadata query failed',
+      }));
     }
 
-    return rows.map((row) => ({
-      id: String(row.id),
-      type: String(row.type),
-      name: row.name,
-      subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
-      pricePerDay: Number(row.daily_rate_paise || 0) / 100,
-      city: row.city,
-      make: row.make || null,
-      model: row.model || null,
-      year: row.year == null ? null : Number(row.year),
-      securityDeposit: Number(row.security_deposit_paise || 0) / 100,
-      description: row.description || '',
-      imageUrls: Array.isArray(row.image_urls) ? row.image_urls : [],
-      deliveryAvailable: row.delivery_available !== false,
-      ownerId: row.owner_id ? String(row.owner_id) : null,
-      seats: row.seats == null ? null : Number(row.seats),
-      transmission: row.transmission || null,
-      fuel: row.fuel || null,
-      active: Boolean(row.active),
-    }));
+    return rows.map((row) => {
+      const extra = optionalById.get(String(row.id)) || {};
+      return {
+        id: String(row.id),
+        type: String(row.type),
+        name: row.name,
+        subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
+        pricePerDay: Number(row.daily_rate_paise || 0) / 100,
+        city: row.city,
+        make: row.make || null,
+        model: row.model || null,
+        year: row.year == null ? null : Number(row.year),
+        securityDeposit: Number(row.security_deposit_paise || 0) / 100,
+        description: extra.description || '',
+        imageUrls: Array.isArray(extra.image_urls) ? extra.image_urls : [],
+        deliveryAvailable: extra.delivery_available !== false,
+        ownerId: extra.owner_id ? String(extra.owner_id) : null,
+        seats: row.seats == null ? null : Number(row.seats),
+        transmission: row.transmission || null,
+        fuel: row.fuel || null,
+        active: Boolean(row.active),
+      };
+    });
   }
 
   async function listLocations() {
