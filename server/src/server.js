@@ -967,6 +967,7 @@ app.post('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer',
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please check the support request details.',details:parsed.error.flatten()}});
   try{
     const result=await repository.createSupportTicket({...parsed.data,raisedByUserId:req.user.id,raisedByRole:req.user.role,idempotencyKey:req.get('Idempotency-Key')||null});
+    if(!result.idempotentReplay) void notifications.notifySupport({type:'new_support_ticket',title:'New support ticket',body:'A new customer or vendor support request needs attention.',ticketId:result.ticket.id,bookingId:result.ticket.bookingId||null,dedupeKey:`new_support_ticket:${result.ticket.id}`});
     res.status(result.idempotentReplay?200:201).json({ticket:result.ticket,idempotentReplay:result.idempotentReplay});
   }catch(error){return supportResponse(res,error);}
 });
@@ -1033,15 +1034,22 @@ app.patch('/api/v1/support/admin/tickets/:id/assignment', supabaseRequireAuth, r
 app.patch('/api/v1/support/admin/tickets/:id/status', supabaseRequireAuth, requireSupport, async (req,res)=>{
   const parsed=z.object({status:z.enum(['open','in_progress','waiting_for_user','resolved','closed']),resolution:z.string().trim().max(5000).optional().nullable()}).safeParse(req.body||{});
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid status and optional resolution.'}});
-  try{res.json({ticket:await repository.updateSupportTicketStatus({ticketId:req.params.id,userId:req.user.id,role:req.user.role,status:parsed.data.status,resolution:parsed.data.resolution})});}
-  catch(error){return supportResponse(res,error);}
+  try{
+    const ticket=await repository.updateSupportTicketStatus({ticketId:req.params.id,userId:req.user.id,role:req.user.role,status:parsed.data.status,resolution:parsed.data.resolution});
+    if(['resolved','closed'].includes(parsed.data.status)) void notifications.notify({recipientUserId:ticket.raisedByUserId,type:'support_reply',title:'Support ticket updated',body:'Your RideOn support ticket has been updated.',ticketId:ticket.id,bookingId:ticket.bookingId||null,dedupeKey:`support_status:${ticket.id}:${parsed.data.status}`});
+    res.json({ticket});
+  }catch(error){return supportResponse(res,error);}
 });
 
 app.post('/api/v1/support/admin/tickets/:id/messages', supabaseRequireAuth, requireSupport, supportRateLimit, async (req,res)=>{
   const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
-  try{res.status(201).json({message:await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal})});}
-  catch(error){return supportResponse(res,error);}
+  try{
+    const message=await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal});
+    const context=await repository.getSupportTicketNotificationContext(req.params.id);
+    if(!parsed.data.isInternal && context?.ownerUserId) void notifications.notify({recipientUserId:context.ownerUserId,type:'support_reply',title:'Support replied',body:'RideOn support has replied to your ticket.',ticketId:req.params.id,bookingId:context.bookingId,dedupeKey:`support_reply:${message.id}`});
+    res.status(201).json({message});
+  }catch(error){return supportResponse(res,error);}
 });
 
 app.post('/api/v1/support/admin/tickets/:id/resolve', supabaseRequireAuth, requireSupport, async (req,res)=>{
@@ -1056,6 +1064,7 @@ app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCu
   if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
   try{
     const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'customer',...parsed.data});
+    if(review?.revieweeUserId) void notifications.notify({recipientUserId:review.revieweeUserId,type:'customer_review',title:'New customer review',body:'A customer has left a review for your RideOn service.',bookingId:req.params.id,dedupeKey:`customer_review:${review.id}`});
     res.status(201).json({review});
   }catch(error){return reviewResponse(res,error);}
 });
@@ -1063,7 +1072,7 @@ app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCu
 app.post('/api/v1/vendor/bookings/:id/review', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
   const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
   if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
-  try{const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});res.status(201).json({review});}catch(error){return reviewResponse(res,error);}
+  try{const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});if(review?.revieweeUserId) void notifications.notify({recipientUserId:review.revieweeUserId,type:'customer_review',title:'New vendor review',body:'Your vendor has left a review for your RideOn booking.',bookingId:req.params.id,dedupeKey:`vendor_review:${review.id}`});res.status(201).json({review});}catch(error){return reviewResponse(res,error);}
 });
 
 app.post('/api/v1/vendor/bookings/:id/reviews/customer', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
@@ -1372,6 +1381,8 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
     const result=await repository.cancelBooking(req.params.id,req.user.id,{reason:parsed.data.reason||'customer_cancelled'});
     const refund=result.calculation.totalRefund>0 ? await requestRefundForBooking(req.params.id) : {status:'not_applicable'};
     const latest=await repository.getBooking(req.params.id,req.user.id);
+    void notifications.notifyBooking({bookingId:req.params.id,type:'booking_cancelled',title:'Booking cancelled',body:'Your RideOn booking has been cancelled.',audience:'vendor',dedupeKey:`booking_cancelled:${req.params.id}:vendor`});
+    if(result.calculation.totalRefund>0) void notifications.notifyBooking({bookingId:req.params.id,type:'refund_initiated',title:'Refund initiated',body:'Your RideOn refund has been initiated.',audience:'customer',dedupeKey:`refund_initiated:${req.params.id}`});
     res.json({data:publicBooking(latest||result.booking),booking:publicBooking(latest||result.booking),cancellation:result.calculation,refund});
   } catch(error) {
     if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
