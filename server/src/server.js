@@ -791,6 +791,16 @@ app.get('/api/v1/bookings/:id/tracking', supabaseRequireAuth, requireCustomer, a
   }
 });
 
+app.get('/api/v1/vendor/bookings/:id/customer-reviews', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    const customerId=booking.customerId;
+    const result=await repository.listReviewsReceived(customerId,{limit:10,offset:0});
+    res.json(result);
+  }catch(error){res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load customer rating history right now. Please retry.'}});}
+});
+
 app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
   const parsed=z.object({status:z.enum(['confirmed','rejected','cancelled','in_progress','completed']),note:z.string().trim().max(500).optional()}).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid booking status.',details:parsed.error.flatten()}});
