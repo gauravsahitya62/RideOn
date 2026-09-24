@@ -34,7 +34,7 @@ const categoryForBooking=booking=>{
   return 'Booking';
 };
 
-export default function SupportScreen({ booking=null, onBack, embedded=false }){
+export default function SupportScreen({ booking=null, ticketId=null, onBack, embedded=false }){
   const [tickets,setTickets]=useState([]);
   const [loading,setLoading]=useState(true);
   const [refreshing,setRefreshing]=useState(false);
@@ -129,7 +129,8 @@ export default function SupportScreen({ booking=null, onBack, embedded=false }){
   };
 
   useEffect(()=>{loadTickets();},[loadTickets]);
-  useEffect(()=>{if(booking){setView('create');setCategory(categoryForBooking(booking));setSubject('Help with booking '+booking.id);}},[booking?.id]);
+  useEffect(()=>{if(booking&&!ticketId){setView('create');setCategory(categoryForBooking(booking));setSubject('Help with booking '+booking.id);}},[booking?.id,ticketId]);
+  useEffect(()=>{if(!ticketId)return;let active=true;const open=async()=>{try{const result=await rideOnApi.getSupportTicket(ticketId);if(active&&result?.ticket)openTicket(result.ticket);}catch{if(active)setError('This support ticket is no longer available.');}};open();return()=>{active=false;};},[ticketId]);
 
   const header=<View style={S.header}>
     <TouchableOpacity onPress={()=>{if(view!=='list'){setView('list');setSelectedTicket(null);}else onBack?.();}}><Text style={S.back}>‹</Text></TouchableOpacity>
