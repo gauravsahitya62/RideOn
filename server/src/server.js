@@ -58,6 +58,7 @@ app.use(cors({
 app.use(express.json({ limit: '12mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
 app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
@@ -807,6 +808,68 @@ app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVend
     if(error.code==='DELIVERY_NOT_COMPLETED') return res.status(409).json({error:{code:error.code,message:'Mark the vehicle delivered before completing the rental.'}});
     throw error;
   }
+});
+
+const reviewResponse = (res, error) => {
+  const map = {
+    BOOKING_NOT_FOUND:[404,'Booking not found.'],
+    REVIEW_NOT_ELIGIBLE:[409,'Reviews are available only after the booking is completed.'],
+    REVIEW_ALREADY_EXISTS:[409,'You have already reviewed this booking.'],
+    INVALID_REVIEW_RATING:[400,'Choose a star rating from 1 to 5.'],
+    REVIEW_TARGET_UNAVAILABLE:[409,'The review target is not available for this booking.'],
+    REVIEW_NOT_FOUND:[404,'Review not found.'],
+    REVIEW_EDIT_NOT_ALLOWED:[403,'Vendor reviews cannot be edited after submission.'],
+    REVIEW_EDIT_WINDOW_EXPIRED:[409,'This review can no longer be edited.'],
+    FORBIDDEN:[403,'You do not have permission to perform this review action.'],
+  };
+  const [status,message]=map[error?.code]||[500,'We could not complete that review action right now. Please try again.'];
+  return res.status(status).json({error:{code:error?.code||'REVIEW_FAILED',message}});
+};
+
+app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCustomer, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{
+    const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'customer',...parsed.data});
+    res.status(201).json({review});
+  }catch(error){return reviewResponse(res,error);}
+});
+
+app.post('/api/v1/vendor/bookings/:id/reviews/customer', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{
+    const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});
+    res.status(201).json({review});
+  }catch(error){return reviewResponse(res,error);}
+});
+
+app.get('/api/v1/bookings/:id/reviews/status', supabaseRequireAuth, async (req,res)=>{
+  if(!['customer','vendor'].includes(req.user.role))return res.status(403).json({error:{code:'FORBIDDEN',message:'A valid RideOn account is required.'}});
+  try{res.json({data:await repository.getReviewStatus({bookingId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return reviewResponse(res,error);}
+});
+
+app.patch('/api/v1/reviews/:id', supabaseRequireAuth, requireCustomer, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{res.json({review:await repository.updateReview({reviewId:req.params.id,userId:req.user.id,role:'customer',...parsed.data})});}
+  catch(error){return reviewResponse(res,error);}
+});
+
+app.get('/api/v1/vehicles/:id/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviews({scope:'vehicle',id:req.params.id,limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load vehicle reviews right now. Please retry.'}});}
+});
+
+app.get('/api/v1/vendors/:id/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviews({scope:'vendor',id:req.params.id,limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load vendor reviews right now. Please retry.'}});}
+});
+
+app.get('/api/v1/me/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviewsReceived(req.user.id,{limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load your reviews right now. Please retry.'}});}
 });
 
 app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
