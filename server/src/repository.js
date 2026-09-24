@@ -13,9 +13,9 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map(),auditLogs:[] };
 
-  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
+  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', accountStatus:row.account_status ?? row.accountStatus ?? 'active', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
     if (!row) return null;
     const vehicle = row.vehicle || fleet.find((v) => v.id === row.vehicle_id);
@@ -803,14 +803,14 @@ export function createRepository({ databaseUrl, fleet }) {
     }
     const id=crypto.randomUUID();
     const resolvedPhone=phone || placeholderPhone();
-    const customer={id,fullName:fullName||email.split('@')[0],phone:resolvedPhone,email,passwordHash:'supabase-auth-managed',supabaseUserId,role};
+    const customer={id,fullName:fullName||email.split('@')[0],phone:resolvedPhone,email,passwordHash:'supabase-auth-managed',supabaseUserId,role,accountStatus:'active'};
     memory.customers.set(id,customer);
     return {...customer};
   }
 
   async function findCustomerBySupabaseUserId(id) {
     if (!useDatabase) { const c=[...memory.customers.values()].find(v=>String(v.supabaseUserId||'')===String(id)); return c?{id:c.id,fullName:c.fullName,phone:c.phone,email:c.email,role:c.role||'customer',supabaseUserId:c.supabaseUserId}:null; }
-    const { rows } = await pool.query('select id,full_name,phone,email,role,supabase_user_id from customers where supabase_user_id=$1',[id]);
+    const { rows } = await pool.query('select id,full_name,phone,email,role,account_status,supabase_user_id from customers where supabase_user_id=$1',[id]);
     return rows[0]?mapCustomer(rows[0]):null;
   }
 
@@ -822,7 +822,7 @@ export function createRepository({ databaseUrl, fleet }) {
       } catch(e) { if(e.code==='23505'){const x=new Error('customer exists');x.code='CUSTOMER_EXISTS';throw x;} throw e; }
     }
     if ([...memory.customers.values()].some(c=>c.phone===phone)){const x=new Error('customer exists');x.code='CUSTOMER_EXISTS';throw x;}
-    const id=crypto.randomUUID(); memory.customers.set(id,{id,fullName,phone,email,passwordHash}); return {id,fullName,phone,email};
+    const id=crypto.randomUUID(); memory.customers.set(id,{id,fullName,phone,email,passwordHash,role:'customer',accountStatus:'active'}); return {id,fullName,phone,email,role:'customer',accountStatus:'active'};
   }
 
   async function findCustomerByPhone(phone) {
@@ -1442,16 +1442,16 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function findCustomerByEmail(email) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,supabase_user_id from customers where lower(email)=lower($1::text)', [email]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,account_status,supabase_user_id from customers where lower(email)=lower($1::text)', [email]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = [...memory.customers.values()].find(v => String(v.email || '').toLowerCase() === String(email).toLowerCase());
-    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash, role:c.role || 'customer', supabaseUserId:c.supabaseUserId } : null;
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash, role:c.role || 'customer', accountStatus:c.accountStatus || 'active', supabaseUserId:c.supabaseUserId } : null;
   }
 
   async function findCustomerById(id) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,supabase_user_id from customers where id=$1', [id]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,account_status,supabase_user_id from customers where id=$1', [id]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = memory.customers.get(id);
@@ -1496,7 +1496,7 @@ export function createRepository({ databaseUrl, fleet }) {
     reviewerUserId: String(row.reviewer_user_id ?? row.reviewerUserId),
     revieweeUserId: String(row.reviewee_user_id ?? row.revieweeUserId),
     reviewType: row.review_type ?? row.reviewType, rating: Number(row.rating),
-    comment: row.comment || null, createdAt: iso(row.created_at ?? row.createdAt), updatedAt: iso(row.updated_at ?? row.updatedAt),
+    comment: row.comment || null, moderationStatus: row.moderation_status ?? row.moderationStatus ?? 'visible', moderationReason: row.moderation_reason ?? row.moderationReason ?? null, moderatedBy: row.moderated_by ? String(row.moderated_by) : (row.moderatedBy ? String(row.moderatedBy) : null), moderatedAt: iso(row.moderated_at ?? row.moderatedAt), createdAt: iso(row.created_at ?? row.createdAt), updatedAt: iso(row.updated_at ?? row.updatedAt),
     reviewerName: row.reviewType==='customer_to_vendor' || row.review_type==='customer_to_vendor' ? 'Verified customer' : 'Verified RideOn vendor', revieweeName: row.reviewee_name || row.revieweeName || null,
     vehicleId: row.vehicle_id == null ? null : String(row.vehicle_id), vehicleName: row.vehicle_name || null,
     vendorId: row.resolved_vendor_id == null ? (row.vendor_id == null ? null : String(row.vendor_id)) : String(row.resolved_vendor_id),
@@ -1951,6 +1951,515 @@ export function createRepository({ databaseUrl, fleet }) {
     const actor=await findCustomerById(userId);
     if (!SUPPORT_ROLES.has(actor?.role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
     return updateSupportTicketStatus({ticketId,userId,role:actor.role,status:'resolved',resolution});
+  }
+
+
+  const ADMIN_OPERATOR_ROLES = new Set(['support','admin']);
+  const ADMIN_MUTATION_ROLES = new Set(['admin']);
+
+  const adminPage = (limit=50, offset=0) => ({
+    limit: Math.max(1, Math.min(100, Number(limit) || 50)),
+    offset: Math.max(0, Number(offset) || 0),
+  });
+
+  const adminPagination = (limit, offset, total) => ({
+    limit, offset, total:Number(total || 0), hasNext:offset + limit < Number(total || 0)
+  });
+
+  const asAdminStatus = (value='active') => {
+    const v=String(value||'').trim().toLowerCase();
+    if (!['active','suspended'].includes(v)) {
+      const e=new Error('Unsupported account status.'); e.code='INVALID_ACCOUNT_STATUS'; throw e;
+    }
+    return v;
+  };
+
+  async function recordAdminAudit({adminUserId,action,entityType,entityId=null,metadata={}}={}) {
+    const actor=await findCustomerById(adminUserId);
+    if (!ADMIN_OPERATOR_ROLES.has(actor?.role)) {
+      const e=new Error('Support staff access is required.'); e.code='FORBIDDEN'; throw e;
+    }
+    const safeMetadata=(metadata && typeof metadata==='object' && !Array.isArray(metadata)) ? metadata : {};
+    if (!useDatabase) {
+      const row={id:crypto.randomUUID(),adminUserId:String(adminUserId),action:String(action).slice(0,80),entityType:String(entityType).slice(0,80),entityId:entityId==null?null:String(entityId).slice(0,128),metadata:safeMetadata,createdAt:new Date().toISOString()};
+      memory.auditLogs.push(row);
+      return row;
+    }
+    const {rows}=await pool.query(
+      'insert into admin_audit_logs(admin_user_id,action,entity_type,entity_id,metadata) values($1,$2,$3,$4,$5::jsonb) returning id,admin_user_id,action,entity_type,entity_id,metadata,created_at',
+      [adminUserId,String(action).slice(0,80),String(entityType).slice(0,80),entityId==null?null:String(entityId).slice(0,128),JSON.stringify(safeMetadata)]
+    );
+    const row=rows[0];
+    return {id:String(row.id),adminUserId:String(row.admin_user_id),action:row.action,entityType:row.entity_type,entityId:row.entity_id,metadata:row.metadata||{},createdAt:iso(row.created_at)};
+  }
+
+  async function getAdminDashboard() {
+    if (!useDatabase) {
+      const bookings=[...memory.bookings.values()];
+      const payments=[...(memory.payments?.values()||[])];
+      const deposits=[...(memory.securityDeposits?.values()||[])];
+      const tickets=[...(memory.supportTickets?.values()||[])];
+      const activeTracking=[...(memory.trackingSessions?.values()||[])].filter(x=>x.status==='active' && (!x.expiresAt || new Date(x.expiresAt)>new Date()));
+      const recent=[
+        ...bookings.map(x=>({occurredAt:x.updatedAt||x.createdAt,type:'booking',action:'booking_updated',entityId:String(x.id),summary:`Booking ${String(x.id).slice(0,8)}`})),
+        ...tickets.map(x=>({occurredAt:x.updatedAt||x.createdAt,type:'support_ticket',action:'support_updated',entityId:String(x.id),summary:x.subject||x.ticketNumber})),
+      ].sort((a,b)=>new Date(b.occurredAt)-new Date(a.occurredAt)).slice(0,10);
+      return {
+        metrics:{
+          totalCustomers:memory.customers.size,totalVendors:memory.vendors.size,totalVehicles:memory.vehicles.size,
+          totalBookings:bookings.length,activeBookings:bookings.filter(x=>['requested','confirmed','in_progress'].includes(x.status)).length,
+          completedBookings:bookings.filter(x=>x.status==='completed').length,cancelledBookings:bookings.filter(x=>x.status==='cancelled').length,
+          pendingPayments:payments.filter(x=>['unpaid','pending'].includes(x.status)).length,
+          paidBookings:bookings.filter(x=>['paid','held','settlement_pending','settled'].includes(x.paymentStatus)).length,
+          refundsPending:payments.filter(x=>x.status==='refund_pending').length,
+          securityDepositsHeld:deposits.filter(x=>['held','release_pending','review_required'].includes(x.status)).length,
+          securityDepositsHeldAmount:deposits.filter(x=>['held','release_pending','review_required'].includes(x.status)).reduce((s,x)=>s+Number(x.originalAmount||0),0),
+          openSupportTickets:tickets.filter(x=>['open','in_progress','waiting_for_user'].includes(x.status)).length,
+          activeDeliveries:activeTracking.length
+        },recentActivity:recent
+      };
+    }
+    const q=await pool.query(`
+      select
+        (select count(*)::int from customers) as total_customers,
+        (select count(*)::int from vendors) as total_vendors,
+        (select count(*)::int from vehicles) as total_vehicles,
+        (select count(*)::int from bookings) as total_bookings,
+        (select count(*)::int from bookings where status in ('requested','confirmed','in_progress')) as active_bookings,
+        (select count(*)::int from bookings where status='completed') as completed_bookings,
+        (select count(*)::int from bookings where status='cancelled') as cancelled_bookings,
+        (select count(*)::int from payments where status in ('unpaid','pending')) as pending_payments,
+        (select count(*)::int from bookings where payment_status in ('paid','held','settlement_pending','settled')) as paid_bookings,
+        (select count(*)::int from payments where status='refund_pending') as refunds_pending,
+        (select count(*)::int from security_deposits where status in ('held','release_pending','review_required')) as security_deposits_held,
+        (select coalesce(sum(original_amount_paise),0)::bigint from security_deposits where status in ('held','release_pending','review_required')) as security_deposits_held_amount_paise,
+        (select count(*)::int from support_tickets where status in ('open','in_progress','waiting_for_user')) as open_support_tickets,
+        (select count(*)::int from tracking_sessions where status='active' and expires_at>now()) as active_deliveries
+    `);
+    const m=q.rows[0];
+    const activity=await pool.query(`
+      select occurred_at,type,action,entity_id,summary from (
+        select b.updated_at as occurred_at,'booking' as type,'booking_updated' as action,b.id::text as entity_id,
+          'Booking '||left(b.id::text,8) as summary from bookings b
+        union all
+        select t.updated_at,'support_ticket','support_updated',t.id::text,coalesce(t.subject,t.ticket_number)
+          from support_tickets t
+        union all
+        select p.updated_at,'payment','payment_updated',p.id::text,'Payment '||left(p.id::text,8)
+          from payments p
+      ) x order by occurred_at desc limit 10`);
+    return {metrics:{
+      totalCustomers:Number(m.total_customers),totalVendors:Number(m.total_vendors),totalVehicles:Number(m.total_vehicles),
+      totalBookings:Number(m.total_bookings),activeBookings:Number(m.active_bookings),completedBookings:Number(m.completed_bookings),
+      cancelledBookings:Number(m.cancelled_bookings),pendingPayments:Number(m.pending_payments),paidBookings:Number(m.paid_bookings),
+      refundsPending:Number(m.refunds_pending),securityDepositsHeld:Number(m.security_deposits_held),
+      securityDepositsHeldAmount:Number(m.security_deposits_held_amount_paise)/100,openSupportTickets:Number(m.open_support_tickets),
+      activeDeliveries:Number(m.active_deliveries)
+    },recentActivity:activity.rows.map(r=>({occurredAt:iso(r.occurred_at),type:r.type,action:r.action,entityId:r.entity_id,summary:r.summary}))};
+  }
+
+  async function listAdminBookings({q,status,dateFrom,dateTo,customerId,vendorId,limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...memory.bookings.values()];
+      const search=String(q||'').trim().toLowerCase();
+      if(search)rows=rows.filter(b=>[b.id,b.customerId,b.vehicleId,b.vehicle?.name,b.vendorId].some(v=>String(v||'').toLowerCase().includes(search)));
+      if(status)rows=rows.filter(b=>String(b.status)===String(status));
+      if(customerId)rows=rows.filter(b=>String(b.customerId)===String(customerId));
+      if(vendorId)rows=rows.filter(b=>String(b.vendorId)===String(vendorId));
+      if(dateFrom){const d=new Date(dateFrom);if(!Number.isNaN(d.getTime()))rows=rows.filter(b=>new Date(b.startAt)>=d);}
+      if(dateTo){const d=new Date(dateTo+'T23:59:59.999Z');if(!Number.isNaN(d.getTime()))rows=rows.filter(b=>new Date(b.startAt)<=d);}
+      rows.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return {bookings:rows.slice(page.offset,page.offset+page.limit),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['1=1'],params=[];
+    if(q&&String(q).trim()){params.push('%'+String(q).trim()+'%');clauses.push(`(b.id::text ilike ${params.length} or c.full_name ilike ${params.length} or coalesce(c.email,'') ilike ${params.length} or c.phone ilike ${params.length} or coalesce(v.name,'') ilike ${params.length} or coalesce(ven.business_name,'') ilike ${params.length})`);}
+    if(status){params.push(status);clauses.push(`b.status=${params.length}`);}
+    if(customerId){params.push(customerId);clauses.push(`b.customer_id=${params.length}`);}
+    if(vendorId){params.push(vendorId);clauses.push(`b.vendor_id=${params.length}`);}
+    if(dateFrom){params.push(dateFrom);clauses.push(`b.start_at >= ${params.length}::timestamptz`);}
+    if(dateTo){params.push(String(dateTo)+'T23:59:59.999Z');clauses.push(`b.start_at <= ${params.length}::timestamptz`);}
+    const countQuery=`select count(*)::int as total from bookings b join customers c on c.id=b.customer_id left join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=b.vendor_id where ${clauses.join(' and ')}`;
+    const dataQuery=`
+      select b.*,c.full_name as customer_name,c.email as customer_email,c.phone as customer_phone,
+             v.name as vehicle_name,v.type as vehicle_type,v.registration_number,
+             ven.business_name as vendor_name,
+             p.id as payment_id,p.status as payment_status_record,p.provider as payment_provider,
+             p.amount_paise as payment_amount_paise,p.provider_reference as payment_provider_reference,
+             sd.status as deposit_status,sd.original_amount_paise as deposit_original_amount_paise,
+             sd.refundable_amount_paise as deposit_refundable_amount_paise
+      from bookings b
+      join customers c on c.id=b.customer_id
+      left join vehicles v on v.id=b.vehicle_id
+      left join vendors ven on ven.id=b.vendor_id
+      left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true
+      left join security_deposits sd on sd.booking_id=b.id
+      where ${clauses.join(' and ')}
+      order by b.created_at desc limit ${params.length+1} offset ${params.length+2}`;
+    const [count,data]=await Promise.all([pool.query(countQuery,params),pool.query(dataQuery,[...params,page.limit,page.offset])]);
+    return {bookings:data.rows.map(r=>({
+      id:String(r.id),customer:{id:String(r.customer_id),name:r.customer_name,email:r.customer_email,phone:r.customer_phone},
+      vendor:r.vendor_id?{id:String(r.vendor_id),name:r.vendor_name}:null,
+      vehicle:r.vehicle_id?{id:String(r.vehicle_id),name:r.vehicle_name,type:r.vehicle_type,registrationNumber:r.registration_number||null}:null,
+      startAt:iso(r.start_at),endAt:iso(r.end_at),status:r.status,paymentStatus:r.payment_status,
+      payment:r.payment_id?{id:String(r.payment_id),status:r.payment_status_record,provider:r.payment_provider,amount:Number(r.payment_amount_paise||0)/100,providerReference:r.payment_provider_reference||null}:null,
+      securityDeposit:r.deposit_status?{status:r.deposit_status,originalAmount:Number(r.deposit_original_amount_paise||0)/100,refundableAmount:Number(r.deposit_refundable_amount_paise||0)/100}:null,
+      deliveryStatus:r.delivery_status||'scheduled',createdAt:iso(r.created_at),updatedAt:iso(r.updated_at)
+    })),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function getAdminBooking(id) {
+    if(!useDatabase){
+      const b=memory.bookings.get(String(id)); if(!b)return null;
+      const lifecycle=[...memory.bookings.values()].filter(x=>String(x.id)===String(id)).map(()=>({previousStatus:null,nextStatus:b.status,actorType:'system',actorId:null,note:null,createdAt:b.updatedAt||b.createdAt}));
+      const payment=[...(memory.payments?.values()||[])].find(p=>String(p.bookingId)===String(id))||null;
+      const deposit=memory.securityDeposits.get(String(id))||null;
+      const delivery=[...(memory.trackingSessions?.values()||[])].filter(x=>String(x.bookingId)===String(id)).sort((a,z)=>new Date(z.startedAt)-new Date(a.startedAt))[0]||null;
+      const support=[...memory.supportTickets.values()].filter(t=>String(t.bookingId)===String(id));
+      const reviews=[...memory.reviews.values()].filter(r=>String(r.bookingId)===String(id));
+      return {booking:b,lifecycle,payment,securityDeposit:deposit,delivery,supportTickets:support,reviews};
+    }
+    const base=await pool.query(`
+      select b.*,c.full_name as customer_name,c.email as customer_email,c.phone as customer_phone,
+             v.name as vehicle_name,v.type as vehicle_type,v.make,v.model,v.year,v.registration_number,v.image_urls,v.active as vehicle_active,
+             ven.id as vendor_id,ven.business_name as vendor_name,ven.status as vendor_status,
+             p.id as payment_id,p.provider as payment_provider,p.provider_order_id,p.provider_payment_id,p.provider_reference,p.amount_paise,p.currency,p.status as payment_record_status,
+             p.created_at as payment_created_at,p.updated_at as payment_updated_at,
+             sd.id as deposit_id,sd.status as deposit_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise,
+             sd.deduction_reason,sd.evidence_reference,sd.refund_provider_reference,sd.inspected_at,sd.inspected_by
+      from bookings b join customers c on c.id=b.customer_id
+      left join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=b.vendor_id
+      left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true
+      left join security_deposits sd on sd.booking_id=b.id
+      where b.id=$1`,[id]);
+    if(!base.rows[0])return null;
+    const r=base.rows[0];
+    const [events,tickets,reviews,tracking,refunds]=await Promise.all([
+      pool.query('select id,previous_status,next_status,actor_type,actor_id,note,created_at from booking_status_events where booking_id=$1 order by created_at asc',[id]),
+      pool.query(supportTicketSelect+' where t.booking_id=$1 order by t.updated_at desc',[id]),
+      pool.query(reviewSelect+' where r.booking_id=$1 order by r.created_at desc',[id]),
+      pool.query('select * from tracking_sessions where booking_id=$1 order by started_at desc',[id]),
+      pool.query("select id,status,amount_paise,provider,idempotency_key,provider_transaction_id,created_at,updated_at,completed_at,refunded_at from financial_transactions where booking_id=$1 and transaction_type='refund' order by created_at desc",[id])
+    ]);
+    return {booking:{
+      id:String(r.id),customer:{id:String(r.customer_id),name:r.customer_name,email:r.customer_email,phone:r.customer_phone},
+      vendor:r.vendor_id?{id:String(r.vendor_id),name:r.vendor_name,status:r.vendor_status}:null,
+      vehicle:r.vehicle_id?{id:String(r.vehicle_id),name:r.vehicle_name,type:r.vehicle_type,make:r.make,model:r.model,year:r.year==null?null:Number(r.year),registrationNumber:r.registration_number||null,imageUrls:Array.isArray(r.image_urls)?r.image_urls:[],active:Boolean(r.vehicle_active)}:null,
+      startAt:iso(r.start_at),endAt:iso(r.end_at),delivery:Boolean(r.delivery_required),address:r.delivery_address,status:r.status,paymentStatus:r.payment_status,
+      cancellation:{fee:Number(r.cancellation_fee_paise||0)/100,refund:Number(r.refund_amount_paise||0)/100,reason:r.cancellation_reason||null,at:iso(r.cancelled_at)},
+      deliveryStatus:r.delivery_status||'scheduled',deliveryStartedAt:iso(r.delivery_started_at),deliveredAt:iso(r.delivered_at),createdAt:iso(r.created_at),updatedAt:iso(r.updated_at)
+    },lifecycle:events.rows.map(e=>({id:String(e.id),previousStatus:e.previous_status,nextStatus:e.next_status,actorType:e.actor_type,actorId:e.actor_id?String(e.actor_id):null,note:e.note||null,createdAt:iso(e.created_at)})),
+      payment:r.payment_id?{id:String(r.payment_id),provider:r.payment_provider,providerOrderId:r.provider_order_id||null,providerPaymentId:r.provider_payment_id||null,providerReference:r.provider_reference||null,amount:Number(r.amount_paise||0)/100,currency:r.currency,status:r.payment_record_status,createdAt:iso(r.payment_created_at),updatedAt:iso(r.payment_updated_at)}:null,
+      refundTransactions:refunds.rows.map(x=>({id:String(x.id),status:x.status,amount:Number(x.amount_paise||0)/100,provider:x.provider,idempotencyKey:x.idempotency_key||null,providerTransactionId:x.provider_transaction_id||null,createdAt:iso(x.created_at),updatedAt:iso(x.updated_at),completedAt:iso(x.completed_at),refundedAt:iso(x.refunded_at)})),
+      securityDeposit:r.deposit_id?{id:String(r.deposit_id),status:r.deposit_status,originalAmount:Number(r.original_amount_paise||0)/100,refundableAmount:Number(r.refundable_amount_paise||0)/100,deduction:Number(r.approved_deduction_paise||0)/100,reason:r.deduction_reason||null,evidenceReference:r.evidence_reference||null,refundProviderReference:r.refund_provider_reference||null,inspectedAt:iso(r.inspected_at),inspectedBy:r.inspected_by?String(r.inspected_by):null}:null,
+      deliverySessions:tracking.rows.map(x=>({id:String(x.id),vendorId:String(x.vendor_id),status:x.status,startedAt:iso(x.started_at),endedAt:iso(x.ended_at),lastLocation:{latitude:x.last_latitude==null?null:Number(x.last_latitude),longitude:x.last_longitude==null?null:Number(x.last_longitude),accuracyMeters:x.last_accuracy_meters==null?null:Number(x.last_accuracy_meters),timestamp:iso(x.last_location_at)},etaMinutes:x.last_route_duration_seconds==null?null:Math.max(1,Math.round(Number(x.last_route_duration_seconds)/60)),expiresAt:iso(x.expires_at)})),
+      supportTickets:tickets.rows.map(x=>mapSupportTicket(x,true)),reviews:reviews.rows.map(mapReview)
+    };
+  }
+
+  async function listAdminUsers({q,role,status,limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...memory.customers.values()];
+      const search=String(q||'').trim().toLowerCase();
+      if(search)rows=rows.filter(x=>[x.id,x.fullName,x.email,x.phone].some(v=>String(v||'').toLowerCase().includes(search)));
+      if(role)rows=rows.filter(x=>x.role===role);
+      if(status)rows=rows.filter(x=>(x.accountStatus||'active')===status);
+      rows.sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
+      return {users:rows.slice(page.offset,page.offset+page.limit).map(x=>({...x,passwordHash:undefined})),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['1=1'],params=[];
+    if(q&&String(q).trim()){params.push('%'+String(q).trim()+'%');clauses.push(`(c.id::text ilike ${params.length} or c.full_name ilike ${params.length} or coalesce(c.email,'') ilike ${params.length} or c.phone ilike ${params.length})`);}
+    if(role){params.push(role);clauses.push(`c.role=${params.length}`);}
+    if(status){params.push(asAdminStatus(status));clauses.push(`c.account_status=${params.length}`);}
+    const count=await pool.query(`select count(*)::int total from customers c where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(`
+      select c.id,c.full_name,c.phone,c.email,c.role,c.account_status,c.created_at,
+        (select count(*) from bookings b where b.customer_id=c.id) as booking_count,
+        (select count(*) from reviews r where r.reviewer_user_id=c.id) as review_count,
+        (select count(*) from support_tickets t where t.raised_by_user_id=c.id) as support_ticket_count
+      from customers c where ${clauses.join(' and ')} order by c.created_at desc
+      limit ${params.length+1} offset ${params.length+2}`,[...params,page.limit,page.offset]);
+    return {users:data.rows.map(x=>({id:String(x.id),fullName:x.full_name,phone:x.phone,email:x.email||null,role:x.role,accountStatus:x.account_status,createdAt:iso(x.created_at),bookingCount:Number(x.booking_count),reviewCount:Number(x.review_count),supportTicketCount:Number(x.support_ticket_count)})),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function getAdminUser(id) {
+    if(!useDatabase){
+      const user=memory.customers.get(String(id)); if(!user)return null;
+      const bookings=[...memory.bookings.values()].filter(x=>String(x.customerId)===String(id)).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      const reviews=[...memory.reviews.values()].filter(x=>String(x.reviewerUserId)===String(id)||String(x.revieweeUserId)===String(id));
+      const tickets=[...memory.supportTickets.values()].filter(x=>String(x.raisedByUserId)===String(id));
+      const vendor=[...memory.vendors.values()].find(x=>String(x.ownerCustomerId)===String(id));
+      return {user:{id:user.id,fullName:user.fullName,phone:user.phone,email:user.email||null,role:user.role||'customer',accountStatus:user.accountStatus||'active',createdAt:user.createdAt||null},recentBookings:bookings.slice(0,10),reviews,tickets,vendorProfile:vendor||null};
+    }
+    const row=await pool.query('select id,full_name,phone,email,role,account_status,created_at from customers where id=$1',[id]);
+    if(!row.rows[0])return null;
+    const user=row.rows[0];
+    const [bookingResult,reviews,tickets,vendor]=await Promise.all([
+      listAdminBookings({customerId:id,limit:10,offset:0}),
+      pool.query(reviewSelect+' where r.reviewer_user_id=$1 or r.reviewee_user_id=$1 order by r.created_at desc limit 20',[id]),
+      pool.query(supportTicketSelect+' where t.raised_by_user_id=$1 order by t.updated_at desc limit 20',[id]),
+      pool.query('select * from vendors where owner_customer_id=$1',[id])
+    ]);
+    return {user:{id:String(user.id),fullName:user.full_name,phone:user.phone,email:user.email||null,role:user.role,accountStatus:user.account_status,createdAt:iso(user.created_at)},recentBookings:bookingResult.bookings,reviews:reviews.rows.map(mapReview),tickets:tickets.rows.map(x=>mapSupportTicket(x,true)),vendorProfile:vendor.rows[0]?mapVendor(vendor.rows[0]):null};
+  }
+
+  async function updateAdminUserStatus({adminUserId,targetUserId,status}) {
+    const actor=await findCustomerById(adminUserId);
+    if(!ADMIN_MUTATION_ROLES.has(actor?.role)) {const e=new Error('Admin access is required.');e.code='FORBIDDEN';throw e;}
+    const next=asAdminStatus(status);
+    const target=await findCustomerById(targetUserId);
+    if(!target) {const e=new Error('User not found.');e.code='USER_NOT_FOUND';throw e;}
+    if(['admin','support'].includes(target.role)){const e=new Error('Staff accounts must be managed through a controlled identity process.');e.code='STAFF_STATUS_MANAGEMENT_REQUIRED';throw e;}
+    if(String(targetUserId)===String(adminUserId)){const e=new Error('You cannot suspend your own admin account.');e.code='SELF_SUSPENSION_NOT_ALLOWED';throw e;}
+    if(!useDatabase){
+      const c=memory.customers.get(String(targetUserId));c.accountStatus=next;c.updatedAt=new Date().toISOString();await recordAdminAudit({adminUserId,action:'user_status_changed',entityType:'customer',entityId:targetUserId,metadata:{from:target.accountStatus||'active',to:next}});return {...target,accountStatus:next};
+    }
+    const q=await pool.query('update customers set account_status=$2,updated_at=now() where id=$1 returning id,full_name,phone,email,role,account_status,supabase_user_id',[targetUserId,next]);
+    if(!q.rows[0]) {const e=new Error('User not found.');e.code='USER_NOT_FOUND';throw e;}
+    await recordAdminAudit({adminUserId,action:'user_status_changed',entityType:'customer',entityId:targetUserId,metadata:{from:target.accountStatus||'active',to:next}});
+    return mapCustomer(q.rows[0]);
+  }
+
+  async function listAdminVendors({q,status,limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...memory.vendors.values()];
+      const search=String(q||'').trim().toLowerCase();
+      if(search)rows=rows.filter(x=>[x.id,x.businessName,x.contactName,x.serviceCity].some(v=>String(v||'').toLowerCase().includes(search)));
+      if(status)rows=rows.filter(x=>x.status===status);
+      rows.sort((a,b)=>String(a.businessName||'').localeCompare(String(b.businessName||'')));
+      return {vendors:rows.slice(page.offset,page.offset+page.limit).map(v=>({...v,vehicleCount:[...memory.vehicles.values()].filter(x=>String(x.ownerId)===String(v.id)).length,bookingCount:[...memory.bookings.values()].filter(x=>String(x.vendorId)===String(v.id)).length,rating:0})),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['1=1'],params=[];
+    if(q&&String(q).trim()){params.push('%'+String(q).trim()+'%');clauses.push(`(v.id::text ilike ${params.length} or v.business_name ilike ${params.length} or v.contact_name ilike ${params.length} or v.service_city ilike ${params.length})`);}
+    if(status){params.push(status);clauses.push(`v.status=${params.length}`);}
+    const count=await pool.query(`select count(*)::int total from vendors v where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(`
+      select v.*,c.email as owner_email,c.phone as owner_phone,c.account_status as owner_account_status,
+        (select count(*) from vehicles ve where ve.owner_id=v.id) vehicle_count,
+        (select count(*) from bookings b where b.vendor_id=v.id) booking_count,
+        (select coalesce(avg(r.rating),0) from reviews r where r.review_type='customer_to_vendor' and r.reviewee_user_id=v.owner_customer_id and r.moderation_status='visible') rating
+      from vendors v join customers c on c.id=v.owner_customer_id
+      where ${clauses.join(' and ')} order by v.created_at desc
+      limit ${params.length+1} offset ${params.length+2}`,[...params,page.limit,page.offset]);
+    return {vendors:data.rows.map(v=>({id:String(v.id),ownerCustomerId:String(v.owner_customer_id),businessName:v.business_name,contactName:v.contact_name,email:v.owner_email||v.support_email||null,phone:v.owner_phone||v.support_phone||null,status:v.status,serviceCity:v.service_city,serviceArea:v.service_area||{},ownerAccountStatus:v.owner_account_status,vehicleCount:Number(v.vehicle_count),bookingCount:Number(v.booking_count),rating:Number(Number(v.rating||0).toFixed(2)),createdAt:iso(v.created_at),updatedAt:iso(v.updated_at)})),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function getAdminVendor(id) {
+    if(!useDatabase){
+      const vendor=[...memory.vendors.values()].find(v=>String(v.id)===String(id)); if(!vendor)return null;
+      const vehicles=[...memory.vehicles.values()].filter(v=>String(v.ownerId)===String(id));
+      const bookings=[...memory.bookings.values()].filter(b=>String(b.vendorId)===String(id)).sort((a,z)=>new Date(z.createdAt)-new Date(a.createdAt)).slice(0,20);
+      return {vendor,vehicles,bookings,reviews:[...memory.reviews.values()].filter(r=>String(r.vendorId)===String(id))};
+    }
+    const v=await pool.query('select v.*,c.email as owner_email,c.phone as owner_phone,c.full_name as owner_name,c.account_status as owner_account_status from vendors v join customers c on c.id=v.owner_customer_id where v.id=$1',[id]);
+    if(!v.rows[0])return null;
+    const [vehicles,bookings,reviews]=await Promise.all([
+      pool.query('select * from vehicles where owner_id=$1 order by created_at desc',[id]),
+      listAdminBookings({vendorId:id,limit:20,offset:0}),
+      pool.query(reviewSelect+' where r.reviewee_user_id=$1 order by r.created_at desc limit 50',[v.rows[0].owner_customer_id])
+    ]);
+    return {vendor:mapVendor(v.rows[0]),owner:{id:String(v.rows[0].owner_customer_id),name:v.rows[0].owner_name,email:v.rows[0].owner_email||null,phone:v.rows[0].owner_phone||null,accountStatus:v.rows[0].owner_account_status},vehicles:vehicles.rows.map(mapManagedVehicle),bookings:bookings.bookings,reviews:reviews.rows.map(mapReview)};
+  }
+
+  async function updateAdminVendorStatus({adminUserId,vendorId,status}) {
+    const actor=await findCustomerById(adminUserId);
+    if(!ADMIN_MUTATION_ROLES.has(actor?.role)) {const e=new Error('Admin access is required.');e.code='FORBIDDEN';throw e;}
+    const allowed=new Set(['pending','approved','suspended','rejected']); const next=String(status||''); if(!allowed.has(next)){const e=new Error('Unsupported vendor status.');e.code='INVALID_VENDOR_STATUS';throw e;}
+    if(!useDatabase){
+      const v=[...memory.vendors.values()].find(x=>String(x.id)===String(vendorId));if(!v){const e=new Error('Vendor not found.');e.code='VENDOR_NOT_FOUND';throw e;}
+      const from=v.status;v.status=next;await recordAdminAudit({adminUserId,action:'vendor_status_changed',entityType:'vendor',entityId:vendorId,metadata:{from,to:next}});return v;
+    }
+    const q=await pool.query('update vendors set status=$2,updated_at=now() where id=$1 returning *',[vendorId,next]);
+    if(!q.rows[0]){const e=new Error('Vendor not found.');e.code='VENDOR_NOT_FOUND';throw e;}
+    await recordAdminAudit({adminUserId,action:'vendor_status_changed',entityType:'vendor',entityId:vendorId,metadata:{from:null,to:next}});
+    return mapVendor(q.rows[0]);
+  }
+
+  async function listAdminVehicles({q,vendorId,active,limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...memory.vehicles.values()];
+      const search=String(q||'').trim().toLowerCase();
+      if(search)rows=rows.filter(x=>[x.id,x.name,x.make,x.model,x.registrationNumber].some(v=>String(v||'').toLowerCase().includes(search)));
+      if(vendorId)rows=rows.filter(x=>String(x.ownerId)===String(vendorId));
+      if(active!==undefined && active!=='')rows=rows.filter(x=>Boolean(x.active)===String(active)==='true');
+      rows.sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
+      return {vehicles:rows.slice(page.offset,page.offset+page.limit).map(x=>mapManagedVehicle({...x,owner_id:x.ownerId})),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['1=1'],params=[];
+    if(q&&String(q).trim()){params.push('%'+String(q).trim()+'%');clauses.push(`(ve.id ilike ${params.length} or coalesce(ve.name,'') ilike ${params.length} or coalesce(ve.make,'') ilike ${params.length} or coalesce(ve.model,'') ilike ${params.length} or coalesce(ve.registration_number,'') ilike ${params.length})`);}
+    if(vendorId){params.push(vendorId);clauses.push(`ve.owner_id=${params.length}`);}
+    if(active!==undefined&&active!==''){params.push(String(active)==='true');clauses.push(`ve.active=${params.length}`);}
+    const count=await pool.query(`select count(*)::int total from vehicles ve where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(`
+      select ve.*,v.business_name as vendor_name,
+        (select count(*) from bookings b where b.vehicle_id=ve.id) booking_count
+      from vehicles ve left join vendors v on v.id=ve.owner_id
+      where ${clauses.join(' and ')} order by ve.created_at desc
+      limit ${params.length+1} offset ${params.length+2}`,[...params,page.limit,page.offset]);
+    return {vehicles:data.rows.map(v=>({...mapManagedVehicle(v),vendor:v.owner_id?{id:String(v.owner_id),name:v.vendor_name||null}:null,bookingCount:Number(v.booking_count)})),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function getAdminVehicle(id) {
+    if(!useDatabase){
+      const v=[...memory.vehicles.values()].find(x=>String(x.id)===String(id)); if(!v)return null;
+      return {vehicle:mapManagedVehicle({...v,owner_id:v.ownerId}),vendor:[...memory.vendors.values()].find(x=>String(x.id)===String(v.ownerId))||null,bookings:[...memory.bookings.values()].filter(b=>String(b.vehicleId)===String(id)).sort((a,z)=>new Date(z.createdAt)-new Date(a.createdAt)).slice(0,50)};
+    }
+    const v=await pool.query(`select ve.*,ven.business_name as vendor_name from vehicles ve left join vendors ven on ven.id=ve.owner_id where ve.id=$1`,[id]);
+    if(!v.rows[0])return null;
+    const bookings=await pool.query(`select b.id,b.status,b.payment_status,b.start_at,b.end_at,b.created_at,c.id customer_id,c.full_name customer_name from bookings b join customers c on c.id=b.customer_id where b.vehicle_id=$1 order by b.created_at desc limit 50`,[id]);
+    return {vehicle:mapManagedVehicle(v.rows[0]),vendor:v.rows[0].owner_id?{id:String(v.rows[0].owner_id),name:v.rows[0].vendor_name||null}:null,bookings:bookings.rows.map(b=>({id:String(b.id),status:b.status,paymentStatus:b.payment_status,startAt:iso(b.start_at),endAt:iso(b.end_at),createdAt:iso(b.created_at),customer:{id:String(b.customer_id),name:b.customer_name}}))};
+  }
+
+  async function updateAdminVehicleStatus({adminUserId,vehicleId,active}) {
+    const actor=await findCustomerById(adminUserId);
+    if(!ADMIN_MUTATION_ROLES.has(actor?.role)) {const e=new Error('Admin access is required.');e.code='FORBIDDEN';throw e;}
+    const next=Boolean(active);
+    if(!useDatabase){
+      const v=[...memory.vehicles.values()].find(x=>String(x.id)===String(vehicleId));if(!v){const e=new Error('Vehicle not found.');e.code='VEHICLE_NOT_FOUND';throw e;}
+      const from=v.active!==false;v.active=next;await recordAdminAudit({adminUserId,action:'vehicle_activation_changed',entityType:'vehicle',entityId:vehicleId,metadata:{from,to:next}});return mapManagedVehicle({...v,owner_id:v.ownerId});
+    }
+    const q=await pool.query('update vehicles set active=$2,updated_at=now() where id=$1 returning *',[vehicleId,next]);
+    if(!q.rows[0]){const e=new Error('Vehicle not found.');e.code='VEHICLE_NOT_FOUND';throw e;}
+    await recordAdminAudit({adminUserId,action:'vehicle_activation_changed',entityType:'vehicle',entityId:vehicleId,metadata:{to:next}});
+    return mapManagedVehicle(q.rows[0]);
+  }
+
+  async function listAdminPayments({q,status,limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...(memory.payments?.values()||[])];
+      if(q){const s=String(q).toLowerCase();rows=rows.filter(x=>[x.id,x.bookingId,x.provider,x.providerReference].some(v=>String(v||'').toLowerCase().includes(s)));}
+      if(status)rows=rows.filter(x=>x.status===status);
+      rows.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return {payments:rows.slice(page.offset,page.offset+page.limit),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['1=1'],params=[];
+    if(q&&String(q).trim()){params.push('%'+String(q).trim()+'%');clauses.push(`(p.id::text ilike ${params.length} or p.booking_id::text ilike ${params.length} or coalesce(p.provider_reference,'') ilike ${params.length} or c.full_name ilike ${params.length} or coalesce(ven.business_name,'') ilike ${params.length})`);}
+    if(status){params.push(status);clauses.push(`p.status=${params.length}`);}
+    const count=await pool.query(`select count(*)::int total from payments p join bookings b on b.id=p.booking_id join customers c on c.id=b.customer_id left join vendors ven on ven.id=b.vendor_id where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(`
+      select p.*,b.customer_id,c.full_name customer_name,c.email customer_email,b.vendor_id,ven.business_name vendor_name
+      from payments p join bookings b on b.id=p.booking_id join customers c on c.id=b.customer_id left join vendors ven on ven.id=b.vendor_id
+      where ${clauses.join(' and ')} order by p.created_at desc limit ${params.length+1} offset ${params.length+2}`,[...params,page.limit,page.offset]);
+    return {payments:data.rows.map(p=>({id:String(p.id),bookingId:String(p.booking_id),customer:{id:String(p.customer_id),name:p.customer_name,email:p.customer_email||null},vendor:p.vendor_id?{id:String(p.vendor_id),name:p.vendor_name||null}:null,amount:Number(p.amount_paise||0)/100,currency:p.currency,status:p.status,provider:p.provider,providerOrderId:p.provider_order_id||null,providerPaymentId:p.provider_payment_id||null,providerReference:p.provider_reference||null,createdAt:iso(p.created_at),updatedAt:iso(p.updated_at)})),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function listAdminRefunds({status,limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase)return {refunds:[],pagination:adminPagination(page.limit,page.offset,0)};
+    const clauses=[`ft.transaction_type='refund'`],params=[];
+    if(status){params.push(status);clauses.push(`ft.status=${params.length}`);}
+    const count=await pool.query(`select count(*)::int total from financial_transactions ft where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(`
+      select ft.*,b.id booking_id,c.id customer_id,c.full_name customer_name,ven.id vendor_id,ven.business_name vendor_name
+      from financial_transactions ft join bookings b on b.id=ft.booking_id left join customers c on c.id=ft.customer_id left join vendors ven on ven.id=ft.vendor_id
+      where ${clauses.join(' and ')} order by ft.created_at desc limit ${params.length+1} offset ${params.length+2}`,[...params,page.limit,page.offset]);
+    return {refunds:data.rows.map(x=>({id:String(x.id),bookingId:String(x.booking_id),customer:x.customer_id?{id:String(x.customer_id),name:x.customer_name}:null,vendor:x.vendor_id?{id:String(x.vendor_id),name:x.vendor_name}:null,amount:Number(x.amount_paise||0)/100,status:x.status,provider:x.provider,providerTransactionId:x.provider_transaction_id||null,idempotencyKey:x.idempotency_key||null,failureReason:x.failure_reason||null,createdAt:iso(x.created_at),updatedAt:iso(x.updated_at),completedAt:iso(x.completed_at),refundedAt:iso(x.refunded_at)})),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function listAdminSecurityDeposits({status,q,limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...(memory.securityDeposits?.values()||[])];
+      if(status)rows=rows.filter(x=>x.status===status);
+      if(q){const s=String(q).toLowerCase();rows=rows.filter(x=>[x.bookingId,x.customerId,x.vendorId].some(v=>String(v||'').toLowerCase().includes(s)));}
+      return {securityDeposits:rows.slice(page.offset,page.offset+page.limit).map(x=>({...x,originalAmount:Number(x.originalAmount||0),refundableAmount:Number(x.refundableAmount||0)})),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['1=1'],params=[];
+    if(status){params.push(status);clauses.push(`sd.status=${params.length}`);}
+    if(q&&String(q).trim()){params.push('%'+String(q).trim()+'%');clauses.push(`(sd.booking_id::text ilike ${params.length} or c.full_name ilike ${params.length} or coalesce(v.business_name,'') ilike ${params.length})`);}
+    const count=await pool.query(`select count(*)::int total from security_deposits sd join customers c on c.id=sd.customer_id left join vendors v on v.id=sd.vendor_id where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(`
+      select sd.*,c.full_name customer_name,c.email customer_email,v.business_name vendor_name
+      from security_deposits sd join customers c on c.id=sd.customer_id left join vendors v on v.id=sd.vendor_id
+      where ${clauses.join(' and ')} order by sd.updated_at desc limit ${params.length+1} offset ${params.length+2}`,[...params,page.limit,page.offset]);
+    return {securityDeposits:data.rows.map(x=>({id:String(x.id),bookingId:String(x.booking_id),customer:{id:String(x.customer_id),name:x.customer_name,email:x.customer_email||null},vendor:x.vendor_id?{id:String(x.vendor_id),name:x.vendor_name||null}:null,originalAmount:Number(x.original_amount_paise||0)/100,refundableAmount:Number(x.refundable_amount_paise||0)/100,deduction:Number(x.approved_deduction_paise||0)/100,status:x.status,provider:x.provider||null,providerTransactionId:x.provider_transaction_id||null,refundProviderReference:x.refund_provider_reference||null,deductionReason:x.deduction_reason||null,evidenceReference:x.evidence_reference||null,disputeStatus:x.dispute_status||null,updatedAt:iso(x.updated_at),refundedAt:iso(x.refunded_at)})),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function listAdminReviews({q,rating,moderationStatus,limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...memory.reviews.values()];
+      if(rating)rows=rows.filter(x=>Number(x.rating)===Number(rating));
+      if(moderationStatus)rows=rows.filter(x=>(x.moderationStatus||'visible')===moderationStatus);
+      if(q){const s=String(q).toLowerCase();rows=rows.filter(x=>[x.id,x.bookingId,x.reviewerUserId,x.revieweeUserId,x.vendorId,x.vehicleId,x.comment].some(v=>String(v||'').toLowerCase().includes(s)));}
+      rows.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return {reviews:rows.slice(page.offset,page.offset+page.limit),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['1=1'],params=[];
+    if(rating){params.push(Number(rating));clauses.push(`r.rating=${params.length}`);}
+    if(moderationStatus){params.push(moderationStatus);clauses.push(`r.moderation_status=${params.length}`);}
+    if(q&&String(q).trim()){params.push('%'+String(q).trim()+'%');clauses.push(`(r.id::text ilike ${params.length} or r.booking_id::text ilike ${params.length} or reviewer.full_name ilike ${params.length} or reviewee.full_name ilike ${params.length} or coalesce(v.name,'') ilike ${params.length} or coalesce(ven.business_name,'') ilike ${params.length} or coalesce(r.comment,'') ilike ${params.length})`);}
+    const count=await pool.query(`select count(*)::int total from reviews r join customers reviewer on reviewer.id=r.reviewer_user_id join customers reviewee on reviewee.id=r.reviewee_user_id join bookings b on b.id=r.booking_id join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=coalesce(b.vendor_id,v.owner_id) where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(reviewSelect+' where '+clauses.join(' and ')+' order by r.created_at desc limit 
+
+  return {health,close,recordAdminAudit,getAdminDashboard,listAdminBookings,getAdminBooking,listAdminUsers,getAdminUser,updateAdminUserStatus,listAdminVendors,getAdminVendor,updateAdminVendorStatus,listAdminVehicles,getAdminVehicle,updateAdminVehicleStatus,listAdminPayments,listAdminRefunds,listAdminSecurityDeposits,listAdminReviews,moderateAdminReview,listAdminDeliveries,listAdminAuditLogs,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
+}
++(params.length+1)+' offset 
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
+}
++(params.length+2),[...params,page.limit,page.offset]);
+    return {reviews:data.rows.map(mapReview),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function moderateAdminReview({adminUserId,reviewId,status,reason}) {
+    const actor=await findCustomerById(adminUserId);
+    if(!ADMIN_MUTATION_ROLES.has(actor?.role)){const e=new Error('Admin access is required.');e.code='FORBIDDEN';throw e;}
+    const next=String(status||'').toLowerCase(); if(!['visible','hidden'].includes(next)){const e=new Error('Unsupported moderation status.');e.code='INVALID_MODERATION_STATUS';throw e;}
+    const normalizedReason=String(reason||'').trim().slice(0,500);
+    if(next==='hidden'&&normalizedReason.length<3){const e=new Error('A moderation reason is required when hiding a review.');e.code='MODERATION_REASON_REQUIRED';throw e;}
+    if(!useDatabase){
+      const review=memory.reviews.get(String(reviewId));if(!review){const e=new Error('Review not found.');e.code='REVIEW_NOT_FOUND';throw e;}
+      const from=review.moderationStatus||'visible';review.moderationStatus=next;review.moderationReason=normalizedReason||null;review.moderatedBy=String(adminUserId);review.moderatedAt=new Date().toISOString();review.updatedAt=review.moderatedAt;
+      await recordAdminAudit({adminUserId,action:'review_moderation',entityType:'review',entityId:reviewId,metadata:{from,to:next,reason:normalizedReason||null}});
+      return review;
+    }
+    const q=await pool.query('update reviews set moderation_status=$2,moderation_reason=$3,moderated_by=$4,moderated_at=now(),updated_at=now() where id=$1 returning *',[reviewId,next,normalizedReason||null,adminUserId]);
+    if(!q.rows[0]){const e=new Error('Review not found.');e.code='REVIEW_NOT_FOUND';throw e;}
+    await recordAdminAudit({adminUserId,action:'review_moderation',entityType:'review',entityId:reviewId,metadata:{from:null,to:next,reason:normalizedReason||null}});
+    return mapReview(q.rows[0]);
+  }
+
+  async function listAdminDeliveries({q,status='active',limit=50,offset=0}={}) {
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...(memory.trackingSessions?.values()||[])];
+      if(status)rows=rows.filter(x=>x.status===status);
+      if(q){const s=String(q).toLowerCase();rows=rows.filter(x=>[x.bookingId,x.vendorId].some(v=>String(v||'').toLowerCase().includes(s)));}
+      rows.sort((a,b)=>new Date(b.startedAt)-new Date(a.startedAt));
+      return {deliveries:rows.slice(page.offset,page.offset+page.limit).map(x=>({...x,isStale:x.status==='active'&&x.lastLocationAt?Date.now()-new Date(x.lastLocationAt).getTime()>300000:true})),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['ts.status=$1'],params=[status||'active'];
+    if(q&&String(q).trim()){params.push('%'+String(q).trim()+'%');clauses.push(`(ts.booking_id::text ilike ${params.length} or c.full_name ilike ${params.length} or coalesce(v.business_name,'') ilike ${params.length})`);}
+    const count=await pool.query(`select count(*)::int total from tracking_sessions ts join bookings b on b.id=ts.booking_id join customers c on c.id=b.customer_id join vehicles ve on ve.id=b.vehicle_id left join vendors v on v.id=b.vendor_id where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(`
+      select ts.*,b.customer_id,c.full_name customer_name,b.vehicle_id,ve.name vehicle_name,b.vendor_id,v.business_name vendor_name,b.delivery_status
+      from tracking_sessions ts join bookings b on b.id=ts.booking_id join customers c on c.id=b.customer_id join vehicles ve on ve.id=b.vehicle_id left join vendors v on v.id=b.vendor_id
+      where ${clauses.join(' and ')} order by ts.started_at desc limit ${params.length+1} offset ${params.length+2}`,[...params,page.limit,page.offset]);
+    return {deliveries:data.rows.map(x=>({trackingSessionId:String(x.id),bookingId:String(x.booking_id),customer:{id:String(x.customer_id),name:x.customer_name},vendor:x.vendor_id?{id:String(x.vendor_id),name:x.vendor_name}:null,vehicle:{id:String(x.vehicle_id),name:x.vehicle_name},deliveryStatus:x.delivery_status||null,status:x.status,lastLocation:{latitude:x.last_latitude==null?null:Number(x.last_latitude),longitude:x.last_longitude==null?null:Number(x.last_longitude),accuracyMeters:x.last_accuracy_meters==null?null:Number(x.last_accuracy_meters),timestamp:iso(x.last_location_at)},etaMinutes:x.last_route_duration_seconds==null?null:Math.max(1,Math.round(Number(x.last_route_duration_seconds)/60)),lastLocationAt:iso(x.last_location_at),isStale:x.status==='active'&&(!x.last_location_at || Date.now()-new Date(x.last_location_at).getTime()>300000),startedAt:iso(x.started_at),expiresAt:iso(x.expires_at)})),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
+  }
+
+  async function listAdminAuditLogs({adminUserId,action,entityType,limit=50,offset=0}={}) {
+    const actor=await findCustomerById(adminUserId);
+    if(!ADMIN_OPERATOR_ROLES.has(actor?.role)){const e=new Error('Support staff access is required.');e.code='FORBIDDEN';throw e;}
+    const page=adminPage(limit,offset);
+    if(!useDatabase){
+      let rows=[...memory.auditLogs];
+      if(action)rows=rows.filter(x=>x.action===action);
+      if(entityType)rows=rows.filter(x=>x.entityType===entityType);
+      rows.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return {auditLogs:rows.slice(page.offset,page.offset+page.limit),pagination:adminPagination(page.limit,page.offset,rows.length)};
+    }
+    const clauses=['1=1'],params=[];
+    if(action){params.push(action);clauses.push(`action=${params.length}`);}
+    if(entityType){params.push(entityType);clauses.push(`entity_type=${params.length}`);}
+    const count=await pool.query(`select count(*)::int total from admin_audit_logs where ${clauses.join(' and ')}`,params);
+    const data=await pool.query(`select id,admin_user_id,action,entity_type,entity_id,metadata,created_at from admin_audit_logs where ${clauses.join(' and ')} order by created_at desc limit ${params.length+1} offset ${params.length+2}`,[...params,page.limit,page.offset]);
+    return {auditLogs:data.rows.map(x=>({id:String(x.id),adminUserId:String(x.admin_user_id),action:x.action,entityType:x.entity_type,entityId:x.entity_id,metadata:x.metadata||{},createdAt:iso(x.created_at)})),pagination:adminPagination(page.limit,page.offset,count.rows[0]?.total)};
   }
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
