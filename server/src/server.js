@@ -8,7 +8,6 @@ import { z } from 'zod';
 import { createRepository } from './repository.js';
 import { createAuth } from './auth.js';
 import { createPaymentService } from './payments.js';
-import { calculateCancellation } from './lifecycle.js';
 
 const fleet = [];
 
@@ -822,7 +821,6 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
   const parsed=z.object({reason:z.string().trim().max(500).optional()}).safeParse(req.body||{});
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid cancellation request.'}});
   try {
-    const preview=await repository.getCancellationPreview(req.params.id,req.user.id);
     const result=await repository.cancelBooking(req.params.id,req.user.id,{reason:parsed.data.reason||'customer_cancelled'});
     const refund=result.calculation.totalRefund>0 ? await requestRefundForBooking(req.params.id) : {status:'not_applicable'};
     const latest=await repository.getBooking(req.params.id,req.user.id);
