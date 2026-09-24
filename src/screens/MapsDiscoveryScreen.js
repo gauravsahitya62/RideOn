@@ -2,9 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { rideOnApi } from '../services/api';
+import Constants from 'expo-constants';\nimport { rideOnApi } from '../services/api';
 
-const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',white:'#FFFFFF',line:'#E8EAF0',green:'#258565'};
+const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',white:'#FFFFFF',line:'#E8EAF0',green:'#258565'};\nconst isExpoGo=Constants.appOwnership==='expo';
 
 const DEFAULT_REGION={latitude:26.9124,longitude:75.7873,latitudeDelta:0.16,longitudeDelta:0.16};
 const pointFromLocation=(location)=>location?.coords ? {latitude:Number(location.coords.latitude),longitude:Number(location.coords.longitude)} : null;
@@ -105,7 +105,7 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
     <View style={styles.top}><TouchableOpacity onPress={onBack} style={styles.back}><Text style={styles.backGlyph}>‹</Text></TouchableOpacity><View><Text style={styles.kicker}>RIDEON MAP</Text><Text style={styles.title}>Vendors in {city}</Text></View><View style={{width:42}}/></View>
     <View style={styles.mapWrap}>
       {loading?<View style={styles.mapState}><ActivityIndicator color={C.orange}/><Text style={styles.muted}>Loading vendor locations…</Text></View>:
-      <MapView provider={Platform.OS==='android'?PROVIDER_GOOGLE:undefined} style={StyleSheet.absoluteFill} initialRegion={region} region={region} showsUserLocation={Boolean(userPoint)} showsMyLocationButton={false} onPress={event=>{const c=event.nativeEvent.coordinate;setDeliveryPoint(c);if(!deliveryAddress)setDeliveryAddress('Map selected location');}}>
+      <MapView provider={!isExpoGo && (Platform.OS==='android'||Platform.OS==='ios') ? PROVIDER_GOOGLE : undefined} style={StyleSheet.absoluteFill} initialRegion={region} region={region} showsUserLocation={Boolean(userPoint)} showsMyLocationButton={false} onPress={event=>{const c=event.nativeEvent.coordinate;setDeliveryPoint(c);if(!deliveryAddress)setDeliveryAddress('Map selected location');}}>
         {vendors.map(v=><Marker key={v.vendorId} coordinate={{latitude:Number(v.latitude),longitude:Number(v.longitude)}} onPress={()=>loadVendorVehicles(v)}>
           <View style={[styles.marker,selectedVendor?.vendorId===v.vendorId&&styles.markerSelected]}><Text style={styles.markerText}>⌖</Text></View>
         </Marker>)}
