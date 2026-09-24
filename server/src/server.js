@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import { createServer } from 'node:http';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -10,6 +11,7 @@ import { createAuth } from './auth.js';
 import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
+import { createTrackingRealtimeServer } from './trackingRealtime.js';
 
 const fleet = [];
 
@@ -366,6 +368,19 @@ const supabaseRequireAuth = async (req, res, next) => {
   }
 };
 
+async function resolveTrackingUser(token) {
+  if(!token)return null;
+  try{
+    const user=await verifySupabaseAccessToken(token);
+    if(!user?.id||!user?.email)return null;
+    const metadata=user.user_metadata||{};
+    let identity=await repository.findCustomerBySupabaseUserId(user.id);
+    if(!identity)identity=await repository.findCustomerByEmail(user.email);
+    if(!identity?.id)return null;
+    return {id:identity.id,name:identity.fullName,role:identity.role,supabaseUserId:user.id,email:identity.email||user.email};
+  }catch{return null;}
+}
+
 const requireRole = (...roles) => (req, res, next) => {
   if (!req.user || !roles.includes(req.user.role)) {
     return res.status(403).json({ error:{ code:'FORBIDDEN', message:'You do not have access to this resource.' } });
@@ -682,6 +697,88 @@ app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async
   const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
   if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
   res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+});
+
+const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/start', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const session=await repository.startDelivery(req.vendor.id,req.params.id);
+    res.json({tracking:{session,status:'in_delivery',active:true}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,DELIVERY_START_NOT_ALLOWED:409,DELIVERY_LOCATION_REQUIRED:409,PAYMENT_REQUIRED_FOR_DELIVERY:409,DELIVERY_ALREADY_ACTIVE:409};
+    const messages={DELIVERY_START_NOT_ALLOWED:'Delivery can only start after the booking is confirmed.',DELIVERY_LOCATION_REQUIRED:'A valid delivery address and map location are required before delivery can start.',PAYMENT_REQUIRED_FOR_DELIVERY:'Payment must be confirmed before delivery can start.',DELIVERY_ALREADY_ACTIVE:'Delivery tracking is already active.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:messages[error?.code]||'We could not start delivery right now. Please try again.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/location', supabaseRequireAuth, requireVendor, trackingUpdateRateLimit, async (req,res)=>{
+  const parsed=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location. Please try again.'}});
+  try{
+    const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    const before=await repository.getActiveTrackingSession(req.vendor.id,req.params.id);
+    const session=await repository.updateDeliveryLocation(req.vendor.id,req.params.id,parsed.data);
+    let route=null;
+    const movedMeters=before?.lastLatitude!=null?Math.sqrt(Math.pow((parsed.data.latitude-before.lastLatitude)*111320,2)+Math.pow((parsed.data.longitude-before.lastLongitude)*111320*Math.cos(parsed.data.latitude*Math.PI/180),2)):Infinity;
+    const routeDue=!before?.lastRouteAt||Date.now()-new Date(before.lastRouteAt).getTime()>=Math.max(30,Number(process.env.TRACKING_ROUTE_REFRESH_SECONDS||60))*1000||movedMeters>=Math.max(100,Number(process.env.TRACKING_ROUTE_REFRESH_METERS||300));
+    if(routeDue&&booking.deliveryLatitude!=null&&booking.deliveryLongitude!=null){
+      try{
+        const calculated=await getDrivingRoute({latitude:parsed.data.latitude,longitude:parsed.data.longitude},{latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude});
+        route={distanceMeters:calculated.distanceMeters,durationSeconds:calculated.durationSeconds,estimatedDeliveryMinutes:Math.max(1,Math.round(calculated.durationSeconds/60)),provider:calculated.provider,encodedPolyline:calculated.encodedPolyline||null};
+        await repository.updateTrackingRoute(req.vendor.id,req.params.id,route);
+      }catch(routeError){
+        if(routeError?.code!=='ROUTE_PROVIDER_NOT_CONFIGURED'&&routeError?.code!=='ROUTE_PROVIDER_UNAVAILABLE'&&routeError?.code!=='ROUTE_PROVIDER_TIMEOUT'&&routeError?.code!=='ROUTE_NOT_FOUND')throw routeError;
+      }
+    }
+    const latest=await repository.getActiveTrackingSession(req.vendor.id,req.params.id);
+    const payload={type:'tracking.update',tracking:{session:latest||session,location:{latitude:parsed.data.latitude,longitude:parsed.data.longitude,accuracyMeters:parsed.data.accuracyMeters||null,updatedAt:parsed.data.recordedAt||new Date().toISOString()},route}};
+    trackingRealtime.broadcast(req.params.id,payload);
+    res.json({tracking:payload.tracking});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,STALE_LOCATION_UPDATE:409,INVALID_DELIVERY_LOCATION:400,INVALID_DELIVERY_TIMESTAMP:400};
+    const messages={TRACKING_NOT_ACTIVE:'Live delivery tracking is not active.',TRACKING_SESSION_EXPIRED:'This delivery tracking session has expired.',STALE_LOCATION_UPDATE:'That GPS update is older than the last accepted location.',INVALID_DELIVERY_LOCATION:'We could not use that GPS location. Please try again.',INVALID_DELIVERY_TIMESTAMP:'That GPS timestamp is invalid.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_LOCATION_UPDATE_FAILED',message:messages[error?.code]||'We could not update the delivery location right now. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/complete', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({latitude:z.coerce.number().min(-90).max(90).nullable().optional(),longitude:z.coerce.number().min(-180).max(180).nullable().optional()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'The final delivery location is invalid.'}});
+  try{
+    const result=await repository.completeDelivery(req.vendor.id,req.params.id,parsed.data);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,DELIVERY_COMPLETION_NOT_ALLOWED:409,INVALID_DELIVERY_LOCATION:400};
+    const messages={TRACKING_NOT_ACTIVE:'Live delivery tracking is not active.',TRACKING_SESSION_EXPIRED:'This delivery session has expired.',DELIVERY_COMPLETION_NOT_ALLOWED:'Delivery cannot be completed in the current booking state.',INVALID_DELIVERY_LOCATION:'The final delivery location is invalid.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:messages[error?.code]||'We could not mark the vehicle delivered right now. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/abort', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const result=await repository.abortDelivery(req.vendor.id,req.params.id);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.stopped',tracking:{session:result.session,status:'aborted',active:false}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'aborted',active:false}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_ABORT_FAILED',message:error?.code==='TRACKING_NOT_ACTIVE'?'Live delivery tracking is not active.':'We could not stop delivery tracking right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/bookings/:id/tracking', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    const result=await repository.getTrackingForCustomer(req.user.id,req.params.id);
+    const staleThresholdSeconds=Math.max(30,Number(process.env.TRACKING_STALE_SECONDS||90));
+    const last=result.session?.lastLocationAt?new Date(result.session.lastLocationAt).getTime():0;
+    const stale=!last||Date.now()-last>staleThresholdSeconds*1000;
+    const active=Boolean(result.session?.status==='active'&&result.booking.deliveryStatus==='in_delivery'&&!stale);
+    res.json({tracking:{active,stale,staleThresholdSeconds,session:result.session,booking:publicBooking(result.booking)}});
+  }catch(error){
+    res.status(error?.code==='BOOKING_NOT_FOUND'?404:500).json({error:{code:error?.code||'TRACKING_UNAVAILABLE',message:error?.code==='BOOKING_NOT_FOUND'?'Booking not found.':'We could not load live delivery tracking right now. Please retry.'}});
+  }
 });
 
 app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
@@ -1102,7 +1199,9 @@ app.use((err, req, res, _next) => {
 });
 
 const port = Number(process.env.PORT) || 4000;
+const httpServer=createServer(app);
+const trackingRealtime=createTrackingRealtimeServer({httpServer,repository,authenticate:resolveTrackingUser});
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(port, () => console.log(`RideOn API listening on :${port}`));
+  httpServer.listen(port, () => console.log(`RideOn API listening on :${port}`));
 }
-export { app, repository };
+export { app, repository, httpServer, trackingRealtime };
