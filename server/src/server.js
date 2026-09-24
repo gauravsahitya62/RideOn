@@ -1082,8 +1082,10 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
     accountType:z.enum(['customer','vendor']),
     fullName:z.string().trim().min(2).max(100),
     phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
+    serviceCity:z.string().trim().min(2).max(100).optional(),
   }).superRefine((value,ctx)=>{
     if(value.accountType==='vendor' && !value.phone) ctx.addIssue({code:z.ZodIssueCode.custom,path:['phone'],message:'Vendor phone number is required.'});
+    if(value.accountType==='vendor' && !value.serviceCity) ctx.addIssue({code:z.ZodIssueCode.custom,path:['serviceCity'],message:'Vendor service city is required.'});
   }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid account type and registration details.'}});
   try{
@@ -1096,7 +1098,7 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
     if(parsed.data.accountType==='vendor'){
       vendor=await repository.ensureVendorForCustomer(customer.id,{
         businessName:parsed.data.fullName,contactName:parsed.data.fullName,
-        phone:parsed.data.phone,email:supa.email,serviceCity:'Udaipur'
+        phone:parsed.data.phone,email:supa.email,serviceCity:parsed.data.serviceCity
       });
       if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
     }
