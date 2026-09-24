@@ -1618,7 +1618,6 @@ export function createRepository({ databaseUrl, fleet }) {
     for(const row of summaryRows.rows){const rating=Number(row.rating),count=Number(row.count);if(counts[rating]!==undefined){counts[rating]=count;total+=count;weighted+=rating*count;}}
     const recent=await pool.query(reviewSelect+' where '+filter+' order by r.created_at desc limit $'+(params.length+1)+' offset $'+(params.length+2),[...params,safeLimit,safeOffset]);
 }
-+(params.length+2),[...params,safeLimit,safeOffset]);
     return {summary:{averageRating:total?Number((weighted/total).toFixed(2)):0,totalReviewCount:total,ratingDistribution:counts},reviews:recent.rows.map(mapReview)};
   }
 
