@@ -381,7 +381,10 @@ async function resolveTrackingUser(token) {
     const metadata=user.user_metadata||{};
     let identity=await repository.findCustomerBySupabaseUserId(user.id);
     if(!identity)identity=await repository.findCustomerByEmail(user.email);
-    if(!identity?.id)return null;
+    if(!identity?.id){
+      identity=await repository.createOrLinkCustomerFromSupabase({supabaseUserId:user.id,email:user.email,fullName:metadata.full_name||metadata.name||user.email.split('@')[0],phone:metadata.phone||undefined,role:'customer'});
+    }
+    if(!identity?.id||!['customer','vendor'].includes(identity.role))return null;
     return {id:identity.id,name:identity.fullName,role:identity.role,supabaseUserId:user.id,email:identity.email||user.email};
   }catch{return null;}
 }
