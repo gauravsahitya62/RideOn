@@ -68,7 +68,7 @@ export function createPaymentService({
     const error = new Error('Verified Paytm checkout integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error;
   }
 
-  async function verifyPayment() { if (selectedProvider === 'mock') return { verified:true }; const error=new Error('Verified Paytm payment-status integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
+  async function verifyPayment({ providerReference } = {}) { if (selectedProvider === 'mock') return { verified:true, providerReference:providerReference ? String(providerReference) : undefined }; const error=new Error('Verified Paytm payment-status integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
   async function refundPayment() { if (selectedProvider === 'mock') return { accepted:true }; const error=new Error('Verified Paytm refund integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
   async function createVendorSettlement() { if (selectedProvider === 'mock') return { accepted:true }; const error=new Error('Verified Paytm marketplace/vendor settlement integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
   async function getSettlementStatus() { if (selectedProvider === 'mock') return { status:'processing' }; const error=new Error('Verified Paytm settlement-status integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }

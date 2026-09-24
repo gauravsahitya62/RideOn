@@ -833,23 +833,38 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
   } catch(error) {
     if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_NOT_CONFIGURED',message:'Paytm payments are not configured on the RideOn server.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
+    if(error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Paytm checkout is not enabled for this merchant yet. No payment has been marked successful.'}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
   }
 });
 
 app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, async (req,res) => {
-  const parsed=z.object({ bookingId:z.string().uuid() }).safeParse(req.body);
-  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'bookingId is required.'}});
-  const payment=await repository.findPaymentById(req.params.id, req.user.id);
+  const parsed=z.object({ bookingId:z.string().uuid(), transactionReference:z.string().trim().min(4).max(128).optional() }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid bookingId and transaction reference.'}});
+  let payment=await repository.findPaymentById(req.params.id, req.user.id);
   if(!payment || String(payment.bookingId)!==String(parsed.data.bookingId)) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
-  if(payment.status==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
+  if(String(payment.status).toLowerCase()==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
+  if(parsed.data.transactionReference){
+    try{payment=await repository.submitPaymentReference({paymentId:req.params.id,bookingId:parsed.data.bookingId,customerId:req.user.id,providerReference:parsed.data.transactionReference});}
+    catch(error){
+      if(error.code==='PAYMENT_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Payment not found.'}});
+      if(error.code==='PAYMENT_VERIFICATION_FAILED') return res.status(409).json({error:{code:error.code,message:'The transaction reference could not be recorded.'}});
+      throw error;
+    }
+  }
   try {
-    const verified=await payments.verifyPayment({ providerOrderId:payment.providerOrderId, providerPaymentId:payment.providerPaymentId, amountPaise:payment.amountPaise });
-    if(!verified?.verified) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'Provider has not confirmed this payment.'}});
-    return res.json({payment,verification:'verified',bookingPaymentStatus:'paid'});
-  } catch(error) {
-    if(error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Paytm verification is not enabled for this merchant yet.'}});
+    const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
+    if(!verified?.verified) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The provider has not authoritatively confirmed this payment yet.'}});
+    const providerReference=String(verified.providerReference||payment.providerReference||payment.providerPaymentId||'').trim();
+    if(!providerReference) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The payment is awaiting an authoritative provider reference.'}});
+    const applied=await repository.applyPaymentEvent({eventId:`verify:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'paid'});
+    if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
+    const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
+    const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
+    return res.json({payment:latestPayment,verification:'verified',bookingPaymentStatus:latestBooking?.paymentStatus||'pending'});
+  }catch(error){
+    if(error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Paytm verification is not enabled for this merchant yet. No payment has been marked successful.'}});
     throw error;
   }
 });
