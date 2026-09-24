@@ -39,7 +39,7 @@ app.use((req, res, next) => {
   });
   next();
 });
-app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
+// Render terminates TLS and forwards requests through its proxy. Trust exactly one proxy hop in production so\n// express-rate-limit can safely resolve the client address from X-Forwarded-For.\napp.set('trust proxy', process.env.NODE_ENV === 'production' ? 1 : (process.env.TRUST_PROXY === 'true' ? 1 : false));
 app.use(helmet());
 app.disable('x-powered-by');
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || '*')
