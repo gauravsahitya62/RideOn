@@ -171,6 +171,6 @@ export const rideOnApi = {
     const paymentId = result?.booking?.paymentId || result?.booking?.payment?.id;
     return paymentId ? request(`/api/v1/payments/${encode(paymentId)}`) : null;
   },
-  verifyPayment: (id,payload) => request(`/api/v1/payments/${encode(id)}/verify`, { method:'POST', body:JSON.stringify(payload) }),
+  verifyPayment: (id,payload = {}) => request(`/api/v1/payments/${encode(id)}/verify`, { method:'POST', body:JSON.stringify({ bookingId: payload.bookingId }) }),
   listBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/bookings${query ? `?${query}` : ''}`); },
 };
