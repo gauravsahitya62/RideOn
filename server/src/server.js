@@ -349,13 +349,28 @@ app.get('/health', async (_req, res) => {
   });
 });
 
+app.get('/api/v1/locations', async (_req, res) => {
+  try {
+    const locations = await repository.listLocations();
+    res.json({ data: locations, locations, meta: { count: locations.length } });
+  } catch (error) {
+    console.error(JSON.stringify({ level:'error', event:'locations_failed', requestId:_req.requestId, code:error?.code || 'LOCATIONS_FAILED', message:error?.message }));
+    res.status(503).json({ error:{ code:'LOCATIONS_UNAVAILABLE', message:'Available RideOn locations are temporarily unavailable. Please retry.' } });
+  }
+});
+
 app.get('/api/v1/vehicles', async (req, res) => {
-  const type = req.query.type?.toString().toLowerCase();
-  const city = req.query.city?.toString();
-  const q = req.query.q?.toString();
-  const vehicles = await repository.listVehicles({ type, city, q });
-  const data = vehicles.map(mobileVehicle);
-  res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
+  try {
+    const type = req.query.type?.toString().toLowerCase();
+    const city = req.query.city?.toString().trim();
+    const q = req.query.q?.toString().trim();
+    const vehicles = await repository.listVehicles({ type, city, q });
+    const data = vehicles.map(mobileVehicle);
+    res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
+  } catch (error) {
+    console.error(JSON.stringify({ level:'error', event:'vehicles_list_failed', requestId:req.requestId, code:error?.code || 'VEHICLES_LIST_FAILED', message:error?.message }));
+    res.status(503).json({ error:{ code:'VEHICLES_UNAVAILABLE', message:'Vehicle inventory is temporarily unavailable. Please retry.' } });
+  }
 });
 
 app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
@@ -695,10 +710,16 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
 });
 
 app.get('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
-  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
-  const offset = Math.max(0, Number(req.query.offset) || 0);
-  const data = await repository.listCustomerBookings({ customerId: req.user.id, limit, offset });
-  res.json({ data: data.map(publicBooking), bookings: data.map(publicBooking), pagination: { limit, offset, count: data.length } });
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const data = await repository.listCustomerBookings({ customerId: req.user.id, limit, offset });
+    const mapped = data.map(publicBooking);
+    res.json({ data: mapped, bookings: mapped, pagination: { limit, offset, count: data.length } });
+  } catch (error) {
+    console.error(JSON.stringify({ level:'error', event:'customer_bookings_failed', requestId:req.requestId, code:error?.code || 'BOOKINGS_LIST_FAILED', message:error?.message }));
+    res.status(503).json({ error:{ code:'BOOKINGS_UNAVAILABLE', message:'Your bookings are temporarily unavailable. Please retry.' } });
+  }
 });
 
 app.get('/api/v1/bookings/:id', supabaseRequireAuth, requireCustomer, async (req, res) => {
