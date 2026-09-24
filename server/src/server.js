@@ -359,13 +359,19 @@ const supabaseRequireAuth = async (req, res, next) => {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
 
+    // Re-read the canonical database identity after any Supabase linking so
+    // account status/role changes made by Ops are authoritative immediately.
+    const currentIdentity = await repository.findCustomerById(identity.id);
+    if (!currentIdentity?.id || !['customer','vendor','support','admin'].includes(currentIdentity.role)) {
+      return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
+    }
     req.user = {
-      id:identity.id,
-      name:identity.fullName,
-      role:identity.role,
-      accountStatus:identity.accountStatus || 'active',
+      id:currentIdentity.id,
+      name:currentIdentity.fullName,
+      role:currentIdentity.role,
+      accountStatus:currentIdentity.accountStatus || 'active',
       supabaseUserId:user.id,
-      email:identity.email || user.email,
+      email:currentIdentity.email || user.email,
     };
     if (['customer','vendor'].includes(req.user.role) && req.user.accountStatus === 'suspended') {
       return res.status(403).json({error:{code:'ACCOUNT_SUSPENDED',message:'This RideOn account is suspended.'}});
