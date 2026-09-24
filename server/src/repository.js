@@ -1497,7 +1497,7 @@ export function createRepository({ databaseUrl, fleet }) {
     revieweeUserId: String(row.reviewee_user_id ?? row.revieweeUserId),
     reviewType: row.review_type ?? row.reviewType, rating: Number(row.rating),
     comment: row.comment || null, createdAt: iso(row.created_at ?? row.createdAt), updatedAt: iso(row.updated_at ?? row.updatedAt),
-    reviewerName: row.reviewer_name || row.reviewerName || null, revieweeName: row.reviewee_name || row.revieweeName || null,
+    reviewerName: row.reviewType==='customer_to_vendor' || row.review_type==='customer_to_vendor' ? 'Verified customer' : 'Verified RideOn vendor', revieweeName: row.reviewee_name || row.revieweeName || null,
     vehicleId: row.vehicle_id == null ? null : String(row.vehicle_id), vehicleName: row.vehicle_name || null,
     vendorId: row.resolved_vendor_id == null ? (row.vendor_id == null ? null : String(row.vendor_id)) : String(row.resolved_vendor_id),
     vendorName: row.vendor_name || null,
