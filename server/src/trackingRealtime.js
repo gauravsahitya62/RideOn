@@ -30,7 +30,7 @@ export function createTrackingRealtimeServer({httpServer,authenticate,repository
   const broadcast=(bookingId,payload)=>{const set=subscribers.get(String(bookingId));if(!set)return;const frame=frameText(payload);for(const client of [...set]){try{client.socket.write(frame);}catch{unsubscribe(client);}}};
   httpServer.on('upgrade',async(req,socket)=>{
     try{
-      const url=new URL(req.url||'/','http://localhost');if(!url.pathname.startsWith('/ws/tracking/')){socket.destroy();return;}
+      const url=new URL(req.url||'/','ws://rideon.invalid');if(!url.pathname.startsWith('/ws/tracking/')){socket.destroy();return;}
       const bookingId=decodeURIComponent(url.pathname.slice('/ws/tracking/'.length));if(!bookingId){socket.destroy();return;}
       const protocols=String(req.headers['sec-websocket-protocol']||'').split(',').map(x=>x.trim());const authProtocol=protocols.find(x=>x.startsWith('rideon-auth.'));const token=authProtocol?.slice('rideon-auth.'.length)||'';
       if(!token){socket.write('HTTP/1.1 401 Unauthorized\\r\\nConnection: close\\r\\n\\r\\n');socket.destroy();return;}
