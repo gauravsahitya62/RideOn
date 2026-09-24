@@ -30,6 +30,7 @@ export default function AuthScreen({onAuthenticated}) {
   const [accountType,setAccountType]=useState('customer');
   const [name,setName]=useState('');
   const [phone,setPhone]=useState('');
+  const [serviceCity,setServiceCity]=useState('');
   const [email,setEmail]=useState('');
   const [otp,setOtp]=useState('');
   const [otpSent,setOtpSent]=useState(false);
@@ -53,12 +54,12 @@ export default function AuthScreen({onAuthenticated}) {
     if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return setError('Enter a valid email address.');
     if(mode==='register'&&name.trim().length<2) return setError('Enter your full name.');
     if(mode==='register'&&accountType==='vendor'&&!/^\+?[0-9]{10,15}$/.test(phone.trim())) return setError('Enter a valid phone number for vendor registration.');
+    if(mode==='register'&&accountType==='vendor'&&serviceCity.trim().length<2) return setError('Enter your vendor service city.');
     setBusy(true);setError('');
     try{
       await authService.sendEmailOtp({email:e,fullName:mode==='register'?name.trim():undefined});
       setEmail(e);setOtpSent(true);setOtp('');
     }catch(x){
-      console.error('[RideOnAuth][SCREEN_ERROR]', JSON.stringify({ status:x?.status, code:x?.code, path:x?.path, message:x?.message }));
       setError(normalizeAuthError(x));
     }
     finally{setBusy(false);}
@@ -69,9 +70,7 @@ export default function AuthScreen({onAuthenticated}) {
     if(!/^\d{6}$/.test(otp.trim())) return setError('Enter the 6-digit verification code.');
     setBusy(true);setError('');
     try{
-      console.log('[RideOnAuth][OTP_VERIFY_START]', JSON.stringify({ email: e, mode, accountType }));
       const session=await authService.verifyEmailOtp(e,otp.trim());
-      console.log('[RideOnAuth][OTP_VERIFY_SUCCESS]', JSON.stringify({ hasAccessToken: Boolean(session?.access_token) }));
       let user;
       if(mode==='register'){
                 const completed=await authService.completeRegistration({
@@ -79,6 +78,7 @@ export default function AuthScreen({onAuthenticated}) {
           accountType,
           fullName:name.trim(),
           phone:phone.trim() || undefined,
+          serviceCity:serviceCity.trim() || undefined,
         });
         user=completed?.user;
       } else {
@@ -135,6 +135,7 @@ export default function AuthScreen({onAuthenticated}) {
           </View>
           <Field ref={nameRef} label="FULL NAME" value={name} onChangeText={setName} placeholder="Your full name" onFocus={()=>focusField(nameRef)} returnKeyType="next" onSubmitEditing={()=>focusField(phoneRef)}/>
           <Field ref={phoneRef} label="PHONE NUMBER" value={phone} onChangeText={setPhone} placeholder="+91 9876543210" keyboardType="phone-pad" onFocus={()=>focusField(phoneRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>
+          {accountType==='vendor'&&<Field label="SERVICE CITY" value={serviceCity} onChangeText={setServiceCity} placeholder="e.g. Your service city" onFocus={()=>focusField(emailRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>} 
         </>}
 
         <Field ref={emailRef} label="EMAIL ADDRESS" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" onFocus={()=>focusField(emailRef)} returnKeyType="done"/>

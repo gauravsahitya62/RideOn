@@ -15,7 +15,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }) : null;
   const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
 
-  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
+  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', accountStatus:row.account_status || row.accountStatus || 'active', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
     if (!row) return null;
     const vehicle = row.vehicle || fleet.find((v) => v.id === row.vehicle_id);
@@ -866,7 +866,7 @@ export function createRepository({ databaseUrl, fleet }) {
           const idem=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2 for share',[input.customerId,input.idempotencyKey]);
           if(idem.rows[0]){await client.query('commit');const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=mapBooking({...idem.rows[0],vehicle:input.vehicle});throw x;}
         }
-        const vehicleCheck = await client.query('select id, owner_id, active from vehicles where id=$1 for share',[input.vehicle.id]);
+        const vehicleCheck = await client.query('select id, owner_id, active from vehicles where id=$1 for update',[input.vehicle.id]);
         if (!vehicleCheck.rows[0]) { const x=new Error('vehicle not found'); x.code='VEHICLE_NOT_FOUND'; throw x; }
         if (!vehicleCheck.rows[0].active) { const x=new Error('vehicle inactive'); x.code='VEHICLE_INACTIVE'; throw x; }
         let serviceLocation=null;
@@ -1442,16 +1442,16 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function findCustomerByEmail(email) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,supabase_user_id from customers where lower(email)=lower($1::text)', [email]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,account_status,supabase_user_id from customers where lower(email)=lower($1::text)', [email]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = [...memory.customers.values()].find(v => String(v.email || '').toLowerCase() === String(email).toLowerCase());
-    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash, role:c.role || 'customer', supabaseUserId:c.supabaseUserId } : null;
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash, role:c.role || 'customer', accountStatus:c.accountStatus || 'active', supabaseUserId:c.supabaseUserId } : null;
   }
 
   async function findCustomerById(id) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,supabase_user_id from customers where id=$1', [id]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,account_status,supabase_user_id from customers where id=$1', [id]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = memory.customers.get(id);

@@ -25,7 +25,6 @@ TaskManager.defineTask(DELIVERY_TRACKING_TASK, async ({data,error})=>{
     if(['TRACKING_SESSION_EXPIRED','TRACKING_NOT_ACTIVE','DELIVERY_COMPLETION_NOT_ALLOWED'].includes(updateError?.code))await stopDeliveryLocationTask();
     // Background tasks must never crash the location service because the API
     // is temporarily unavailable. The next GPS batch retries the update.
-    console.warn('[RideOnTrackingTask] location update deferred',updateError?.code||updateError?.message||updateError);
   }
 });
 

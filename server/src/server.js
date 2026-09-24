@@ -203,7 +203,10 @@ const paymentWebhookSecret = process.env.PAYTM_WEBHOOK_SECRET || '';
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && paymentProvider === 'mock') throw new Error('PAYMENT_PROVIDER=mock is not allowed in production.');
+if (isProduction && (!process.env.CLIENT_ORIGIN || process.env.CLIENT_ORIGIN.split(',').some(value => value.trim() === '*'))) throw new Error('CLIENT_ORIGIN must be explicitly configured in production');
+if (isProduction && paymentProvider !== 'paytm') throw new Error('PAYMENT_PROVIDER must be paytm in production.');
+if (isProduction && (!paytmMerchantId || !paytmClientId || !paytmClientSecret || !paytmWebsite || !paytmCallbackUrl || !paymentWebhookSecret)) throw new Error('Complete Paytm production configuration is required.');
+if (isProduction && !process.env.GOOGLE_ROUTES_API_KEY) throw new Error('GOOGLE_ROUTES_API_KEY is required in production for delivery routing.');
 // Paytm credentials are intentionally optional at process startup. This keeps health/API deployment available
 // while live payment operations fail closed with PAYTM_ONBOARDING_REQUIRED until merchant onboarding is complete.
 
@@ -226,8 +229,7 @@ function hashOtpCode(code) {
 
 async function deliverOtp({ channel, destination, code }) {
   if (process.env.NODE_ENV !== 'production') {
-    console.log('[rideon-otp] ' + channel + ' ' + destination + ': ' + code);
-    return { delivered: true, developmentCode: code };
+    return { delivered: true };
   }
   if (channel === 'email' && process.env.RESEND_API_KEY && process.env.OTP_FROM_EMAIL) {
     const response = await fetch('https://api.resend.com/emails', {
@@ -264,6 +266,7 @@ const auth = createAuth({
   jwtSecret: process.env.JWT_SECRET,
   accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL_SECONDS || 3600),
   bcryptRounds: Number(process.env.BCRYPT_ROUNDS || 12),
+  identityResolver: repository.findCustomerById,
 });
 const payments = createPaymentService({
   provider: paymentProvider,
@@ -274,6 +277,7 @@ const payments = createPaymentService({
   callbackUrl: paytmCallbackUrl,
   webhookSecret: paymentWebhookSecret,
 });
+if (isProduction && !payments.liveIntegrationReady) throw new Error('Live payment provider integration is not verified; production startup is blocked until the provider adapter is implemented and tested.');
 
 async function requestRefundForBooking(bookingId) {
   const payment=await repository.findPaymentByBooking(bookingId);
@@ -319,6 +323,16 @@ const supabaseRequireAuth = async (req, res, next) => {
   }
 
   try {
+    // Legacy password-login tokens are accepted only through the same signed JWT
+    // middleware, which re-resolves role/account status from the database.
+    let untrustedPayload = null;
+    try {
+      const encoded = token.split('.')[1];
+      untrustedPayload = encoded ? JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) : null;
+    } catch {}
+    if (untrustedPayload && (!untrustedPayload.iss || (process.env.SUPABASE_URL && !String(untrustedPayload.iss).startsWith(String(process.env.SUPABASE_URL))))) {
+      return auth.middleware()(req, res, next);
+    }
     const user = await verifySupabaseAccessToken(token);
     if (!user?.id || !user?.email) return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
 
@@ -358,13 +372,21 @@ const supabaseRequireAuth = async (req, res, next) => {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
 
+    const currentIdentity = await repository.findCustomerById(identity.id);
+    if (!currentIdentity?.id || !['customer','vendor','support','admin'].includes(currentIdentity.role)) {
+      return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
+    }
     req.user = {
-      id:identity.id,
-      name:identity.fullName,
-      role:identity.role,
+      id:currentIdentity.id,
+      name:currentIdentity.fullName,
+      role:currentIdentity.role,
+      accountStatus:currentIdentity.accountStatus || 'active',
       supabaseUserId:user.id,
-      email:identity.email || user.email,
+      email:currentIdentity.email || user.email,
     };
+    if (['customer','vendor'].includes(req.user.role) && req.user.accountStatus === 'suspended') {
+      return res.status(403).json({error:{code:'ACCOUNT_SUSPENDED',message:'This RideOn account is suspended.'}});
+    }
     next();
   } catch (error) {
     if (error.code==='ACCOUNT_TYPE_CONFLICT') {
@@ -1061,28 +1083,24 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
     accountType:z.enum(['customer','vendor']),
     fullName:z.string().trim().min(2).max(100),
     phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
+    serviceCity:z.string().trim().min(2).max(100).optional(),
   }).superRefine((value,ctx)=>{
     if(value.accountType==='vendor' && !value.phone) ctx.addIssue({code:z.ZodIssueCode.custom,path:['phone'],message:'Vendor phone number is required.'});
+    if(value.accountType==='vendor' && !value.serviceCity) ctx.addIssue({code:z.ZodIssueCode.custom,path:['serviceCity'],message:'Vendor service city is required.'});
   }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid account type and registration details.'}});
   try{
-    console.log('[RideOnAuth][TOKEN_VERIFY_START]', JSON.stringify({requestId:req.requestId, buildCommit}));
     const supa=await verifySupabaseAccessToken(token);
-    console.log('[RideOnAuth][TOKEN_VERIFY_RESULT]', JSON.stringify({requestId:req.requestId, valid:Boolean(supa?.id), hasEmail:Boolean(supa?.email)}));
     if(!supa?.id||!supa?.email) return res.status(401).json({error:{code:'INVALID_TOKEN',message:'Session is invalid or expired.'}});
-    console.log('[RideOnAuth][IDENTITY_LINK_START]', JSON.stringify({requestId:req.requestId, accountType:parsed.data.accountType, email: supa.email}));
     const customer=await repository.createOrLinkCustomerFromSupabase({
       supabaseUserId:supa.id,email:supa.email,fullName:parsed.data.fullName,phone:parsed.data.phone,role:parsed.data.accountType,
     });
-    console.log('[RideOnAuth][IDENTITY_LINK_SUCCESS]', JSON.stringify({requestId:req.requestId, customerId:customer.id, role:customer.role}));
     let vendor=null;
     if(parsed.data.accountType==='vendor'){
-      console.log('[RideOnAuth][VENDOR_PROFILE_START]', JSON.stringify({requestId:req.requestId, customerId:customer.id}));
       vendor=await repository.ensureVendorForCustomer(customer.id,{
         businessName:parsed.data.fullName,contactName:parsed.data.fullName,
-        phone:parsed.data.phone,email:supa.email,serviceCity:'Udaipur'
+        phone:parsed.data.phone,email:supa.email,serviceCity:parsed.data.serviceCity
       });
-      console.log('[RideOnAuth][VENDOR_PROFILE_RESULT]', JSON.stringify({requestId:req.requestId, created:Boolean(vendor)}));
       if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
     }
     return res.json({user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},customer,vendor});
@@ -1136,6 +1154,7 @@ app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid login details.' } });
   const customer = await repository.findCustomerByPhone(parsed.data.phone);
   if (!customer || !(await auth.verifyPassword(parsed.data.password, customer.passwordHash))) return res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'Phone or password is incorrect.' } });
+  if (customer.accountStatus === 'suspended') return res.status(403).json({ error:{code:'ACCOUNT_SUSPENDED',message:'This RideOn account is suspended.'} });
   const accessToken = auth.sign({ sub: customer.id, role: 'customer' });
   res.json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
 });

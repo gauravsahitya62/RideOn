@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import pg from 'pg';
 
+if (process.env.NODE_ENV !== 'test') throw new Error('Test fixtures can only be seeded when NODE_ENV=test.');
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required for PostgreSQL test fixtures.');
 
 const { Pool } = pg;

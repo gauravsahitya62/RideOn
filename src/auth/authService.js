@@ -1,4 +1,4 @@
-import { clearStoredAccessToken, persistAccessToken, restoreAccessToken, setAccessToken, rideOnApi } from '../services/api';
+import { clearStoredAccessToken, persistAccessToken, refreshSession, restoreAccessToken, setAccessToken, rideOnApi } from '../services/api';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const SUPABASE_PUBLISHABLE_KEY =
@@ -27,7 +27,7 @@ export const authService = {
     const result=await rideOnApi.verifyOtp({ email, token });
     const accessToken=result?.accessToken||result?.data?.accessToken;
     if(!accessToken) throw new Error('RideOn did not return a valid authentication session.');
-    await persistAccessToken(accessToken);
+    await persistAccessToken(accessToken,result?.refreshToken||result?.data?.refreshToken);
     setAccessToken(accessToken);
     return {
       access_token:accessToken,
@@ -37,29 +37,24 @@ export const authService = {
   },
 
   async restoreSession() {
-    const token=await restoreAccessToken();
+    let token=await restoreAccessToken();
     if(!token) return null;
     setAccessToken(token);
     try { return {token,user:await this.currentUser()}; }
-    catch(error){ await this.signOut(); throw error; }
+    catch(error){
+      const refreshed=await refreshSession();
+      if(refreshed){ setAccessToken(refreshed); return {token:refreshed,user:await this.currentUser()}; }
+      await this.signOut();
+      throw error;
+    }
   },
 
   async completeRegistration({accessToken,accountType,fullName,phone}) {
-    console.log('[RideOnAuth][COMPLETE_REGISTRATION_START]', JSON.stringify({
-      accountType, fullNameLength: String(fullName || '').length, hasPhone: Boolean(phone),
-      hasAccessToken: Boolean(accessToken)
-    }));
     setAccessToken(accessToken);
     try {
       const result = await rideOnApi.completeRegistration({accountType,fullName,phone});
-      console.log('[RideOnAuth][COMPLETE_REGISTRATION_SUCCESS]', JSON.stringify({
-        role: result?.user?.role, userId: result?.user?.id || null
-      }));
       return result;
     } catch (error) {
-      console.error('[RideOnAuth][COMPLETE_REGISTRATION_ERROR]', JSON.stringify({
-        status: error?.status, code: error?.code, path: error?.path, message: error?.message
-      }));
       throw error;
     }
   },
@@ -82,7 +77,14 @@ export const authService = {
     }
   },
 
-  async signOut(){await clearStoredAccessToken();setAccessToken(null);},
+  async signOut(){
+    const token=await restoreAccessToken();
+    if(token && SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY){
+      try{await fetch(SUPABASE_URL+'/auth/v1/logout',{method:'POST',headers:{apikey:SUPABASE_PUBLISHABLE_KEY,Authorization:'Bearer '+token}});}catch{}
+    }
+    await clearStoredAccessToken();
+    setAccessToken(null);
+  },
 };
 
 export function normalizeAuthError(error) {

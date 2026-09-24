@@ -4,7 +4,6 @@ import * as SecureStore from 'expo-secure-store';
 // Set EXPO_PUBLIC_API_URL in your local .env. Android emulator uses 10.0.2.2;
 // iOS simulator uses localhost. A physical device needs your computer's LAN IP.
 // EXPO_PUBLIC_API_URL overrides this. The hosted API fallback keeps physical iOS devices and production builds off localhost/emulator-only addresses.
-const DEFAULT_API_URL = 'https://rideon-api-262g.onrender.com';
 const configuredApiUrl = String(process.env.EXPO_PUBLIC_API_URL || '').trim();
 const explicitLocalApi = process.env.EXPO_PUBLIC_USE_LOCAL_API === 'true';
 const isLocalApiUrl = (() => {
@@ -19,15 +18,16 @@ const isLocalApiUrl = (() => {
 
 // Expo Go on a physical iPhone must not use localhost: that resolves to the phone itself.
 // Hosted Render is the safe default. Local development is opt-in with EXPO_PUBLIC_USE_LOCAL_API=true.
-const API_URL = (explicitLocalApi && configuredApiUrl ? configuredApiUrl : DEFAULT_API_URL).replace(/\/+$/, '');
-console.log('[RideOnAPI] configured:', configuredApiUrl || '(none)');
-console.log('[RideOnAPI] resolved:', API_URL);
-console.log('[RideOnAPI] localOverride:', explicitLocalApi && isLocalApiUrl);
-console.log('[RideOnAPI] mode:', process.env.EXPO_PUBLIC_API_URL ? 'explicit' : 'hosted-default');
-console.log('[RideOnAPI] platform:', Platform.OS);
+const localDefaultApi = explicitLocalApi ? (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000') : '';
+const API_URL = (configuredApiUrl || localDefaultApi).replace(/\/+$/, '');
+if (!API_URL) throw new Error('EXPO_PUBLIC_API_URL is required. Local API access must be explicitly enabled with EXPO_PUBLIC_USE_LOCAL_API=true.');
+if (isLocalApiUrl && !explicitLocalApi) throw new Error('A local RideOn API URL requires EXPO_PUBLIC_USE_LOCAL_API=true.');
 const REQUEST_TIMEOUT_MS = 20000;
 let accessToken = null;
 const ACCESS_TOKEN_KEY = 'rideon_access_token';
+const REFRESH_TOKEN_KEY = 'rideon_refresh_token';
+const SUPABASE_URL = String(process.env.EXPO_PUBLIC_SUPABASE_URL || '').trim();
+const SUPABASE_KEY = String(process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '').trim();
 
 export const setAccessToken = (token) => { accessToken = token ? String(token) : null; };
 
@@ -40,20 +40,43 @@ export async function restoreAccessToken() {
   return accessToken;
 }
 
-export async function persistAccessToken(token) {
+export async function persistAccessToken(token, refreshToken = undefined) {
   accessToken = token ? String(token) : null;
   try {
     if (accessToken) await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, accessToken, { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
     else await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
+    if (refreshToken !== undefined) {
+      if (refreshToken) await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, String(refreshToken), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
+      else await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+    }
   } catch (error) {
     accessToken = null;
     throw new Error('Could not securely store the RideOn session on this device.');
   }
 }
 
+export async function restoreRefreshToken() {
+  try { return await SecureStore.getItemAsync(REFRESH_TOKEN_KEY); } catch { return null; }
+}
+
+export async function refreshSession() {
+  const refreshToken = await restoreRefreshToken();
+  if (!refreshToken || !SUPABASE_URL || !SUPABASE_KEY) return null;
+  try {
+    const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method:'POST', headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${SUPABASE_KEY}`,'Content-Type':'application/json'},
+      body:JSON.stringify({refresh_token:refreshToken}),
+    });
+    const payload = await response.json().catch(()=>({}));
+    if (!response.ok || !payload?.access_token) return null;
+    await persistAccessToken(payload.access_token, payload.refresh_token || refreshToken);
+    return payload.access_token;
+  } catch { return null; }
+}
+
 export async function clearStoredAccessToken() {
   accessToken = null;
-  try { await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY); } catch {}
+  try { await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY); await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY); } catch {}
 }
 
 async function request(path, options = {}) {
@@ -93,7 +116,10 @@ async function request(path, options = {}) {
   } catch {
     payload = {};
   }
-  console.log('[RideOnNetwork][RESPONSE]', JSON.stringify({ requestId, method, url, status: response.status, ok: response.ok, elapsedMs: Date.now() - startedAt, errorCode: payload?.error?.code || null }));
+  if (!response.ok && response.status === 401 && !options.__retriedAfterRefresh && !path.startsWith('/api/v1/auth/')) {
+    const refreshed = await refreshSession();
+    if (refreshed) return request(path, { ...options, __retriedAfterRefresh:true });
+  }
   if (!response.ok) {
     const message = payload?.error?.message || payload?.message || payload?.error?.code || `Request failed (${response.status})`;
     const error = new Error(`${String(message)} [${response.status} ${path}]`);
@@ -101,10 +127,8 @@ async function request(path, options = {}) {
     error.status = response.status;
     error.path = path;
     error.details = payload?.error?.details;
-    console.error('[RideOnNetwork][HTTP_ERROR]', JSON.stringify({ requestId, method, url, status: response.status, path, errorCode: error.code, message: error.message, response: payload?.error || payload?.message || null }));
     throw error;
   }
-  console.log('[RideOnNetwork][SUCCESS]', JSON.stringify({ requestId, method, path, status: response.status }));
   return payload;
 }
 
@@ -192,7 +216,6 @@ export const rideOnApi = {
       const message = payload?.error?.message || 'Vehicle image upload failed.';
       const error = new Error(`${message} [${response.status} /api/v1/vendor/vehicle-images]`);
       error.code = payload?.error?.code || null; error.status = response.status; error.path = '/api/v1/vendor/vehicle-images';
-      console.error('[RideOnNetwork][UPLOAD_ERROR]', JSON.stringify({requestId,status:response.status,errorCode:error.code,message}));
       throw error;
     }
     return payload;
