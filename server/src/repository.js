@@ -161,6 +161,21 @@ export function createRepository({ databaseUrl, fleet }) {
       }
     }
 
+    let optionalById = new Map();
+    try {
+      const ids = rows.map(row => String(row.id)).filter(Boolean);
+      if (ids.length) {
+        const optional = await pool.query(
+          `select id, description, image_urls, delivery_available, owner_id
+           from vehicles where id::text = any($1::text[])`,
+          [ids]
+        );
+        optionalById = new Map(optional.rows.map(row => [String(row.id), row]));
+      }
+    } catch (optionalError) {
+      console.warn(JSON.stringify({level:'warn',event:'vehicle_optional_metadata_unavailable',message:optionalError?.message||'Vehicle metadata unavailable',code:optionalError?.code||null}));
+    }
+
     // Enrich active vehicles with vendor service-location data. Missing location
     // must never hide a valid vehicle from the marketplace.
     let vendorByVehicleId = new Map();
