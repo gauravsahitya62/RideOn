@@ -584,7 +584,7 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
       console.log('[RideOnAuth][VENDOR_PROFILE_START]', JSON.stringify({requestId:req.requestId, customerId:customer.id}));
       vendor=await repository.ensureVendorForCustomer(customer.id,{
         businessName:parsed.data.fullName,contactName:parsed.data.fullName,
-        phone:parsed.data.phone,email:supa.email,serviceCity:'Jaipur'
+        phone:parsed.data.phone,email:supa.email,serviceCity:'Udaipur'
       });
       console.log('[RideOnAuth][VENDOR_PROFILE_RESULT]', JSON.stringify({requestId:req.requestId, created:Boolean(vendor)}));
       if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
