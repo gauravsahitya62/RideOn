@@ -137,35 +137,29 @@ export function createNotificationService({ repository }) {
         ? [recipients.vendorUserId]
         : [recipients.customerId, recipients.vendorUserId];
     const unique = [...new Set(ids.filter(Boolean).map(String))];
-    const results = [];
-    for (const recipientUserId of unique) {
-      results.push(await notify({
-        recipientUserId,
-        type,
-        title,
-        body,
-        bookingId,
-        dedupeKey: dedupeKey ? `${dedupeKey}:${recipientUserId}` : null,
-        sendPush,
-      }));
-    }
+    const results = await Promise.all(unique.map((recipientUserId) => notify({
+      recipientUserId,
+      type,
+      title,
+      body,
+      bookingId,
+      dedupeKey: dedupeKey ? `${dedupeKey}:${recipientUserId}` : null,
+      sendPush,
+    })));
     return results.filter(Boolean);
   }
 
   async function notifySupport({ type, title, body, ticketId = null, bookingId = null, dedupeKey }) {
     const recipients = await repository.listSupportUserIds();
-    const results = [];
-    for (const recipientUserId of recipients) {
-      results.push(await notify({
-        recipientUserId,
-        type,
-        title,
-        body,
-        ticketId,
-        bookingId,
-        dedupeKey: dedupeKey ? `${dedupeKey}:${recipientUserId}` : null,
-      }));
-    }
+    const results = await Promise.all(recipients.map((recipientUserId) => notify({
+      recipientUserId,
+      type,
+      title,
+      body,
+      ticketId,
+      bookingId,
+      dedupeKey: dedupeKey ? `${dedupeKey}:${recipientUserId}` : null,
+    })));
     return results.filter(Boolean);
   }
 
