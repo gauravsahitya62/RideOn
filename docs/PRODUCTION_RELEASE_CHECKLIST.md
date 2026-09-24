@@ -55,7 +55,7 @@ Foreground location is contextual. Background location is requested only for act
 
 Push notifications are not implemented in the current mobile app. Do not claim notification support in store metadata yet.
 
-## Payment release blocker
+## Observability\n\nProduction observability includes request IDs, structured privacy-safe HTTP/error logs, `/health`, `/health/ready`, server-side analytics, admin metrics, read-only financial reconciliation and operational alerts. See `PRODUCTION_OPERATIONS.md`.\n\n## Payment release blocker
 
 The current repository contains payment lifecycle, idempotency and webhook state handling, but `server/src/payments.js` does not contain a verified live Paytm checkout/status/refund/settlement adapter. Live provider operations intentionally fail closed.
 
