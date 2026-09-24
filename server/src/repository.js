@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
+import { calculateCancellation } from './lifecycle.js';
 
 const { Pool } = pg;
 
@@ -12,7 +13,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map() };
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
 
   const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
@@ -42,6 +43,31 @@ export function createRepository({ databaseUrl, fleet }) {
       paymentStatus:row.payment_status,
       paymentId:row.payment_id || undefined,
       paymentProviderReference:row.payment_provider_reference || undefined,
+      cancellationFee:Number(row.cancellation_fee_paise || 0) / 100,
+      refundAmount:Number(row.refund_amount_paise || 0) / 100,
+      cancelledAt:iso(row.cancelled_at),
+      cancellationReason:row.cancellation_reason || undefined,
+      securityDepositStatus:row.security_deposit_status || undefined,
+      securityDepositRefundable:Number(row.security_deposit_refundable_paise || 0) / 100,
+      securityDepositDeduction:Number(row.security_deposit_deduction_paise || 0) / 100,
+      securityDepositReason:row.security_deposit_reason || undefined,
+      securityDepositEvidence:row.security_deposit_evidence || undefined,
+      securityDepositRefundReference:row.security_deposit_refund_reference || undefined,
+      securityDepositInspectedAt:iso(row.security_deposit_inspected_at),
+      securityDepositInspectedBy:row.security_deposit_inspected_by ? String(row.security_deposit_inspected_by) : undefined,
+      rejectionReason:row.cancellation_reason && row.status==='rejected' ? row.cancellation_reason : undefined,
+      deliveryLatitude:row.delivery_latitude == null ? null : Number(row.delivery_latitude),
+      deliveryLongitude:row.delivery_longitude == null ? null : Number(row.delivery_longitude),
+      vendorServiceLatitude:row.vendor_service_latitude == null ? null : Number(row.vendor_service_latitude),
+      vendorServiceLongitude:row.vendor_service_longitude == null ? null : Number(row.vendor_service_longitude),
+      routeDistanceMeters:row.route_distance_meters == null ? null : Number(row.route_distance_meters),
+      routeDurationSeconds:row.route_duration_seconds == null ? null : Number(row.route_duration_seconds),
+      routeProvider:row.route_provider || undefined,
+      deliveryStatus:row.delivery_status || 'scheduled',
+      deliveryStartedAt:iso(row.delivery_started_at),
+      deliveredAt:iso(row.delivered_at),
+      deliveryFinalLatitude:row.delivery_final_latitude == null ? null : Number(row.delivery_final_latitude),
+      deliveryFinalLongitude:row.delivery_final_longitude == null ? null : Number(row.delivery_final_longitude),
       createdAt:iso(row.created_at ?? row.createdAt),
       updatedAt:iso(row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt)
     };
@@ -147,9 +173,6 @@ export function createRepository({ databaseUrl, fleet }) {
       }
     }
 
-    // Optional fields are enriched only after the core inventory query has
-    // succeeded. If this metadata is missing in production, the vehicle still
-    // remains visible to customers.
     let optionalById = new Map();
     try {
       const ids = rows.map(row => String(row.id)).filter(Boolean);
@@ -162,16 +185,37 @@ export function createRepository({ databaseUrl, fleet }) {
         optionalById = new Map(optional.rows.map(row => [String(row.id), row]));
       }
     } catch (optionalError) {
+      console.warn(JSON.stringify({level:'warn',event:'vehicle_optional_metadata_unavailable',message:optionalError?.message||'Vehicle metadata unavailable',code:optionalError?.code||null}));
+    }
+
+    // Enrich active vehicles with vendor service-location data. Missing location
+    // must never hide a valid vehicle from the marketplace.
+    let vendorByVehicleId = new Map();
+    try {
+      const ids = rows.map(row => String(row.id)).filter(Boolean);
+      if (ids.length) {
+        const optional = await pool.query(
+          `select ve.id, ve.owner_id, v.id as vendor_id, v.business_name, v.service_city,
+                  v.service_address, v.service_latitude, v.service_longitude
+           from vehicles ve
+           left join vendors v on v.id=ve.owner_id
+           where ve.id::text = any($1::text[])`,
+          [ids]
+        );
+        vendorByVehicleId = new Map(optional.rows.map(row => [String(row.id), row]));
+      }
+    } catch (vendorError) {
       console.warn(JSON.stringify({
-        level: 'warn',
-        event: 'vehicle_optional_metadata_unavailable',
-        message: optionalError?.message || 'Optional vehicle metadata query failed',
-        code: optionalError?.code || null,
+        level:'warn',
+        event:'vehicle_vendor_location_unavailable',
+        message:vendorError?.message || 'Vendor location enrichment failed',
+        code:vendorError?.code || null,
       }));
     }
 
     return rows.map((row) => {
       const extra = optionalById.get(String(row.id)) || {};
+      const vendor = vendorByVehicleId.get(String(row.id)) || {};
       return {
         id: String(row.id),
         type: String(row.type),
@@ -187,6 +231,14 @@ export function createRepository({ databaseUrl, fleet }) {
         imageUrls: Array.isArray(extra.image_urls) ? extra.image_urls : [],
         deliveryAvailable: extra.delivery_available !== false,
         ownerId: extra.owner_id ? String(extra.owner_id) : null,
+        vendorId: vendor.vendor_id ? String(vendor.vendor_id) : null,
+        vendorName: vendor.business_name || null,
+        vendorServiceLocation: vendor.service_latitude != null && vendor.service_longitude != null ? {
+          latitude:Number(vendor.service_latitude),
+          longitude:Number(vendor.service_longitude),
+          address:vendor.service_address || null,
+          city:vendor.service_city || row.city || null,
+        } : null,
         seats: row.seats == null ? null : Number(row.seats),
         transmission: row.transmission || null,
         fuel: row.fuel || null,
@@ -262,6 +314,9 @@ export function createRepository({ databaseUrl, fleet }) {
     status: row.status,
     serviceCity: row.service_city,
     serviceArea: row.service_area || {},
+    serviceLatitude: row.service_latitude == null ? null : Number(row.service_latitude),
+    serviceLongitude: row.service_longitude == null ? null : Number(row.service_longitude),
+    serviceAddress: row.service_address || null,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
@@ -292,7 +347,7 @@ export function createRepository({ databaseUrl, fleet }) {
   async function findVendorByCustomerId(customerId) {
     if (!useDatabase) return memory.vendors?.get(customerId) || null;
     const { rows } = await pool.query(
-      'select id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,created_at,updated_at from vendors where owner_customer_id=$1',
+      'select id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,service_latitude,service_longitude,service_address,created_at,updated_at from vendors where owner_customer_id=$1',
       [customerId]
     );
     return rows[0] ? mapVendor(rows[0]) : null;
@@ -339,6 +394,111 @@ export function createRepository({ databaseUrl, fleet }) {
     return rows[0] ? mapVendor(rows[0]) : null;
   }
 
+  async function updateVendorServiceLocation(customerId, input = {}) {
+    const latitude = input.latitude == null || input.latitude === '' ? null : Number(input.latitude);
+    const longitude = input.longitude == null || input.longitude === '' ? null : Number(input.longitude);
+    if ((latitude == null) !== (longitude == null)) {
+      const e = new Error('Provide both service latitude and longitude, or leave both empty.');
+      e.code = 'INVALID_SERVICE_LOCATION';
+      throw e;
+    }
+    if (latitude != null && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)) {
+      const e = new Error('Service latitude must be between -90 and 90.');
+      e.code = 'INVALID_SERVICE_LOCATION';
+      throw e;
+    }
+    if (longitude != null && (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)) {
+      const e = new Error('Service longitude must be between -180 and 180.');
+      e.code = 'INVALID_SERVICE_LOCATION';
+      throw e;
+    }
+    const address = input.address == null ? undefined : String(input.address).trim().slice(0, 300);
+    const serviceCity = input.serviceCity == null ? undefined : String(input.serviceCity).trim().slice(0, 100);
+    if (!useDatabase) {
+      const vendor = await ensureVendorForCustomer(customerId, {});
+      if (address !== undefined) vendor.serviceAddress = address;
+      if (serviceCity !== undefined) vendor.serviceCity = serviceCity;
+      vendor.serviceLatitude = latitude;
+      vendor.serviceLongitude = longitude;
+      vendor.updatedAt = new Date().toISOString();
+      return vendor;
+    }
+    const vendor = await findVendorByCustomerId(customerId);
+    if (!vendor) return null;
+    const { rows } = await pool.query(
+      `update vendors
+       set service_latitude=$2, service_longitude=$3,
+           service_address=case when $4::text is null then service_address else $4 end,
+           service_city=case when $5::text is null then service_city else $5 end,
+           updated_at=now()
+       where owner_customer_id=$1
+       returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,service_latitude,service_longitude,service_address,created_at,updated_at`,
+      [customerId, latitude, longitude, address ?? null, serviceCity ?? null]
+    );
+    return rows[0] ? mapVendor(rows[0]) : null;
+  }
+
+  async function getVendorServiceLocation(customerId) {
+    const vendor = await findVendorByCustomerId(customerId);
+    if (!vendor) return null;
+    return {
+      vendorId: vendor.id,
+      businessName: vendor.businessName,
+      serviceCity: vendor.serviceCity || null,
+      address: vendor.serviceAddress || vendor.address || null,
+      latitude: vendor.serviceLatitude ?? null,
+      longitude: vendor.serviceLongitude ?? null,
+    };
+  }
+
+  async function listMarketplaceVendors({ city } = {}) {
+    if (!useDatabase) {
+      const entries = [...(memory.vendors?.values() || [])]
+        .filter(v => v.serviceLatitude != null && v.serviceLongitude != null)
+        .filter(v => !city || String(v.serviceCity || '').toLowerCase() === String(city).trim().toLowerCase());
+      const counts = new Map();
+      for (const vehicle of [...fleet, ...memory.vehicles.values()]) {
+        if (vehicle.active === false || !vehicle.ownerId) continue;
+        const key = String(vehicle.ownerId);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      return entries.map(v => ({
+        vendorId: v.id,
+        businessName: v.businessName,
+        serviceCity: v.serviceCity || null,
+        address: v.serviceAddress || v.address || null,
+        latitude: Number(v.serviceLatitude),
+        longitude: Number(v.serviceLongitude),
+        availableVehicleCount: counts.get(String(v.id)) || 0,
+      }));
+    }
+    const params=[];
+    const where=[`v.status='active'`, 'v.service_latitude is not null', 'v.service_longitude is not null'];
+    if(city && String(city).trim()) {
+      params.push(String(city).trim());
+      where.push(`lower(trim(v.service_city)) = lower(trim($${params.length}))`);
+    }
+    const { rows } = await pool.query(
+      `select v.id, v.business_name, v.service_city, v.service_address,
+              v.service_latitude, v.service_longitude, count(ve.id)::int as available_vehicle_count
+       from vendors v
+       left join vehicles ve on ve.owner_id=v.id and ve.active=true
+       where ${where.join(' and ')}
+       group by v.id, v.business_name, v.service_city, v.service_address, v.service_latitude, v.service_longitude
+       order by v.business_name asc`,
+      params
+    );
+    return rows.map(v => ({
+      vendorId:String(v.id),
+      businessName:v.business_name,
+      serviceCity:v.service_city || null,
+      address:v.service_address || null,
+      latitude:Number(v.service_latitude),
+      longitude:Number(v.service_longitude),
+      availableVehicleCount:Number(v.available_vehicle_count || 0),
+    }));
+  }
+
   async function updateVendor(customerId, input) {
     if (!useDatabase) {
       const vendor = await ensureVendorForCustomer(customerId, input);
@@ -352,7 +512,7 @@ export function createRepository({ databaseUrl, fleet }) {
        phone=coalesce($4,phone), email=coalesce($5,email), address=coalesce($6,address),
        service_city=coalesce($7,service_city), service_area=coalesce($8,service_area), updated_at=now()
        where owner_customer_id=$1
-       returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,created_at,updated_at`,
+       returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,service_latitude,service_longitude,service_address,created_at,updated_at`,
       [customerId,input.businessName,input.contactName,input.phone,input.email,input.address,input.serviceCity,input.serviceArea]
     );
     return rows[0] ? mapVendor(rows[0]) : null;
@@ -466,8 +626,8 @@ export function createRepository({ databaseUrl, fleet }) {
         .slice(offset, offset+limit);
     }
     const { rows } = await pool.query(
-      `select b.*, v.name as v_name, v.type as v_type
-       from bookings b join vehicles v on v.id=b.vehicle_id
+      `select b.*, v.name as v_name, v.type as v_type, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by
+       from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id
        where v.owner_id=$1
        order by b.created_at desc limit $2 offset $3`,
       [vendorId,limit,offset]
@@ -481,8 +641,8 @@ export function createRepository({ databaseUrl, fleet }) {
       return b && String(b.vendorId||'') === String(vendorId) ? b : null;
     }
     const { rows } = await pool.query(
-      `select b.*, v.name as v_name, v.type as v_type
-       from bookings b join vehicles v on v.id=b.vehicle_id
+      `select b.*, v.name as v_name, v.type as v_type, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise
+       from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id
        where b.id=$1 and v.owner_id=$2`,
       [bookingId,vendorId]
     );
@@ -490,39 +650,107 @@ export function createRepository({ databaseUrl, fleet }) {
     return mapBooking({...rows[0],vehicle:{id:String(rows[0].vehicle_id),name:rows[0].v_name,type:String(rows[0].v_type)}});
   }
 
-  async function updateVendorBookingStatus(vendorId, bookingId, nextStatus, note='') {
+  async function updateVendorBookingStatus(vendorId, bookingId, nextStatus, note=''){
     const allowed = {
-      requested: ['confirmed','rejected','cancelled'],
+      requested: ['confirmed','rejected'],
       confirmed: ['in_progress','cancelled'],
-      in_progress: ['completed','cancelled'],
+      in_progress: ['completed'],
       rejected: [],
       completed: [],
       cancelled: [],
     };
     if (!allowed[nextStatus]) { const e=new Error('invalid status'); e.code='INVALID_BOOKING_STATUS'; throw e; }
+    if (nextStatus==='rejected' && !String(note||'').trim()) { const e=new Error('A rejection reason is required.'); e.code='REJECTION_REASON_REQUIRED'; throw e; }
     if (!useDatabase) {
       const b=await getVendorBooking(vendorId,bookingId);
       if(!b){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       if(!allowed[b.status]?.includes(nextStatus)){const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
-      b.status=nextStatus;b.updatedAt=new Date().toISOString();return b;
+      if(nextStatus==='completed' && b.delivery && b.deliveryStatus!=='delivered'){const e=new Error('Delivery must be completed before the rental can be completed.');e.code='DELIVERY_NOT_COMPLETED';throw e;}
+      if(nextStatus==='confirmed' && !['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){
+        const e=new Error('Payment must be confirmed before the vendor can accept this booking.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;
+      }
+      b.status=nextStatus;
+      if(nextStatus==='rejected'){b.cancellationReason=String(note).trim(); if(['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))) b.paymentStatus='refund_pending';}
+      if(nextStatus==='completed' && Number(b.pricing?.securityDeposit||0)>0){
+        memory.securityDeposits.set(String(b.id),{bookingId:String(b.id),customerId:b.customerId,vendorId,originalAmount:Number(b.pricing.securityDeposit),refundableAmount:Number(b.pricing.securityDeposit),approvedDeduction:0,status:'review_required'});
+      }
+      b.updatedAt=new Date().toISOString();
+      return b;
     }
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
+      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type, v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
       if(!rows[0]){await client.query('rollback');const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       const current=rows[0].status;
       if(!allowed[current]?.includes(nextStatus)){await client.query('rollback');const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
-      const {rows:updated}=await client.query('update bookings set status=$2,updated_at=now() where id=$1 returning *',[bookingId,nextStatus]);
+      if(nextStatus==='rejected' && !String(note||'').trim()){await client.query('rollback');const e=new Error('rejection reason required');e.code='REJECTION_REASON_REQUIRED';throw e;}
+      if(nextStatus==='confirmed' && !['paid','held','settlement_pending','settled'].includes(String(rows[0].payment_status))){
+        await client.query('rollback');const e=new Error('Payment must be confirmed before the vendor can accept this booking.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;
+      }
+      const shouldRefund=['paid','held','settlement_pending','settled'].includes(String(rows[0].payment_status));
+      const nextPaymentStatus=nextStatus==='rejected'&&shouldRefund?'refund_pending':rows[0].payment_status;
+      const cancellationReason=nextStatus==='rejected'?String(note).trim():rows[0].cancellation_reason||null;
+      const {rows:updated}=await client.query("update bookings set status=$2,payment_status=$3,cancellation_reason=$4,cancelled_at=case when $2='rejected' then now() else cancelled_at end,updated_at=now() where id=$1 returning *",[bookingId,nextStatus,nextPaymentStatus,cancellationReason]);
+      if(nextPaymentStatus==='refund_pending') {
+        await client.query("update payments set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('paid','held','settlement_pending','settled')",[bookingId]);
+        await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','review_required','refund_pending')",[bookingId]);
+      }
+      if(nextStatus==='completed' && rows[0].delivery_required && rows[0].delivery_status!=='delivered'){await client.query('rollback');const e=new Error('Delivery must be completed before the rental can be completed.');e.code='DELIVERY_NOT_COMPLETED';throw e;}
+      if(nextStatus==='completed' && Number(rows[0].security_deposit_paise||0)>0){
+        await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status)
+          values($1,$2,$3,$4,$4,'review_required')
+          on conflict (booking_id) do update set status='review_required',updated_at=now()`,[bookingId,rows[0].customer_id,vendorId,Number(rows[0].security_deposit_paise)]);
+      }
       await client.query('insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$3,\'vendor\',$4,$5)',[bookingId,current,nextStatus,vendorId,note||null]);
       await client.query('commit');
       return mapBooking({...updated[0],vehicle:{id:String(updated[0].vehicle_id),name:rows[0].v_name,type:String(rows[0].v_type)}});
-    } catch(error){try{await client.query('rollback');}catch{};throw error;}finally{client.release();}
+    } catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function recordSecurityDepositInspection(vendorId, bookingId, {deductionPaise=0, reason='', evidenceReference='', refundProviderReference=''} = {}) {
+    const deduction = Math.max(0, Math.round(Number(deductionPaise)||0));
+    if (!useDatabase) {
+      const b=await getVendorBooking(vendorId,bookingId);
+      if(!b){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(String(b.status)!=='completed'){const e=new Error('Vehicle must be returned before deposit inspection.');e.code='DEPOSIT_INSPECTION_NOT_ALLOWED';throw e;}
+      const deposit=memory.securityDeposits.get(String(bookingId));
+      const original=Math.round(Number(deposit?.originalAmount ?? b.pricing?.securityDeposit ?? 0)*100);
+      if(deduction>original){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}
+      if(deduction>0&&!String(reason).trim()){const e=new Error('A deduction reason is required.');e.code='DEPOSIT_DEDUCTION_REASON_REQUIRED';throw e;}
+      if(deduction>0&&!String(evidenceReference).trim()){const e=new Error('Evidence/reference is required for a deduction.');e.code='DEPOSIT_EVIDENCE_REQUIRED';throw e;}
+      const refundablePaise=original-deduction;
+      if(deposit){deposit.approvedDeduction=deduction/100;deposit.refundableAmount=refundablePaise/100;deposit.deductionReason=String(reason||'').trim()||undefined;deposit.evidenceReference=String(evidenceReference||'').trim()||undefined;deposit.status=deduction>0?'deducted':'refund_pending';deposit.refundProviderReference=String(refundProviderReference||'').trim()||undefined;}
+      return {booking:b,deposit:{status:deduction>0?'deducted':'refund_pending',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundablePaise}};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query('select b.*,sd.status as sd_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
+      if(!q.rows[0]){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
+      const b=q.rows[0];
+      if(String(b.status)!=='completed'){const e=new Error('Vehicle must be returned before deposit inspection.');e.code='DEPOSIT_INSPECTION_NOT_ALLOWED';throw e;}
+      const original=Number(b.sd_status ? b.original_amount_paise : b.security_deposit_paise||0);
+      if(deduction>original){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}
+      if(deduction>0&&!String(reason).trim()){const e=new Error('A deduction reason is required.');e.code='DEPOSIT_DEDUCTION_REASON_REQUIRED';throw e;}
+      if(deduction>0&&!String(evidenceReference).trim()){const e=new Error('Evidence/reference is required for a deduction.');e.code='DEPOSIT_EVIDENCE_REQUIRED';throw e;}
+      const refundable=original-deduction;
+      if(b.original_amount_paise==null){
+        await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,approved_deduction_paise,status,deduction_reason,evidence_reference,provider)
+          values($1,$2,$3,$4,$5,$6,$7,$8,$9,null)
+          on conflict (booking_id) do update set refundable_amount_paise=$5,approved_deduction_paise=$6,status=$7,deduction_reason=$8,evidence_reference=$9,updated_at=now()`,[bookingId,b.customer_id,vendorId,original,refundable,deduction,deduction>0?'deducted':'refund_pending',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null]);
+      }else{
+        await client.query("update security_deposits set refundable_amount_paise=$2,approved_deduction_paise=$3,status=$4,deduction_reason=$5,evidence_reference=$6,inspected_at=now(),inspected_by=$7,updated_at=now() where booking_id=$1",[bookingId,refundable,deduction,deduction>0?'deducted':'refund_pending',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null,vendorId]);
+      }
+      await client.query('insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,\'vendor\',$3,$4)',[bookingId,b.status,vendorId,deduction>0?'security_deposit_deduction':'security_deposit_release']);
+      await client.query('commit');
+      return {booking:mapBooking({...b,security_deposit_refundable_paise:refundable,security_deposit_deduction_paise:deduction,security_deposit_status:deduction>0?'deducted':'refund_pending',security_deposit_reason:String(reason||'').trim()||undefined,security_deposit_evidence:String(evidenceReference||'').trim()||undefined,security_deposit_inspected_at:new Date().toISOString(),security_deposit_inspected_by:vendorId}),deposit:{status:deduction>0?'deducted':'refund_pending',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable}};
+    }catch(error){try{await client.query('rollback')}catch{}finally{client.release();}throw error;}
   }
 
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
-    if (!['customer','vendor'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
+    if (!['customer','vendor','support','admin'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
 
     const placeholderPhone = () => 'supa-' + crypto.createHash('sha256').update(String(supabaseUserId)).digest('hex').slice(0,11);
 
@@ -641,8 +869,21 @@ export function createRepository({ databaseUrl, fleet }) {
         const vehicleCheck = await client.query('select id, owner_id, active from vehicles where id=$1 for share',[input.vehicle.id]);
         if (!vehicleCheck.rows[0]) { const x=new Error('vehicle not found'); x.code='VEHICLE_NOT_FOUND'; throw x; }
         if (!vehicleCheck.rows[0].active) { const x=new Error('vehicle inactive'); x.code='VEHICLE_INACTIVE'; throw x; }
-        const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,\'requested\',\'unpaid\',$13) returning *',[input.customerId,input.vehicle.id,vehicleCheck.rows[0].owner_id||null,input.startAt,input.endAt,input.delivery,input.address,Math.round(input.pricing.deliveryFee * 100),Math.round(input.pricing.rental * 100),Math.round(input.pricing.platformFee * 100),Math.round((input.pricing.securityDeposit||0) * 100),Math.round(input.pricing.total * 100),input.notes||null]);
+        let serviceLocation=null;
+        if(vehicleCheck.rows[0].owner_id){
+          const locationResult=await client.query('select service_latitude,service_longitude,service_address from vendors where id=$1 and status=\'active\'',[vehicleCheck.rows[0].owner_id]);
+          serviceLocation=locationResult.rows[0]||null;
+        }
+        const deliveryLatitude=input.deliveryLatitude == null || input.deliveryLatitude === '' ? null : Number(input.deliveryLatitude);
+        const deliveryLongitude=input.deliveryLongitude == null || input.deliveryLongitude === '' ? null : Number(input.deliveryLongitude);
+        if(input.delivery && ((deliveryLatitude==null)!==(deliveryLongitude==null) || (deliveryLatitude!=null && (!Number.isFinite(deliveryLatitude)||deliveryLatitude < -90||deliveryLatitude > 90)) || (deliveryLongitude!=null && (!Number.isFinite(deliveryLongitude)||deliveryLongitude < -180||deliveryLongitude > 180)))){
+          const x=new Error('invalid delivery location'); x.code='INVALID_DELIVERY_LOCATION'; throw x;
+        }
+        const vendorServiceLatitude=serviceLocation?.service_latitude == null ? null : Number(serviceLocation.service_latitude);
+        const vendorServiceLongitude=serviceLocation?.service_longitude == null ? null : Number(serviceLocation.service_longitude);
+        const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,vendor_service_latitude,vendor_service_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,\'requested\',\'unpaid\',$17) returning *',[input.customerId,input.vehicle.id,vehicleCheck.rows[0].owner_id||null,input.startAt,input.endAt,input.delivery,input.address,deliveryLatitude,deliveryLongitude,vendorServiceLatitude,vendorServiceLongitude,Math.round(input.pricing.deliveryFee * 100),Math.round(input.pricing.rental * 100),Math.round(input.pricing.platformFee * 100),Math.round((input.pricing.securityDeposit||0) * 100),Math.round(input.pricing.total * 100),input.notes||null]);
         if(input.idempotencyKey) await client.query('insert into booking_idempotency_keys (customer_id,idempotency_key,booking_id) values ($1,$2,$3)',[input.customerId,input.idempotencyKey,rows[0].id]);
+        if(Number(input.pricing.securityDeposit||0)>0) await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$4,$4,'pending') on conflict (booking_id) do nothing`,[rows[0].id,input.customerId,vehicleCheck.rows[0].owner_id||null,Math.round(Number(input.pricing.securityDeposit||0)*100)]);
         await client.query('insert into booking_status_events (booking_id,next_status,actor_type,actor_id) values ($1,\'requested\',\'customer\',$2)',[rows[0].id,input.customerId]);
         await client.query('commit');
         return mapBooking({...rows[0],vehicle:input.vehicle});
@@ -656,7 +897,151 @@ export function createRepository({ databaseUrl, fleet }) {
     const key=input.idempotencyKey?`${input.customerId}:${input.idempotencyKey}`:null;
     if(key&&memory.idempotency.has(key)){const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=memory.idempotency.get(key);throw x;}
     if([...memory.bookings.values()].some(b=>b.vehicleId===input.vehicle.id&&['requested','confirmed','in_progress'].includes(b.status)&&new Date(input.startAt)<new Date(b.endAt)&&new Date(input.endAt)>new Date(b.startAt))){const x=new Error('vehicle unavailable');x.code='VEHICLE_UNAVAILABLE';throw x;}
-    const id=crypto.randomUUID();const booking={id,customerId:input.customerId,vehicleId:input.vehicle.id,vendorId:input.vehicle.ownerId||null,vehicle:input.vehicle,startAt:input.startAt,endAt:input.endAt,delivery:input.delivery,address:input.address,notes:input.notes,pricing:input.pricing,status:'requested',paymentStatus:'unpaid',createdAt:new Date().toISOString()};memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
+    const id=crypto.randomUUID();const deliveryLatitude=input.deliveryLatitude == null || input.deliveryLatitude === '' ? null : Number(input.deliveryLatitude);const deliveryLongitude=input.deliveryLongitude == null || input.deliveryLongitude === '' ? null : Number(input.deliveryLongitude);if(input.delivery && ((deliveryLatitude==null)!==(deliveryLongitude==null) || (deliveryLatitude!=null && (!Number.isFinite(deliveryLatitude)||deliveryLatitude < -90||deliveryLatitude > 90)) || (deliveryLongitude!=null && (!Number.isFinite(deliveryLongitude)||deliveryLongitude < -180||deliveryLongitude > 180)))){const x=new Error('invalid delivery location');x.code='INVALID_DELIVERY_LOCATION';throw x;}const vendor= input.vehicle.vendorServiceLocation || null;const booking={id,customerId:input.customerId,vehicleId:input.vehicle.id,vendorId:input.vehicle.ownerId||input.vehicle.vendorId||null,vehicle:input.vehicle,startAt:input.startAt,endAt:input.endAt,delivery:input.delivery,address:input.address,deliveryLatitude,deliveryLongitude,vendorServiceLatitude:vendor?.latitude ?? null,vendorServiceLongitude:vendor?.longitude ?? null,routeDistanceMeters:null,routeDurationSeconds:null,routeProvider:null,notes:input.notes,pricing:input.pricing,status:'requested',paymentStatus:'unpaid',createdAt:new Date().toISOString()};
+    if(Number(input.pricing.securityDeposit||0)>0) memory.securityDeposits.set(id,{bookingId:id,customerId:input.customerId,vendorId:input.vehicle.ownerId||null,originalAmount:Number(input.pricing.securityDeposit),refundableAmount:Number(input.pricing.securityDeposit),approvedDeduction:0,status:'pending'});memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
+  }
+
+  async function updateBookingRouteData(id, customerId, route = {}) {
+    const distanceMeters = Number(route.distanceMeters);
+    const durationSeconds = Number(route.durationSeconds);
+    if(!Number.isFinite(distanceMeters) || distanceMeters < 0 || !Number.isFinite(durationSeconds) || durationSeconds < 0){
+      const e=new Error('Invalid route data.'); e.code='ROUTE_INVALID_DATA'; throw e;
+    }
+    if(!useDatabase){
+      const booking=memory.bookings.get(id);
+      if(!booking || String(booking.customerId)!==String(customerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      booking.routeDistanceMeters=Math.round(distanceMeters);
+      booking.routeDurationSeconds=Math.round(durationSeconds);
+      booking.routeProvider=String(route.provider||'').slice(0,40)||null;
+      booking.updatedAt=new Date().toISOString();
+      return booking;
+    }
+    const {rows}=await pool.query(
+      `update bookings
+       set route_distance_meters=$3, route_duration_seconds=$4, route_provider=$5, updated_at=now()
+       where id=$1 and customer_id=$2
+       returning *`,
+      [id,customerId,Math.round(distanceMeters),Math.round(durationSeconds),String(route.provider||'').slice(0,40)||null]
+    );
+    return rows[0] ? mapBooking(rows[0]) : null;
+  }
+
+  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
+
+  async function startDelivery(vendorId, bookingId) {
+    const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId));
+      if(!b||String(b.vendorId)!==String(vendorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(b.status!=='confirmed'){const e=new Error('Delivery can only start after the booking is confirmed.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
+      if(!b.delivery||b.deliveryLatitude==null||b.deliveryLongitude==null){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
+      if(!['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
+      if([...memory.trackingSessions.values()].some(x=>String(x.bookingId)===String(bookingId)&&x.status==='active')){const e=new Error('Delivery tracking is already active.');e.code='DELIVERY_ALREADY_ACTIVE';throw e;}
+      const session={id:crypto.randomUUID(),bookingId:String(bookingId),vendorId:String(vendorId),status:'active',startedAt:now.toISOString(),endedAt:null,lastLatitude:null,lastLongitude:null,lastAccuracyMeters:null,lastLocationAt:null,lastRouteDistanceMeters:null,lastRouteDurationSeconds:null,lastRouteAt:null,expiresAt:expiresAt.toISOString()};
+      memory.trackingSessions.set(session.id,session);b.deliveryStatus='in_delivery';b.deliveryStartedAt=session.startedAt;b.updatedAt=now.toISOString();return session;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query('select b.id,b.status,b.payment_status,b.delivery_required,b.delivery_address,b.delivery_latitude,b.delivery_longitude,v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
+      const b=rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(b.status!=='confirmed'){const e=new Error('Delivery can only start after the booking is confirmed.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
+      if(!b.delivery_required||b.delivery_latitude==null||b.delivery_longitude==null||!String(b.delivery_address||'').trim()){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
+      if(!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
+      const active=await client.query("select id from tracking_sessions where booking_id=$1 and status='active' for update",[bookingId]);if(active.rows[0]){const e=new Error('Delivery tracking is already active.');e.code='DELIVERY_ALREADY_ACTIVE';throw e;}
+      const {rows:created}=await client.query("insert into tracking_sessions(booking_id,vendor_id,status,expires_at) values($1,$2,'active',$3) returning *",[bookingId,vendorId,expiresAt]);
+      await client.query("update bookings set delivery_status='in_delivery',delivery_started_at=now(),updated_at=now() where id=$1",[bookingId]);
+      await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,'vendor',$3,'delivery_started')",[bookingId,b.status,vendorId]);
+      await client.query('commit');return mapTrackingSession(created[0]);
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function updateDeliveryLocation(vendorId, bookingId, {latitude,longitude,accuracyMeters,recordedAt}={}) {
+    const lat=Number(latitude),lon=Number(longitude),accuracy=accuracyMeters==null?null:Number(accuracyMeters),when=recordedAt?new Date(recordedAt):new Date();
+    if(!Number.isFinite(lat)||lat<-90||lat>90||!Number.isFinite(lon)||lon<-180||lon>180){const e=new Error('Invalid delivery location.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
+    if(accuracy!=null&&(!Number.isFinite(accuracy)||accuracy<0||accuracy>10000)){const e=new Error('Invalid GPS accuracy.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
+    if(Number.isNaN(when.getTime())||when.getTime()>Date.now()+120000){const e=new Error('Invalid location timestamp.');e.code='INVALID_DELIVERY_TIMESTAMP';throw e;}
+    if(!useDatabase){
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');
+      if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      if(new Date(session.expiresAt)<=new Date()){session.status='expired';session.endedAt=new Date().toISOString();const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
+      if(session.lastLocationAt&&when.getTime()<new Date(session.lastLocationAt).getTime()-5000){const e=new Error('Location update is older than the last accepted update.');e.code='STALE_LOCATION_UPDATE';throw e;}
+      session.lastLatitude=lat;session.lastLongitude=lon;session.lastAccuracyMeters=accuracy;session.lastLocationAt=when.toISOString();return session;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query("select ts.* from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and ts.vendor_id=$2 and ts.status='active' and v.owner_id=$2 for update",[bookingId,vendorId]);
+      const session=rows[0];if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      if(new Date(session.expires_at)<=new Date()){await client.query("update tracking_sessions set status='expired',ended_at=now() where id=$1",[session.id]);await client.query("update bookings set delivery_status='aborted',updated_at=now() where id=$1 and delivery_status='in_delivery'",[bookingId]);const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
+      if(session.last_location_at&&when.getTime()<new Date(session.last_location_at).getTime()-5000){const e=new Error('Location update is older than the last accepted update.');e.code='STALE_LOCATION_UPDATE';throw e;}
+      const {rows:updated}=await client.query("update tracking_sessions set last_latitude=$2,last_longitude=$3,last_accuracy_meters=$4,last_location_at=$5 where id=$1 returning *",[session.id,lat,lon,accuracy,when.toISOString()]);
+      await client.query('commit');return mapTrackingSession(updated[0]);
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function getActiveTrackingSession(vendorId, bookingId) {
+    if(!useDatabase){
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');
+      return session||null;
+    }
+    const {rows}=await pool.query("select ts.* from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and ts.vendor_id=$2 and ts.status='active' and v.owner_id=$2",[bookingId,vendorId]);
+    return rows[0]?mapTrackingSession(rows[0]):null;
+  }
+
+  async function updateTrackingRoute(vendorId, bookingId, {distanceMeters,durationSeconds,provider,polyline}={}) {
+    if(!Number.isFinite(Number(distanceMeters))||Number(distanceMeters)<0||!Number.isFinite(Number(durationSeconds))||Number(durationSeconds)<0){const e=new Error('Invalid route data.');e.code='ROUTE_INVALID_DATA';throw e;}
+    if(!useDatabase){
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');
+      if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      session.lastRouteDistanceMeters=Math.round(Number(distanceMeters));session.lastRouteDurationSeconds=Math.round(Number(durationSeconds));session.lastRouteAt=new Date().toISOString();session.lastRoutePolyline=String(polyline||'');session.routeProvider=String(provider||'').slice(0,40);return session;
+    }
+    const {rows}=await pool.query("update tracking_sessions ts set last_route_distance_meters=$3,last_route_duration_seconds=$4,last_route_at=now(),last_route_polyline=$5 where ts.id=(select id from tracking_sessions where booking_id=$1 and vendor_id=$2 and status='active' limit 1) returning *",[bookingId,vendorId,Math.round(Number(distanceMeters)),Math.round(Number(durationSeconds)),String(polyline||'')]);
+    return rows[0]?mapTrackingSession(rows[0]):null;
+  }
+
+  async function abortDelivery(vendorId, bookingId) {
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId));if(!b||String(b.vendorId)!==String(vendorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      session.status='aborted';session.endedAt=new Date().toISOString();b.deliveryStatus='aborted';b.updatedAt=new Date().toISOString();return {booking:b,session};
+    }
+    const client=await pool.connect();
+    try{await client.query('begin');const {rows}=await client.query("select ts.*,b.status as booking_status from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and ts.vendor_id=$2 and ts.status='active' and v.owner_id=$2 for update",[bookingId,vendorId]);const ts=rows[0];if(!ts){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}await client.query("update tracking_sessions set status='aborted',ended_at=now() where id=$1",[ts.id]);await client.query("update bookings set delivery_status='aborted',updated_at=now() where id=$1",[bookingId]);await client.query('commit');return {booking:await getBooking(bookingId),session:mapTrackingSession({...ts,status:'aborted',ended_at:new Date().toISOString()})};}catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function getTrackingForCustomer(customerId, bookingId) {
+    if(!useDatabase){
+      const booking=memory.bookings.get(String(bookingId));if(!booking||String(booking.customerId)!==String(customerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      let session=[...memory.trackingSessions.values()].filter(x=>String(x.bookingId)===String(bookingId)).sort((a,b)=>new Date(b.startedAt)-new Date(a.startedAt))[0];if(session&&session.status==='active'&&new Date(session.expiresAt)<=new Date()){session.status='expired';session.endedAt=new Date().toISOString();if(booking.deliveryStatus==='in_delivery')booking.deliveryStatus='aborted';}return {booking,session:session||null};
+    }
+    const {rows}=await pool.query("select b.*,ts.id as ts_id,ts.vendor_id as ts_vendor_id,ts.status as ts_status,ts.started_at as ts_started_at,ts.ended_at as ts_ended_at,ts.last_latitude as ts_last_latitude,ts.last_longitude as ts_last_longitude,ts.last_accuracy_meters as ts_last_accuracy_meters,ts.last_location_at as ts_last_location_at,ts.last_route_distance_meters as ts_last_route_distance_meters,ts.last_route_duration_seconds as ts_last_route_duration_seconds,ts.last_route_polyline as ts_last_route_polyline,ts.last_route_at as ts_last_route_at,ts.expires_at as ts_expires_at from bookings b left join lateral (select * from tracking_sessions x where x.booking_id=b.id order by x.started_at desc limit 1) ts on true where b.id=$1 and b.customer_id=$2",[bookingId,customerId]);
+    if(!rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+    const r=rows[0];if(r.ts_id&&r.ts_status==='active'&&new Date(r.ts_expires_at)<=new Date()){await pool.query("update tracking_sessions set status='expired',ended_at=now() where id=$1 and status='active'",[r.ts_id]);await pool.query("update bookings set delivery_status='aborted',updated_at=now() where id=$1 and delivery_status='in_delivery'",[bookingId]);r.ts_status='expired';r.ts_ended_at=new Date().toISOString();}
+    return {booking:mapBooking(r),session:r.ts_id?mapTrackingSession({id:r.ts_id,booking_id:r.id,vendor_id:r.ts_vendor_id,status:r.ts_status,started_at:r.ts_started_at,ended_at:r.ts_ended_at,last_latitude:r.ts_last_latitude,last_longitude:r.ts_last_longitude,last_accuracy_meters:r.ts_last_accuracy_meters,last_location_at:r.ts_last_location_at,last_route_distance_meters:r.ts_last_route_distance_meters,last_route_duration_seconds:r.ts_last_route_duration_seconds,last_route_polyline:r.ts_last_route_polyline,last_route_at:r.ts_last_route_at,expires_at:r.ts_expires_at}):null};
+  }
+
+  async function completeDelivery(vendorId, bookingId, {latitude=null,longitude=null}={}) {
+    const finalLat=latitude==null?null:Number(latitude),finalLon=longitude==null?null:Number(longitude);
+    if((finalLat==null)!==(finalLon==null)||finalLat!=null&&(!Number.isFinite(finalLat)||finalLat<-90||finalLat>90)||finalLon!=null&&(!Number.isFinite(finalLon)||finalLon<-180||finalLon>180)){const e=new Error('Invalid final delivery location.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId));if(!b||String(b.vendorId)!==String(vendorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      const now=new Date().toISOString();session.status='completed';session.endedAt=now;if(finalLat!=null){session.lastLatitude=finalLat;session.lastLongitude=finalLon;session.lastLocationAt=now;}b.deliveryStatus='delivered';b.deliveredAt=now;b.deliveryFinalLatitude=finalLat??session.lastLatitude;b.deliveryFinalLongitude=finalLon??session.lastLongitude;b.updatedAt=now;return {booking:b,session};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query("select ts.*,b.status as booking_status from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and ts.vendor_id=$2 and ts.status='active' and v.owner_id=$2 for update",[bookingId,vendorId]);
+      const ts=rows[0];if(!ts){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      if(new Date(ts.expires_at)<=new Date()){await client.query("update tracking_sessions set status='expired',ended_at=now() where id=$1",[ts.id]);const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
+      if(ts.booking_status!=='confirmed'){const e=new Error('Delivery can no longer be completed.');e.code='DELIVERY_COMPLETION_NOT_ALLOWED';throw e;}
+      const lat=finalLat??(ts.last_latitude==null?null:Number(ts.last_latitude)),lon=finalLon??(ts.last_longitude==null?null:Number(ts.last_longitude));
+      await client.query("update tracking_sessions set status='completed',ended_at=now(),last_latitude=coalesce($2,last_latitude),last_longitude=coalesce($3,last_longitude),last_location_at=case when $2 is not null then now() else last_location_at end where id=$1",[ts.id,lat,lon]);
+      await client.query("update bookings set delivery_status='delivered',delivered_at=now(),delivery_final_latitude=$2,delivery_final_longitude=$3,updated_at=now() where id=$1",[bookingId,lat,lon]);
+      await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,'vendor',$3,'delivery_completed')",[bookingId,ts.booking_status,vendorId]);
+      await client.query('commit');const latest=await getBooking(bookingId);return {booking:latest,session:mapTrackingSession({...ts,status:'completed',ended_at:now.toISOString(),last_latitude:lat,last_longitude:lon,last_location_at:lat!=null?now.toISOString():ts.last_location_at})};
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
 
   async function getBooking(id, customerId = null){
@@ -665,42 +1050,107 @@ export function createRepository({ databaseUrl, fleet }) {
       return booking && (!customerId || booking.customerId===customerId) ? booking : null;
     }
     const {rows}=await pool.query(
-      'select b.*, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join payments p on p.booking_id=b.id and p.status in (\'unpaid\',\'pending\') left join vehicles v on v.id=b.vehicle_id where b.id=$1 and ($2::uuid is null or b.customer_id=$2)',
+      'select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.id=$1 and ($2::uuid is null or b.customer_id=$2)',
       [id, customerId]
     );
     if(!rows[0]) return null;
     const r=rows[0];
-    return mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
+    return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
-  async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join payments p on p.booking_id=b.id and p.status in (\'unpaid\',\'pending\') left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
+  async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
   const canTransition = (current, next) => {
     if (current === next) return true;
-    if (current === 'unpaid') return next === 'pending' || next === 'failed';
-    if (current === 'pending') return next === 'paid' || next === 'failed';
-    if (current === 'failed') return next === 'pending';
-    if (current === 'paid') return next === 'refunded';
-    return false;
+    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
+    return Boolean(allowed[current]?.includes(next));
   };
 
-  async function cancelBooking(id,customerId){
+  async function getCancellationPreview(id, customerId){
+    const booking=await getBooking(id,customerId);
+    if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+    return calculateCancellation({booking});
+  }
+
+  async function cancelBooking(id,customerId,{reason='customer_cancelled'}={}){
     if(!useDatabase){
       const b=memory.bookings.get(id);
-      if(!b||b.customerId!==customerId||!['requested','confirmed'].includes(b.status))return null;
+      if(!b||b.customerId!==customerId){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const calculation=calculateCancellation({booking:b});
       const previous=b.status;
-      b.status='cancelled';b.updatedAt=new Date().toISOString();return b;
+      b.status='cancelled'; if(b.deliveryStatus==='in_delivery'){const active=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(id)&&x.status==='active');if(active){active.status='aborted';active.endedAt=new Date().toISOString();}b.deliveryStatus='aborted';} b.cancellationFee=calculation.cancellationFee; b.refundAmount=calculation.totalRefund; b.cancellationReason=reason; b.cancelledAt=new Date().toISOString();
+      if(b.paymentStatus==='paid'&&calculation.totalRefund>0)b.paymentStatus='refund_pending';
+      b.updatedAt=new Date().toISOString();
+      return {booking:b,calculation,previousStatus:previous};
     }
     const client=await pool.connect();
     try{
       await client.query('begin');
       const {rows}=await client.query('select * from bookings where id=$1 and customer_id=$2 for update',[id,customerId]);
-      if(!rows[0]){await client.query('rollback');return null;}
+      if(!rows[0]){await client.query('rollback');const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const current=mapBooking(rows[0]);
+      const calculation=calculateCancellation({booking:current});
       const previous=rows[0].status;
-      if(!['requested','confirmed'].includes(previous)){await client.query('rollback');return null;}
-      const {rows:updated}=await client.query('update bookings set status=\'cancelled\',updated_at=now() where id=$1 returning *',[id]);
-      await client.query('insert into booking_status_events (booking_id,previous_status,next_status,actor_type,actor_id) values ($1,$2,\'cancelled\',\'customer\',$3)',[id,previous,customerId]);
+      const paymentStatus=rows[0].payment_status==='paid'&&calculation.totalRefund>0?'refund_pending':rows[0].payment_status;
+      await client.query("update tracking_sessions set status='aborted',ended_at=now() where booking_id=$1 and status='active'",[id]);
+      await client.query("update bookings set delivery_status=case when delivery_status='in_delivery' then 'aborted' else delivery_status end,updated_at=now() where id=$1",[id]);
+      const {rows:updated}=await client.query('update bookings set status=\'cancelled\',payment_status=$2,cancellation_fee_paise=$3,refund_amount_paise=$4,cancelled_at=now(),cancellation_reason=$5,updated_at=now() where id=$1 returning *',[id,paymentStatus,Math.round(calculation.cancellationFee*100),Math.round(calculation.totalRefund*100),reason]);
+      await client.query('insert into booking_status_events (booking_id,previous_status,next_status,actor_type,actor_id,note) values ($1,$2,\'cancelled\',\'customer\',$3,$4)',[id,previous,customerId,reason]);
+      if(paymentStatus==='refund_pending') await client.query('update payments set status=\'refund_pending\',updated_at=now() where booking_id=$1 and status=\'paid\'',[id]);
+      if(Number(calculation.refundableSecurityDeposit)>0) await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,(select vendor_id from bookings where id=$1),$3,$3,'refund_pending') on conflict (booking_id) do update set refundable_amount_paise=excluded.refundable_amount_paise,status='refund_pending',updated_at=now()`,[id,customerId,Math.round(calculation.refundableSecurityDeposit*100)]);
       await client.query('commit');
-      return mapBooking({...updated[0],vehicle:undefined});
-    }catch(e){await client.query('rollback');throw e;}finally{client.release();}
+      return {booking:mapBooking({...updated[0],vehicle:undefined}),calculation,previousStatus:previous};
+    }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
+  }
+
+  async function markPaymentRefundPending(paymentId,{providerReference}={}){
+    if(!useDatabase){const p=[...(memory.payments?.values()||[])].find(x=>x.id===String(paymentId));if(!p){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}if(p.status==='refunded'||p.status==='refund_pending')return p;if(p.status!=='paid'){const e=new Error('Payment is not refundable in its current state.');e.code='INVALID_PAYMENT_STATE';throw e;}p.status='refund_pending';if(providerReference)p.providerReference=String(providerReference);p.updatedAt=new Date().toISOString();const b=memory.bookings.get(String(p.bookingId));if(b)b.paymentStatus='refund_pending';return p;}
+    const client=await pool.connect();try{await client.query('begin');const {rows}=await client.query('select p.*,b.customer_id from payments p join bookings b on b.id=p.booking_id where p.id=$1 for update',[paymentId]);if(!rows[0]){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}if(['refunded','refund_pending'].includes(rows[0].status)){await client.query('commit');return {id:String(rows[0].id),bookingId:String(rows[0].booking_id),status:rows[0].status};}if(rows[0].status!=='paid'){const e=new Error('Payment is not refundable in its current state.');e.code='INVALID_PAYMENT_STATE';throw e;}await client.query('update payments set status=\'refund_pending\',provider_reference=coalesce($2,provider_reference),updated_at=now() where id=$1',[paymentId,providerReference||null]);await client.query('update bookings set payment_status=\'refund_pending\',updated_at=now() where id=$1',[rows[0].booking_id]);await client.query('commit');return {id:String(rows[0].id),bookingId:String(rows[0].booking_id),status:'refund_pending'};}catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
+  }
+
+  async function claimRefundRequest(paymentId){
+    const key=String(paymentId);
+    if(!useDatabase){
+      const existing=memory.financialTransactions.get(key);
+      if(existing && ['pending','submitted','completed'].includes(existing.status)) return {created:false,status:existing.status,idempotencyKey:existing.idempotencyKey};
+      const p=[...(memory.payments?.values()||[])].find(x=>x.id===key);
+      if(!p){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
+      if(p.status==='refunded') return {created:false,status:'completed',idempotencyKey:`refund:${key}`};
+      if(!['paid','refund_pending'].includes(p.status)){const e=new Error('Payment is not refundable in its current state.');e.code='INVALID_PAYMENT_STATE';throw e;}
+      p.status='refund_pending';p.updatedAt=new Date().toISOString();
+      const tx={bookingId:String(p.bookingId),paymentId:key,transactionType:'refund',status:'pending',idempotencyKey:`refund:${key}`};
+      memory.financialTransactions.set(key,tx);
+      return {created:true,status:'pending',idempotencyKey:tx.idempotencyKey};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query('select p.*,b.id as booking_id from payments p join bookings b on b.id=p.booking_id where p.id=$1 for update',[paymentId]);
+      if(!rows[0]){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}
+      const existing=await client.query("select id,status,idempotency_key from financial_transactions where booking_id=$1 and transaction_type='refund' order by created_at desc limit 1 for update",[rows[0].booking_id]);
+      if(existing.rows[0] && ['pending','submitted','completed'].includes(existing.rows[0].status)){await client.query('commit');return {created:false,status:existing.rows[0].status,idempotencyKey:existing.rows[0].idempotency_key};}
+      if(rows[0].status==='refunded'){await client.query('commit');return {created:false,status:'completed',idempotencyKey:`refund:${paymentId}`};}
+      if(!['paid','refund_pending'].includes(rows[0].status)){const e=new Error('Payment is not refundable in its current state.');e.code='INVALID_PAYMENT_STATE';throw e;}
+      await client.query("update payments set status='refund_pending',updated_at=now() where id=$1",[paymentId]);
+      let tx;
+      if(existing.rows[0]){
+        tx=await client.query("update financial_transactions set status='pending',updated_at=now() where id=$1 returning id,status,idempotency_key",[existing.rows[0].id]);
+      } else {
+        tx=await client.query("insert into financial_transactions(booking_id,customer_id,amount_paise,currency,transaction_type,status,provider,provider_transaction_id,idempotency_key) values($1,(select customer_id from bookings where id=$1),$2,'INR','refund',$3,$4,null,$5) returning id,status,idempotency_key",[rows[0].booking_id,rows[0].amount_paise,'pending',rows[0].provider,`refund:${paymentId}`]);
+      }
+      await client.query("update bookings set payment_status='refund_pending',updated_at=now() where id=$1",[rows[0].booking_id]);
+      await client.query('commit');
+      return {created:true,status:'pending',idempotencyKey:tx.rows[0].idempotency_key};
+    }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
+  }
+
+  async function markRefundRetryable(paymentId){
+    if(!useDatabase){const tx=memory.financialTransactions.get(String(paymentId));if(tx)tx.status='retryable';return;}
+    await pool.query("update financial_transactions set status='retryable',updated_at=now() where booking_id=(select booking_id from payments where id=$1) and transaction_type='refund' and status='pending'",[paymentId]);
+  }
+
+  async function completePaymentRefund({paymentId,providerReference}={}){
+    if(!providerReference){const e=new Error('Provider refund reference is required.');e.code='REFUND_PROVIDER_REFERENCE_REQUIRED';throw e;}
+    if(!useDatabase){const p=[...(memory.payments?.values()||[])].find(x=>x.id===String(paymentId));if(!p){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}if(p.status==='refunded')return p;if(p.status!=='refund_pending'){const e=new Error('Payment is not awaiting a refund.');e.code='INVALID_PAYMENT_STATE';throw e;}p.status='refunded';p.providerReference=String(providerReference);p.updatedAt=new Date().toISOString();const b=memory.bookings.get(String(p.bookingId));if(b)b.paymentStatus='refunded';return p;}
+    const client=await pool.connect();try{await client.query('begin');const {rows}=await client.query('select p.*,b.id as booking_id from payments p join bookings b on b.id=p.booking_id where p.id=$1 for update',[paymentId]);if(!rows[0]){const e=new Error('Payment not found.');e.code='PAYMENT_NOT_FOUND';throw e;}if(rows[0].status==='refunded'){await client.query('commit');return {id:String(rows[0].id),bookingId:String(rows[0].booking_id),status:'refunded'};}if(rows[0].status!=='refund_pending'){const e=new Error('Payment is not awaiting a refund.');e.code='INVALID_PAYMENT_STATE';throw e;}await client.query('update payments set status=\'refunded\',provider_reference=$2,updated_at=now() where id=$1',[paymentId,String(providerReference)]);await client.query('update bookings set payment_status=\'refunded\',updated_at=now() where id=$1',[rows[0].booking_id]);await client.query('update security_deposits set status=\'refunded\',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id=$1 and status=\'refund_pending\'',[rows[0].booking_id,String(providerReference)]);await client.query('commit');return {id:String(rows[0].id),bookingId:String(rows[0].booking_id),status:'refunded',providerReference:String(providerReference)};}catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
   }
   async function applyPaymentEvent(event){
     if (!useDatabase) {
@@ -713,6 +1163,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
       if (event.providerOrderId && payment.providerOrderId !== String(event.providerOrderId)) return { applied:false, duplicate:false, invalid:true };
       const expectedPaise = Math.round(Number(booking.pricing?.total || 0) * 100);
+      if (event.status==='paid' && !['requested','confirmed'].includes(String(booking.status))) return { applied:false, duplicate:false, invalid:true };
       if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedPaise || !event.providerReference || !canTransition(booking.paymentStatus || 'unpaid', event.status)) {
         return { applied:false, duplicate:false, invalid:true };
       }
@@ -722,6 +1173,9 @@ export function createRepository({ databaseUrl, fleet }) {
       const paymentRecord = event.providerOrderId
         ? [...memory.payments.values()].find(p => p.providerOrderId === String(event.providerOrderId))
         : memory.payments.get(String(resolvedBookingId));
+      if (event.status==='paid') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='held'; }
+      if (event.status==='refund_pending') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='refund_pending'; }
+      if (event.status==='refunded') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) { deposit.status='refunded'; deposit.refundProviderReference=event.providerReference; } }
       if (paymentRecord) {
         paymentRecord.status = event.status;
         paymentRecord.providerReference = event.providerReference;
@@ -749,6 +1203,7 @@ export function createRepository({ databaseUrl, fleet }) {
         return { applied:false, duplicate:false, invalid:true };
       }
       const booking = bookingResult.rows[0];
+      if (event.status==='paid' && !['requested','confirmed'].includes(String(booking.status))) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
       if (event.currency !== 'INR' || Number(event.amountPaise) !== Number(booking.total_paise) || Number(event.amountPaise) !== Number(payment.amount_paise) || !event.providerReference || !canTransition(booking.payment_status, event.status)) {
         await client.query('rollback');
         return { applied:false, duplicate:false, invalid:true };
@@ -760,6 +1215,9 @@ export function createRepository({ databaseUrl, fleet }) {
       }
       await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[resolvedBookingId,event.status,event.providerReference]);
       await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
+      if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
+      if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[resolvedBookingId]);
+      if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id=$1 and status in ('held','refund_pending','release_pending')",[resolvedBookingId,event.providerReference]);
       await client.query('commit');
       return { applied:true, duplicate:false };
     } catch(e) {
@@ -1026,7 +1484,476 @@ export function createRepository({ databaseUrl, fleet }) {
     if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
   }
 
+
+  const sanitizeReviewComment = (value) => {
+    if (value == null) return null;
+    const normalized = String(value).replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '').replace(/\\s+/g, ' ').trim();
+    return normalized ? normalized.slice(0, 1000) : null;
+  };
+
+  const mapReview = (row) => row && ({
+    id: String(row.id), bookingId: String(row.booking_id ?? row.bookingId),
+    reviewerUserId: String(row.reviewer_user_id ?? row.reviewerUserId),
+    revieweeUserId: String(row.reviewee_user_id ?? row.revieweeUserId),
+    reviewType: row.review_type ?? row.reviewType, rating: Number(row.rating),
+    comment: row.comment || null, createdAt: iso(row.created_at ?? row.createdAt), updatedAt: iso(row.updated_at ?? row.updatedAt),
+    reviewerName: row.reviewType==='customer_to_vendor' || row.review_type==='customer_to_vendor' ? 'Verified customer' : 'Verified RideOn vendor', revieweeName: row.reviewee_name || row.revieweeName || null,
+    vehicleId: row.vehicle_id == null ? null : String(row.vehicle_id), vehicleName: row.vehicle_name || null,
+    vendorId: row.resolved_vendor_id == null ? (row.vendor_id == null ? null : String(row.vendor_id)) : String(row.resolved_vendor_id),
+    vendorName: row.vendor_name || null,
+  });
+
+  const reviewSummary = (rows = []) => {
+    const distribution = {1:0,2:0,3:0,4:0,5:0};
+    for (const row of rows) { const rating=Number(row.rating); if (rating>=1 && rating<=5) distribution[rating] += 1; }
+    const total=rows.length;
+    const average=total ? Number((rows.reduce((sum,row)=>sum+Number(row.rating),0)/total).toFixed(2)) : 0;
+    return {averageRating:average,totalReviewCount:total,ratingDistribution:distribution};
+  };
+
+  const reviewSelect = 'select r.*, reviewer.full_name as reviewer_name, reviewee.full_name as reviewee_name, b.vehicle_id, b.vendor_id, v.name as vehicle_name, coalesce(b.vendor_id,v.owner_id) as resolved_vendor_id, ven.business_name as vendor_name from reviews r join customers reviewer on reviewer.id=r.reviewer_user_id join customers reviewee on reviewee.id=r.reviewee_user_id join bookings b on b.id=r.booking_id join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=coalesce(b.vendor_id,v.owner_id)';
+
+  async function createReview({bookingId,reviewerId,reviewerRole,rating,comment}) {
+    const normalizedRating=Number(rating);
+    if(!Number.isInteger(normalizedRating)||normalizedRating<1||normalizedRating>5){const e=new Error('Rating must be an integer from 1 to 5.');e.code='INVALID_REVIEW_RATING';throw e;}
+    const normalizedComment=sanitizeReviewComment(comment);
+    if(!useDatabase){
+      const booking=memory.bookings.get(String(bookingId));
+      if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(booking.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
+      const vendor=[...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(booking.vendorId));
+      const vendorOwnerId=vendor?.ownerCustomerId||vendor?.owner_customer_id;
+      let reviewType,revieweeId;
+      if(reviewerRole==='customer'){
+        if(String(booking.customerId)!==String(reviewerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        if(!vendorOwnerId){const e=new Error('Vendor review target is unavailable.');e.code='REVIEW_TARGET_UNAVAILABLE';throw e;}
+        reviewType='customer_to_vendor';revieweeId=String(vendorOwnerId);
+      }else if(reviewerRole==='vendor'){
+        if(!vendor||String(vendor.ownerCustomerId||vendor.owner_customer_id)!==String(reviewerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        reviewType='vendor_to_customer';revieweeId=String(booking.customerId);
+      }else{const e=new Error('Invalid reviewer role.');e.code='FORBIDDEN';throw e;}
+      const duplicate=[...memory.reviews.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.reviewerUserId)===String(reviewerId)&&x.reviewType===reviewType);
+      if(duplicate){const e=new Error('You have already reviewed this booking.');e.code='REVIEW_ALREADY_EXISTS';throw e;}
+      const now=new Date().toISOString();
+      const review={id:crypto.randomUUID(),bookingId:String(bookingId),reviewerUserId:String(reviewerId),revieweeUserId:revieweeId,reviewType,rating:normalizedRating,comment:normalizedComment,createdAt:now,updatedAt:now,vehicleId:String(booking.vehicleId),vehicleName:booking.vehicle?.name||null,vendorId:booking.vendorId?String(booking.vendorId):null,vendorName:vendor?.businessName||null};
+      memory.reviews.set(review.id,review);return review;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query('select b.id,b.customer_id,b.vendor_id,b.vehicle_id,b.status,v.name as vehicle_name,v.owner_id,ven.business_name as vendor_name,ven.owner_customer_id as vendor_owner_customer_id from bookings b join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=coalesce(b.vendor_id,v.owner_id) where b.id=$1 for update',[bookingId]);
+      const b=q.rows[0];
+      if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(b.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
+      let reviewType,revieweeId;
+      if(reviewerRole==='customer'){
+        if(String(b.customer_id)!==String(reviewerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        reviewType='customer_to_vendor';revieweeId=b.vendor_owner_customer_id;
+        if(!revieweeId){const e=new Error('Vendor review target is unavailable.');e.code='REVIEW_TARGET_UNAVAILABLE';throw e;}
+      }else if(reviewerRole==='vendor'){
+        if(!b.vendor_id){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        const vc=await client.query('select id from vendors where id=$1 and owner_customer_id=$2',[b.vendor_id,reviewerId]);
+        if(!vc.rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        reviewType='vendor_to_customer';revieweeId=b.customer_id;
+      }else{const e=new Error('Invalid reviewer role.');e.code='FORBIDDEN';throw e;}
+      try{
+        const inserted=await client.query('insert into reviews(booking_id,reviewer_user_id,reviewee_user_id,review_type,rating,comment) values($1,$2,$3,$4,$5,$6) returning *',[bookingId,reviewerId,revieweeId,reviewType,normalizedRating,normalizedComment]);
+        await client.query('commit');
+        return mapReview({...inserted.rows[0],vehicle_id:b.vehicle_id,vehicle_name:b.vehicle_name,vendor_id:b.vendor_id||b.owner_id,resolved_vendor_id:b.vendor_id||b.owner_id,vendor_name:b.vendor_name});
+      }catch(error){if(error.code==='23505'){const e=new Error('You have already reviewed this booking.');e.code='REVIEW_ALREADY_EXISTS';throw e;}throw error;}
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function getReviewStatus({bookingId,userId,role}) {
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId));
+      const vendor=role==='vendor' ? [...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(b?.vendorId)) : null;
+      if(!b||(role==='customer'&&String(b.customerId)!==String(userId))||(role==='vendor'&&(!vendor||String(vendor.ownerCustomerId||vendor.owner_customer_id)!==String(userId)))){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
+      const own=[...memory.reviews.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.reviewerUserId)===String(userId)&&x.reviewType===type);
+      return {eligible:b.status==='completed',review:own||null,reviewType:type};
+    }
+    const b=role==='customer'?await getBooking(bookingId,userId):await getVendorBooking(userId,bookingId);
+    if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+    const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
+    const q=await pool.query(reviewSelect+' where r.booking_id=$1 and r.reviewer_user_id=$2 and r.review_type=$3 limit 1',[bookingId,userId,type]);
+    return {eligible:b.status==='completed',review:q.rows[0]?mapReview(q.rows[0]):null,reviewType:type};
+  }
+
+  async function updateReview({reviewId,userId,role,rating,comment}) {
+    const normalizedRating=Number(rating);
+    if(!Number.isInteger(normalizedRating)||normalizedRating<1||normalizedRating>5){const e=new Error('Rating must be an integer from 1 to 5.');e.code='INVALID_REVIEW_RATING';throw e;}
+    const normalizedComment=sanitizeReviewComment(comment);
+    const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
+    if(role==='vendor'){const e=new Error('Vendor reviews cannot be edited.');e.code='REVIEW_EDIT_NOT_ALLOWED';throw e;}
+    if(!useDatabase){
+      const review=memory.reviews.get(String(reviewId));
+      if(!review||String(review.reviewerUserId)!==String(userId)||review.reviewType!==type){const e=new Error('Review not found.');e.code='REVIEW_NOT_FOUND';throw e;}
+      if(Date.now()-new Date(review.createdAt).getTime()>30*86400000){const e=new Error('The review can no longer be edited.');e.code='REVIEW_EDIT_WINDOW_EXPIRED';throw e;}
+      review.rating=normalizedRating;review.comment=normalizedComment;review.updatedAt=new Date().toISOString();return review;
+    }
+    const q=await pool.query('select * from reviews where id=$1 and reviewer_user_id=$2 and review_type=$3',[reviewId,userId,type]);
+    const review=q.rows[0];if(!review){const e=new Error('Review not found.');e.code='REVIEW_NOT_FOUND';throw e;}
+    if(Date.now()-new Date(review.created_at).getTime()>30*86400000){const e=new Error('The review can no longer be edited.');e.code='REVIEW_EDIT_WINDOW_EXPIRED';throw e;}
+    const updated=await pool.query('update reviews set rating=$2,comment=$3,updated_at=now() where id=$1 returning *',[reviewId,normalizedRating,normalizedComment]);
+    return mapReview(updated.rows[0]);
+  }
+
+  async function listReviews({scope,id,limit=10,offset=0}) {
+    const safeLimit=Math.max(1,Math.min(50,Number(limit)||10)),safeOffset=Math.max(0,Number(offset)||0);
+    if(!useDatabase){
+      let rows=[...memory.reviews.values()];
+      if(scope==='vehicle')rows=rows.filter(x=>String(x.vehicleId)===String(id)&&x.reviewType==='customer_to_vendor');
+      else if(scope==='vendor')rows=rows.filter(x=>String(x.vendorId)===String(id)&&x.reviewType==='customer_to_vendor');
+      else if(scope==='user')rows=rows.filter(x=>String(x.revieweeUserId)===String(id));
+      rows.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return {summary:reviewSummary(rows),reviews:rows.slice(safeOffset,safeOffset+safeLimit)};
+    }
+    let filter="r.review_type='customer_to_vendor'",params=[];
+    if(scope==='vehicle'){params=[id];filter+=' and b.vehicle_id=$1';}
+    else if(scope==='vendor'){params=[id];filter+=' and coalesce(b.vendor_id,v.owner_id)=$1';}
+    else if(scope==='user'){params=[id];filter='r.reviewee_user_id=$1';}
+    const summaryRows=await pool.query('select r.rating,count(*)::int as count from reviews r join bookings b on b.id=r.booking_id join vehicles v on v.id=b.vehicle_id where '+filter+' group by r.rating order by r.rating',params);
+    const counts={1:0,2:0,3:0,4:0,5:0};let total=0,weighted=0;
+    for(const row of summaryRows.rows){const rating=Number(row.rating),count=Number(row.count);if(counts[rating]!==undefined){counts[rating]=count;total+=count;weighted+=rating*count;}}
+    const recent=await pool.query(reviewSelect+' where '+filter+' order by r.created_at desc limit $'+(params.length+1)+' offset $'+(params.length+2),[...params,safeLimit,safeOffset]);
+    return {summary:{averageRating:total?Number((weighted/total).toFixed(2)):0,totalReviewCount:total,ratingDistribution:counts},reviews:recent.rows.map(mapReview)};
+  }
+
+  async function listReviewsReceived(userId,{limit=20,offset=0}={}) {
+    return listReviews({scope:'user',id:userId,limit,offset});
+  }
+
+  const SUPPORT_CATEGORIES = new Set(['Payment','Refund','Security Deposit','Booking','Vehicle','Delivery','Pickup/Return','Damage','Cancellation','Account','Technical Issue','Other']);
+  const SUPPORT_PRIORITIES = new Set(['low','normal','high','urgent']);
+  const SUPPORT_STATUSES = new Set(['open','in_progress','waiting_for_user','resolved','closed']);
+  const SUPPORT_ROLES = new Set(['support','admin']);
+
+  const sanitizeSupportText = (value, max) => String(value ?? '')
+    .replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '')
+    .replace(/[<>]/g, '')
+    .replace(/\\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+
+  const supportError = (message, code) => { const e = new Error(message); e.code = code; return e; };
+
+  const mapSupportTicket = (row, includePrivate = false) => {
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      ticketNumber: row.ticket_number,
+      bookingId: row.booking_id ? String(row.booking_id) : null,
+      raisedByUserId: row.raised_by_user_id ? String(row.raised_by_user_id) : null,
+      raisedByRole: row.raised_by_role || row.raisedByRole || null,
+      raisedByName: row.raised_by_name || null,
+      assignedToUserId: row.assigned_to_user_id ? String(row.assigned_to_user_id) : null,
+      assignedToName: row.assigned_to_name || null,
+      category: row.category,
+      subject: row.subject,
+      description: row.description,
+      priority: row.priority,
+      status: row.status,
+      resolution: row.resolution || null,
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at),
+      resolvedAt: iso(row.resolved_at),
+      booking: row.booking_id ? {
+        id: String(row.booking_id),
+        vehicleId: row.vehicle_id ? String(row.vehicle_id) : null,
+        vehicleName: row.vehicle_name || null,
+        startAt: iso(row.start_at),
+        endAt: iso(row.end_at),
+        status: row.booking_status || null,
+        delivery: row.delivery_required == null ? null : Boolean(row.delivery_required),
+        address: row.delivery_address || null,
+      } : null,
+      ...(includePrivate ? { internalMessageCount: Number(row.internal_message_count || 0) } : {}),
+    };
+  };
+
+  const supportTicketSelect = `
+    select t.*,
+           raised.full_name as raised_by_name,
+           raised.role as raised_by_role,
+           assigned.full_name as assigned_to_name,
+           b.vehicle_id,
+           b.start_at,
+           b.end_at,
+           b.status as booking_status,
+           b.delivery_required,
+           b.delivery_address,
+           v.name as vehicle_name,
+           (select count(*) from ticket_messages tm where tm.ticket_id=t.id and tm.is_internal=true) as internal_message_count
+    from support_tickets t
+    join customers raised on raised.id=t.raised_by_user_id
+    left join customers assigned on assigned.id=t.assigned_to_user_id
+    left join bookings b on b.id=t.booking_id
+    left join vehicles v on v.id=b.vehicle_id
+  `;
+
+  function validateSupportInput({ category, subject, description, priority = 'normal' }) {
+    if (!SUPPORT_CATEGORIES.has(category)) throw supportError('Unsupported support category.', 'INVALID_SUPPORT_CATEGORY');
+    if (!SUPPORT_PRIORITIES.has(priority)) throw supportError('Unsupported support priority.', 'INVALID_SUPPORT_PRIORITY');
+    const normalizedSubject = sanitizeSupportText(subject, 160);
+    const normalizedDescription = sanitizeSupportText(description, 5000);
+    if (normalizedSubject.length < 3) throw supportError('Subject must be at least 3 characters.', 'INVALID_SUPPORT_SUBJECT');
+    if (normalizedDescription.length < 10) throw supportError('Please describe the issue in at least 10 characters.', 'INVALID_SUPPORT_DESCRIPTION');
+    return { category, priority, subject: normalizedSubject, description: normalizedDescription };
+  }
+
+  const canTransitionSupportStatus = (from, to) => {
+    if (!SUPPORT_STATUSES.has(to)) return false;
+    if (from === to) return true;
+    const allowed = {
+      open: new Set(['in_progress','waiting_for_user','resolved','closed']),
+      in_progress: new Set(['open','waiting_for_user','resolved','closed']),
+      waiting_for_user: new Set(['open','in_progress','resolved','closed']),
+      resolved: new Set(['open','closed']),
+      closed: new Set(['open']),
+    };
+    return Boolean(allowed[from]?.has(to));
+  };
+
+  async function getSupportBookingForUser(bookingId, userId, role) {
+    if (!bookingId) return null;
+    if (role === 'customer') {
+      const booking = await getBooking(bookingId, userId);
+      if (!booking) throw supportError('Booking not found.', 'BOOKING_NOT_FOUND');
+      return booking;
+    }
+    if (role === 'vendor') {
+      const vendor = await findVendorByCustomerId(userId);
+      if (!vendor) throw supportError('Vendor profile not found.', 'VENDOR_NOT_FOUND');
+      const booking = await getVendorBooking(vendor.id, bookingId);
+      if (!booking) throw supportError('Booking not found.', 'BOOKING_NOT_FOUND');
+      return booking;
+    }
+    if (SUPPORT_ROLES.has(role)) {
+      if (!useDatabase) return memory.bookings.get(String(bookingId)) || null;
+      const booking = await pool.query('select id from bookings where id=$1', [bookingId]);
+      if (!booking.rows[0]) throw supportError('Booking not found.', 'BOOKING_NOT_FOUND');
+      return booking.rows[0];
+    }
+    throw supportError('You do not have access to this booking.', 'FORBIDDEN');
+  }
+
+  async function createSupportTicket({ bookingId = null, raisedByUserId, raisedByRole, category, subject, description, priority = 'normal', idempotencyKey = null }) {
+    if (!['customer','vendor'].includes(raisedByRole)) throw supportError('Support tickets can only be raised by customers or vendors.', 'FORBIDDEN');
+    const input = validateSupportInput({ category, subject, description, priority });
+    const key = idempotencyKey ? String(idempotencyKey).trim() : null;
+    if (key && (key.length < 8 || key.length > 128)) throw supportError('Invalid support request key.', 'INVALID_IDEMPOTENCY_KEY');
+
+    if (bookingId) await getSupportBookingForUser(bookingId, raisedByUserId, raisedByRole);
+
+    if (!useDatabase) {
+      const existing = key ? [...memory.supportTickets.values()].find(t => String(t.raisedByUserId) === String(raisedByUserId) && t.idempotencyKey === key) : null;
+      if (existing) return { ticket: existing, idempotentReplay: true };
+      const now = new Date().toISOString();
+      const ticket = {
+        id: crypto.randomUUID(),
+        ticketNumber: `RID-${now.slice(0,10).replace(/-/g,'')}-${String(memory.supportTickets.size + 1).padStart(6,'0')}`,
+        bookingId: bookingId ? String(bookingId) : null,
+        raisedByUserId: String(raisedByUserId),
+        raisedByRole,
+        assignedToUserId: null,
+        category: input.category,
+        subject: input.subject,
+        description: input.description,
+        priority: input.priority,
+        status: 'open',
+        resolution: null,
+        idempotencyKey: key,
+        createdAt: now,
+        updatedAt: now,
+        resolvedAt: null,
+      };
+      memory.supportTickets.set(ticket.id, ticket);
+      return { ticket, idempotentReplay: false };
+    }
+
+    if (key) {
+      const existing = await pool.query(supportTicketSelect + ' where t.raised_by_user_id=$1 and t.idempotency_key=$2 limit 1', [raisedByUserId, key]);
+      if (existing.rows[0]) return { ticket: mapSupportTicket(existing.rows[0]), idempotentReplay: true };
+    }
+    try {
+      const inserted = await pool.query(
+        'insert into support_tickets(booking_id,raised_by_user_id,category,subject,description,priority,idempotency_key) values($1,$2,$3,$4,$5,$6,$7) returning id',
+        [bookingId, raisedByUserId, input.category, input.subject, input.description, input.priority, key]
+      );
+      const loaded = await pool.query(supportTicketSelect + ' where t.id=$1', [inserted.rows[0].id]);
+      return { ticket: mapSupportTicket(loaded.rows[0]), idempotentReplay: false };
+    } catch (error) {
+      if (error.code === '23505' && key) {
+        const existing = await pool.query(supportTicketSelect + ' where t.raised_by_user_id=$1 and t.idempotency_key=$2 limit 1', [raisedByUserId, key]);
+        if (existing.rows[0]) return { ticket: mapSupportTicket(existing.rows[0]), idempotentReplay: true };
+      }
+      throw error;
+    }
+  }
+
+  async function listMySupportTickets({ userId, role, status, category, limit = 20, offset = 0 }) {
+    if (!['customer','vendor'].includes(role)) throw supportError('You do not have access to support tickets.', 'FORBIDDEN');
+    const safeLimit=Math.max(1,Math.min(50,Number(limit)||20));
+    const safeOffset=Math.max(0,Number(offset)||0);
+    if (!useDatabase) {
+      let rows=[...memory.supportTickets.values()].filter(t=>String(t.raisedByUserId)===String(userId));
+      if(status){if(!SUPPORT_STATUSES.has(status))throw supportError('Unsupported support status.','INVALID_SUPPORT_STATUS');rows=rows.filter(t=>t.status===status);}
+      if(category){if(!SUPPORT_CATEGORIES.has(category))throw supportError('Unsupported support category.','INVALID_SUPPORT_CATEGORY');rows=rows.filter(t=>t.category===category);}
+      rows.sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
+      return {tickets:rows.slice(safeOffset,safeOffset+safeLimit),pagination:{limit:safeLimit,offset:safeOffset,count:rows.length}};
+    }
+    const clauses=['t.raised_by_user_id=$1'],params=[userId];
+    if(status){if(!SUPPORT_STATUSES.has(status))throw supportError('Unsupported support status.','INVALID_SUPPORT_STATUS');params.push(status);clauses.push('t.status=$'+params.length);}
+    if(category){if(!SUPPORT_CATEGORIES.has(category))throw supportError('Unsupported support category.','INVALID_SUPPORT_CATEGORY');params.push(category);clauses.push('t.category=$'+params.length);}
+    params.push(safeLimit,safeOffset);
+    const q=await pool.query(supportTicketSelect+' where '+clauses.join(' and ')+' order by t.updated_at desc limit $'+(params.length-1)+' offset $'+params.length,params);
+    return {tickets:q.rows.map(row=>mapSupportTicket(row)),pagination:{limit:safeLimit,offset:safeOffset,count:q.rows.length}};
+  }
+
+  async function getSupportTicket({ ticketId, userId, role }) {
+    if (!useDatabase) {
+      const ticket=memory.supportTickets.get(String(ticketId));
+      if (!ticket) return null;
+      if (!SUPPORT_ROLES.has(role) && String(ticket.raisedByUserId)!==String(userId)) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+      return ticket;
+    }
+    const q=await pool.query(supportTicketSelect+' where t.id=$1 limit 1',[ticketId]);
+    const ticket=q.rows[0];
+    if (!ticket) return null;
+    if (!SUPPORT_ROLES.has(role) && String(ticket.raised_by_user_id)!==String(userId)) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    return mapSupportTicket(ticket, SUPPORT_ROLES.has(role));
+  }
+
+  async function listSupportMessages({ ticketId, userId, role }) {
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) return null;
+    if (!useDatabase) {
+      return [...memory.supportMessages.values()]
+        .filter(m=>String(m.ticketId)===String(ticketId) && (SUPPORT_ROLES.has(role) || !m.isInternal))
+        .sort((a,b)=>new Date(a.createdAt)-new Date(b.createdAt));
+    }
+    const q=await pool.query(
+      'select tm.id,tm.ticket_id,tm.sender_user_id,tm.message,tm.is_internal,tm.created_at,c.full_name as sender_name,c.role as sender_role from ticket_messages tm join customers c on c.id=tm.sender_user_id where tm.ticket_id=$1 '+(SUPPORT_ROLES.has(role)?'':'and tm.is_internal=false')+' order by tm.created_at asc',
+      [ticketId]
+    );
+    return q.rows.map(row=>({id:String(row.id),ticketId:String(row.ticket_id),senderUserId:String(row.sender_user_id),senderName:SUPPORT_ROLES.has(role)?row.sender_name:(String(row.sender_user_id)===String(userId)?'You':(row.sender_role==='vendor'?'RideOn vendor':'RideOn support')),senderRole:row.sender_role,message:row.message,isInternal:Boolean(row.is_internal),createdAt:iso(row.created_at)}));
+  }
+
+  async function addSupportMessage({ ticketId, userId, role, message, isInternal = false }) {
+    const normalized=sanitizeSupportText(message,5000);
+    if (!normalized) throw supportError('Please enter a message.', 'INVALID_SUPPORT_MESSAGE');
+    if (normalized.length > 5000) throw supportError('Message is too long.', 'INVALID_SUPPORT_MESSAGE');
+    if (isInternal && !SUPPORT_ROLES.has(role)) throw supportError('Internal responses are restricted to support staff.', 'FORBIDDEN');
+
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    if (ticket.status === 'closed' && !SUPPORT_ROLES.has(role)) throw supportError('Reopen the ticket before replying.', 'SUPPORT_TICKET_CLOSED');
+
+    if (!useDatabase) {
+      const msg={id:crypto.randomUUID(),ticketId:String(ticketId),senderUserId:String(userId),senderRole:role,message:normalized,isInternal:Boolean(isInternal),createdAt:new Date().toISOString()};
+      memory.supportMessages.set(msg.id,msg);
+      if (!SUPPORT_ROLES.has(role) && ticket.status==='waiting_for_user') ticket.status='open';
+      ticket.updatedAt=msg.createdAt;
+      return msg;
+    }
+
+    const client=await pool.connect();
+    try {
+      await client.query('begin');
+      const locked=await client.query('select id,status from support_tickets where id=$1 for update',[ticketId]);
+      if (!locked.rows[0]) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+      if (locked.rows[0].status==='closed' && !SUPPORT_ROLES.has(role)) throw supportError('Reopen the ticket before replying.', 'SUPPORT_TICKET_CLOSED');
+      const inserted=await client.query('insert into ticket_messages(ticket_id,sender_user_id,message,is_internal) values($1,$2,$3,$4) returning id,ticket_id,sender_user_id,message,is_internal,created_at',[ticketId,userId,normalized,Boolean(isInternal)]);
+      const nextStatus=!SUPPORT_ROLES.has(role) && locked.rows[0].status==='waiting_for_user' ? 'open' : locked.rows[0].status;
+      await client.query('update support_tickets set status=$2,updated_at=now() where id=$1',[ticketId,nextStatus]);
+      await client.query('commit');
+      const row=inserted.rows[0];
+      return {id:String(row.id),ticketId:String(row.ticket_id),senderUserId:String(row.sender_user_id),senderName:'You',senderRole:role,message:row.message,isInternal:Boolean(row.is_internal),createdAt:iso(row.created_at)};
+    } catch(error){try{await client.query('rollback')}catch{};throw error;} finally{client.release();}
+  }
+
+  async function updateSupportTicketStatus({ ticketId, userId, role, status, resolution = null }) {
+    if (!SUPPORT_STATUSES.has(status)) throw supportError('Unsupported support status.', 'INVALID_SUPPORT_STATUS');
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    if (!SUPPORT_ROLES.has(role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
+    if (!canTransitionSupportStatus(ticket.status,status)) throw supportError('That ticket status transition is not allowed.', 'INVALID_SUPPORT_TRANSITION');
+    const normalizedResolution=resolution==null?null:sanitizeSupportText(resolution,5000);
+    if (status==='resolved' && (!normalizedResolution || normalizedResolution.length<3)) throw supportError('A resolution is required before resolving a ticket.', 'RESOLUTION_REQUIRED');
+    if (!useDatabase) {
+      ticket.status=status;ticket.resolution=normalizedResolution;ticket.updatedAt=new Date().toISOString();ticket.resolvedAt=['resolved','closed'].includes(status)?ticket.updatedAt:null;
+      return ticket;
+    }
+    const q=await pool.query('update support_tickets set status=$2,resolution=$3,resolved_at=case when $2 in (\'resolved\',\'closed\') then coalesce(resolved_at,now()) else null end,updated_at=now() where id=$1 returning id',[ticketId,status,normalizedResolution]);
+    const loaded=await pool.query(supportTicketSelect+' where t.id=$1',[q.rows[0].id]);
+    return mapSupportTicket(loaded.rows[0],true);
+  }
+
+  async function closeSupportTicket({ticketId,userId,role}) {
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    if (SUPPORT_ROLES.has(role)) return updateSupportTicketStatus({ticketId,userId,role,status:'closed',resolution:ticket.resolution||'Closed by support.'});
+    if (ticket.status==='closed') return ticket;
+    if (!['open','in_progress','waiting_for_user','resolved'].includes(ticket.status)) throw supportError('This ticket cannot be closed right now.', 'INVALID_SUPPORT_TRANSITION');
+    if (!useDatabase) { ticket.status='closed';ticket.resolvedAt=new Date().toISOString();ticket.updatedAt=ticket.resolvedAt;return ticket; }
+    const q=await pool.query('update support_tickets set status=\'closed\',resolved_at=coalesce(resolved_at,now()),updated_at=now() where id=$1 returning id',[ticketId]);
+    const loaded=await pool.query(supportTicketSelect+' where t.id=$1',[q.rows[0].id]);
+    return mapSupportTicket(loaded.rows[0]);
+  }
+
+  async function reopenSupportTicket({ticketId,userId,role}) {
+    const ticket=await getSupportTicket({ticketId,userId,role});
+    if (!ticket) throw supportError('Ticket not found.', 'SUPPORT_TICKET_NOT_FOUND');
+    if (!['closed','resolved'].includes(ticket.status)) throw supportError('Only resolved or closed tickets can be reopened.', 'INVALID_SUPPORT_TRANSITION');
+    if (!useDatabase) { ticket.status='open';ticket.resolution=null;ticket.resolvedAt=null;ticket.updatedAt=new Date().toISOString();return ticket; }
+    const q=await pool.query('update support_tickets set status=\'open\',resolution=null,resolved_at=null,updated_at=now() where id=$1 returning id',[ticketId]);
+    const loaded=await pool.query(supportTicketSelect+' where t.id=$1',[q.rows[0].id]);
+    return mapSupportTicket(loaded.rows[0]);
+  }
+
+  async function listSupportTickets({ userId, status, category, priority, limit=50, offset=0 }) {
+    const actor=await findCustomerById(userId);
+    if(!SUPPORT_ROLES.has(actor?.role)) throw supportError('Support staff access is required.','FORBIDDEN');
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
+    if(!useDatabase){
+      let rows=[...memory.supportTickets.values()];
+      if(status){if(!SUPPORT_STATUSES.has(status))throw supportError('Unsupported support status.','INVALID_SUPPORT_STATUS');rows=rows.filter(t=>t.status===status);}
+      if(category){if(!SUPPORT_CATEGORIES.has(category))throw supportError('Unsupported support category.','INVALID_SUPPORT_CATEGORY');rows=rows.filter(t=>t.category===category);}
+      if(priority){if(!SUPPORT_PRIORITIES.has(priority))throw supportError('Unsupported support priority.','INVALID_SUPPORT_PRIORITY');rows=rows.filter(t=>t.priority===priority);}
+      rows.sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
+      return {tickets:rows.slice(safeOffset,safeOffset+safeLimit),pagination:{limit:safeLimit,offset:safeOffset,count:rows.length}};
+    }
+    const clauses=['1=1'],params=[];
+    if(status){if(!SUPPORT_STATUSES.has(status))throw supportError('Unsupported support status.','INVALID_SUPPORT_STATUS');params.push(status);clauses.push('t.status=$'+params.length);}
+    if(category){if(!SUPPORT_CATEGORIES.has(category))throw supportError('Unsupported support category.','INVALID_SUPPORT_CATEGORY');params.push(category);clauses.push('t.category=$'+params.length);}
+    if(priority){if(!SUPPORT_PRIORITIES.has(priority))throw supportError('Unsupported support priority.','INVALID_SUPPORT_PRIORITY');params.push(priority);clauses.push('t.priority=$'+params.length);}
+    params.push(safeLimit,safeOffset);
+    const q=await pool.query(supportTicketSelect+' where '+clauses.join(' and ')+' order by t.updated_at desc limit $'+(params.length-1)+' offset $'+params.length,params);
+    return {tickets:q.rows.map(r=>mapSupportTicket(r,true)),pagination:{limit:safeLimit,offset:safeOffset,count:q.rows.length}};
+  }
+
+  async function assignSupportTicket({ticketId,assignedToUserId,actorUserId}) {
+    const actor=await findCustomerById(actorUserId);
+    if (!SUPPORT_ROLES.has(actor?.role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
+    const assignee=await findCustomerById(assignedToUserId);
+    if (!SUPPORT_ROLES.has(assignee?.role)) throw supportError('Tickets can only be assigned to support staff.', 'INVALID_ASSIGNEE');
+    const ticket=await getSupportTicket({ticketId,userId:actorUserId,role:actor.role});
+    if(!ticket)throw supportError('Ticket not found.','SUPPORT_TICKET_NOT_FOUND');
+    if(!useDatabase){ticket.assignedToUserId=String(assignedToUserId);ticket.updatedAt=new Date().toISOString();return ticket;}
+    const q=await pool.query('update support_tickets set assigned_to_user_id=$2,updated_at=now() where id=$1 returning id',[ticketId,assignedToUserId]);
+    if(!q.rows[0])throw supportError('Ticket not found.','SUPPORT_TICKET_NOT_FOUND');
+    const loaded=await pool.query(supportTicketSelect+' where t.id=$1',[ticketId]);
+    return mapSupportTicket(loaded.rows[0],true);
+  }
+
+  async function resolveSupportTicket({ticketId,userId,resolution}) {
+    const actor=await findCustomerById(userId);
+    if (!SUPPORT_ROLES.has(actor?.role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
+    return updateSupportTicketStatus({ticketId,userId,role:actor.role,status:'resolved',resolution});
+  }
+
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,seedMemoryVehicles};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
 }

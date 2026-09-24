@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import { createServer } from 'node:http';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -8,6 +9,9 @@ import { z } from 'zod';
 import { createRepository } from './repository.js';
 import { createAuth } from './auth.js';
 import { createPaymentService } from './payments.js';
+import { getDrivingRoute } from './routing.js';
+import { geocodeAddress } from './geocoding.js';
+import { createTrackingRealtimeServer } from './trackingRealtime.js';
 
 const fleet = [];
 
@@ -54,6 +58,8 @@ app.use(cors({
 app.use(express.json({ limit: '12mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
 app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const supportRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
@@ -64,6 +70,9 @@ const bookingSchema = z.object({
   delivery: z.boolean().default(true),
   address: z.string().trim().min(8).max(300),
   notes: z.string().max(500).optional(),
+  deliveryLatitude: z.union([z.number(), z.string()]).nullable().optional(),
+  deliveryLongitude: z.union([z.number(), z.string()]).nullable().optional(),
+  deliveryAddressSource: z.enum(['manual','geocoded','saved']).optional(),
 }).refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt', path: ['endAt'] });
 
 function normalizeBookingInput(body = {}) {
@@ -146,6 +155,31 @@ function publicBooking(booking) {
     paymentId: booking.paymentId,
     createdAt: booking.createdAt,
     updatedAt: booking.updatedAt || booking.createdAt,
+    cancellationFee: booking.cancellationFee || 0,
+    refundAmount: booking.refundAmount || 0,
+    cancelledAt: booking.cancelledAt,
+    cancellationReason: booking.cancellationReason,
+    securityDepositStatus: booking.securityDepositStatus,
+    securityDepositRefundable: booking.securityDepositRefundable || 0,
+    securityDepositDeduction: booking.securityDepositDeduction || 0,
+    securityDepositReason: booking.securityDepositReason,
+    securityDepositEvidence: booking.securityDepositEvidence,
+    securityDepositRefundReference: booking.securityDepositRefundReference,
+    securityDepositInspectedAt: booking.securityDepositInspectedAt,
+    securityDepositInspectedBy: booking.securityDepositInspectedBy,
+    rejectionReason: booking.rejectionReason,
+    deliveryLatitude: booking.deliveryLatitude,
+    deliveryLongitude: booking.deliveryLongitude,
+    vendorServiceLatitude: booking.vendorServiceLatitude,
+    vendorServiceLongitude: booking.vendorServiceLongitude,
+    routeDistanceMeters: booking.routeDistanceMeters,
+    routeDurationSeconds: booking.routeDurationSeconds,
+    routeProvider: booking.routeProvider,
+    deliveryStatus: booking.deliveryStatus || 'scheduled',
+    deliveryStartedAt: booking.deliveryStartedAt,
+    deliveredAt: booking.deliveredAt,
+    deliveryFinalLatitude: booking.deliveryFinalLatitude,
+    deliveryFinalLongitude: booking.deliveryFinalLongitude,
   };
 }
 
@@ -159,7 +193,7 @@ console.log('[RideOnServer][BOOT]', JSON.stringify({
   hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
   hasSupabaseKey: Boolean(process.env.SUPABASE_PUBLISHABLE_KEY)
 }));
-const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'paytm' : 'mock')).toLowerCase();
+const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'unconfigured' : 'mock')).toLowerCase();
 const paytmMerchantId = process.env.PAYTM_MERCHANT_ID || '';
 const paytmClientId = process.env.PAYTM_CLIENT_ID || '';
 const paytmClientSecret = process.env.PAYTM_CLIENT_SECRET || '';
@@ -169,7 +203,7 @@ const paymentWebhookSecret = process.env.PAYTM_WEBHOOK_SECRET || '';
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && paymentProvider !== 'paytm') throw new Error('PAYMENT_PROVIDER must be paytm in production; mock/unconfigured providers are not allowed');
+if (isProduction && paymentProvider === 'mock') throw new Error('PAYMENT_PROVIDER=mock is not allowed in production.');
 // Paytm credentials are intentionally optional at process startup. This keeps health/API deployment available
 // while live payment operations fail closed with PAYTM_ONBOARDING_REQUIRED until merchant onboarding is complete.
 
@@ -241,6 +275,28 @@ const payments = createPaymentService({
   webhookSecret: paymentWebhookSecret,
 });
 
+async function requestRefundForBooking(bookingId) {
+  const payment=await repository.findPaymentByBooking(bookingId);
+  if(!payment) return {status:'not_applicable'};
+  if(payment.status==='refunded') return {status:'refunded',payment};
+  if(!['paid','refund_pending'].includes(String(payment.status))) return {status:'not_eligible',payment};
+  const claim=await repository.claimRefundRequest(payment.id);
+  if(!claim.created) return {status:claim.status==='completed'?'refunded':'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
+  try {
+    const providerResult=await payments.refundPayment({paymentId:payment.id,amountPaise:payment.amountPaise,providerOrderId:payment.providerOrderId,idempotencyKey:claim.idempotencyKey});
+    if(providerResult?.confirmed && providerResult?.providerReference){
+      const refunded=await repository.completePaymentRefund({paymentId:payment.id,providerReference:providerResult.providerReference});
+      return {status:'refunded',payment:refunded,idempotencyKey:claim.idempotencyKey};
+    }
+    return {status:'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
+  } catch(error) {
+    await repository.markRefundRetryable(payment.id).catch(()=>{});
+    if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return {status:'refund_pending',payment,providerUnavailable:true,idempotencyKey:claim.idempotencyKey};
+    throw error;
+  }
+}
+
+
 
 async function verifySupabaseAccessToken(token) {
   const supabaseUrl = process.env.SUPABASE_URL;
@@ -298,7 +354,7 @@ const supabaseRequireAuth = async (req, res, next) => {
       });
     }
 
-    if (!identity?.id || !['customer','vendor'].includes(identity.role)) {
+    if (!identity?.id || !['customer','vendor','support','admin'].includes(identity.role)) {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
 
@@ -319,6 +375,22 @@ const supabaseRequireAuth = async (req, res, next) => {
   }
 };
 
+async function resolveTrackingUser(token) {
+  if(!token)return null;
+  try{
+    const user=await verifySupabaseAccessToken(token);
+    if(!user?.id||!user?.email)return null;
+    const metadata=user.user_metadata||{};
+    let identity=await repository.findCustomerBySupabaseUserId(user.id);
+    if(!identity)identity=await repository.findCustomerByEmail(user.email);
+    if(!identity?.id){
+      identity=await repository.createOrLinkCustomerFromSupabase({supabaseUserId:user.id,email:user.email,fullName:metadata.full_name||metadata.name||user.email.split('@')[0],phone:metadata.phone||undefined,role:'customer'});
+    }
+    if(!identity?.id||!['customer','vendor'].includes(identity.role))return null;
+    return {id:identity.id,name:identity.fullName,role:identity.role,supabaseUserId:user.id,email:identity.email||user.email};
+  }catch{return null;}
+}
+
 const requireRole = (...roles) => (req, res, next) => {
   if (!req.user || !roles.includes(req.user.role)) {
     return res.status(403).json({ error:{ code:'FORBIDDEN', message:'You do not have access to this resource.' } });
@@ -327,6 +399,7 @@ const requireRole = (...roles) => (req, res, next) => {
 };
 
 const requireCustomer = requireRole('customer');
+const requireSupport = requireRole('support','admin');
 
 const requireVendor = async (req, res, next) => {
   if (!req.user || req.user.role !== 'vendor') {
@@ -347,6 +420,8 @@ app.get('/api/v1/version', (_req, res) => {
   res.json({ service:'rideon-api', buildCommit, nodeEnv:process.env.NODE_ENV || 'development', timestamp:new Date().toISOString() });
 });
 
+app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => { res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...(payments.capabilities||{})}}); });
+
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
   const healthy = storage.mode === 'memory' || storage.reachable !== false;
@@ -358,6 +433,83 @@ app.get('/health', async (_req, res) => {
     buildCommit,
     timestamp: new Date().toISOString(),
   });
+});
+
+app.get('/api/v1/geocoding/search', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const address=String(req.query.address||'').trim();
+  const city=String(req.query.city||'').trim();
+  if(address.length<4) return res.status(400).json({error:{code:'GEOCODE_INVALID_QUERY',message:'Enter a delivery address or landmark.'}});
+  try {
+    const result=await geocodeAddress(address,city);
+    res.json({location:result.location,formattedAddress:result.formattedAddress,provider:result.provider,cached:Boolean(result.cached)});
+  } catch(error) {
+    const statusByCode={GEOCODE_INVALID_QUERY:400,GEOCODE_PROVIDER_NOT_CONFIGURED:503,GEOCODE_PROVIDER_UNAVAILABLE:503,GEOCODE_PROVIDER_TIMEOUT:504,GEOCODE_NOT_FOUND:422};
+    const messages={
+      GEOCODE_INVALID_QUERY:'Enter a delivery address or landmark.',
+      GEOCODE_PROVIDER_NOT_CONFIGURED:'Address search is not configured yet. You can choose a point on the map.',
+      GEOCODE_PROVIDER_UNAVAILABLE:'Address search is temporarily unavailable. Please retry or choose a point on the map.',
+      GEOCODE_PROVIDER_TIMEOUT:'Address search took too long. Please retry.',
+      GEOCODE_NOT_FOUND:'We could not find that address. Try a nearby landmark or choose a point on the map.',
+    };
+    console.error(JSON.stringify({level:'error',event:'geocoding_failed',requestId:req.requestId,code:error?.code||'GEOCODE_FAILED'}));
+    res.status(statusByCode[error?.code]||503).json({error:{code:error?.code||'GEOCODE_FAILED',message:messages[error?.code]||'We could not find that address right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/routing/eta', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const parsed=z.object({
+    vendorId:z.string().uuid(),
+    latitude:z.coerce.number().min(-90).max(90),
+    longitude:z.coerce.number().min(-180).max(180),
+  }).safeParse(req.query);
+  if(!parsed.success) return res.status(400).json({error:{code:'ROUTE_INVALID_COORDINATES',message:'Please provide a valid delivery location.'}});
+  try{
+    const vendors=await repository.listMarketplaceVendors({});
+    const vendor=vendors.find(item=>String(item.vendorId)===String(parsed.data.vendorId));
+    if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor service location is not available.'}});
+    const route=await getDrivingRoute(
+      {latitude:vendor.latitude,longitude:vendor.longitude},
+      {latitude:parsed.data.latitude,longitude:parsed.data.longitude}
+    );
+    res.json({
+      route:{
+        distanceMeters:route.distanceMeters,
+        durationSeconds:route.durationSeconds,
+        estimatedDeliveryMinutes:Math.max(1,Math.round(route.durationSeconds/60)),
+        provider:route.provider,
+        cached:Boolean(route.cached),
+      }
+    });
+  }catch(error){
+    const statusByCode={
+      ROUTE_INVALID_COORDINATES:400,
+      ROUTE_PROVIDER_NOT_CONFIGURED:503,
+      ROUTE_PROVIDER_UNAVAILABLE:503,
+      ROUTE_PROVIDER_TIMEOUT:504,
+      ROUTE_NOT_FOUND:422,
+    };
+    const status=statusByCode[error?.code]||503;
+    const messages={
+      ROUTE_PROVIDER_NOT_CONFIGURED:'Delivery routing is not configured yet.',
+      ROUTE_PROVIDER_UNAVAILABLE:'Delivery routing is temporarily unavailable. Please retry.',
+      ROUTE_PROVIDER_TIMEOUT:'Delivery routing took too long. Please retry.',
+      ROUTE_NOT_FOUND:'No driving route was found for those locations.',
+      ROUTE_INVALID_COORDINATES:'Please provide a valid delivery location.',
+    };
+    console.error(JSON.stringify({level:'error',event:'routing_eta_failed',requestId:req.requestId,code:error?.code||'ROUTE_FAILED'}));
+    res.status(status).json({error:{code:error?.code||'ROUTE_FAILED',message:messages[error?.code]||'We could not estimate delivery time right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/vendors/map', async (req, res) => {
+  try {
+    const city = req.query.city?.toString().trim() || undefined;
+    const vendors = await repository.listMarketplaceVendors({ city });
+    res.json({ data: vendors, vendors, meta:{ count:vendors.length } });
+  } catch (error) {
+    console.error(JSON.stringify({level:'error',event:'vendor_map_failed',requestId:req.requestId,code:error?.code||'VENDOR_MAP_FAILED',message:error?.message}));
+    res.status(503).json({error:{code:'VENDOR_MAP_UNAVAILABLE',message:'Vendor map data is temporarily unavailable. Please retry.'}});
+  }
 });
 
 app.get('/api/v1/locations', async (_req, res) => {
@@ -401,6 +553,36 @@ app.get('/api/v1/vehicles/:id', async (req, res) => {
 // Vendor profile and fleet management.
 app.get('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
   res.json({ user: { id:req.user.id, name:req.user.name, email:req.user.email, role:'vendor' }, vendor:req.vendor });
+});
+
+app.get('/api/v1/vendor/service-location', supabaseRequireAuth, requireVendor, async (req,res) => {
+  try {
+    const location = await repository.getVendorServiceLocation(req.user.id);
+    if (!location) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor profile not found.'}});
+    res.json({data:location,location});
+  } catch (error) {
+    console.error(JSON.stringify({level:'error',event:'vendor_service_location_get_failed',requestId:req.requestId,code:error?.code||'VENDOR_SERVICE_LOCATION_GET_FAILED'}));
+    res.status(503).json({error:{code:'SERVICE_LOCATION_UNAVAILABLE',message:'We could not load your service location right now.'}});
+  }
+});
+
+app.patch('/api/v1/vendor/service-location', supabaseRequireAuth, requireVendor, async (req,res) => {
+  const parsed=z.object({
+    latitude:z.union([z.number(),z.string()]).nullable().optional(),
+    longitude:z.union([z.number(),z.string()]).nullable().optional(),
+    address:z.string().trim().max(300).optional(),
+    serviceCity:z.string().trim().min(2).max(100).optional(),
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_SERVICE_LOCATION',message:'Please provide a valid service location.',details:parsed.error.flatten()}});
+  try {
+    const location=await repository.updateVendorServiceLocation(req.user.id,parsed.data);
+    if(!location) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor profile not found.'}});
+    res.json({data:{vendorId:location.id,serviceCity:location.serviceCity,address:location.serviceAddress||location.address,latitude:location.serviceLatitude,longitude:location.serviceLongitude},location:{vendorId:location.id,serviceCity:location.serviceCity,address:location.serviceAddress||location.address,latitude:location.serviceLatitude,longitude:location.serviceLongitude}});
+  } catch(error) {
+    if(error.code==='INVALID_SERVICE_LOCATION') return res.status(400).json({error:{code:error.code,message:'Please provide a valid latitude and longitude.'}});
+    console.error(JSON.stringify({level:'error',event:'vendor_service_location_update_failed',requestId:req.requestId,code:error?.code||'SERVICE_LOCATION_UPDATE_FAILED'}));
+    res.status(503).json({error:{code:'SERVICE_LOCATION_UPDATE_FAILED',message:'We could not save your service location right now. Please try again.'}});
+  }
 });
 
 app.patch('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
@@ -528,18 +710,299 @@ app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async
   res.json({data:publicBooking(booking),booking:publicBooking(booking)});
 });
 
+const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/start', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const session=await repository.startDelivery(req.vendor.id,req.params.id);
+    res.json({tracking:{session,status:'in_delivery',active:true}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,DELIVERY_START_NOT_ALLOWED:409,DELIVERY_LOCATION_REQUIRED:409,PAYMENT_REQUIRED_FOR_DELIVERY:409,DELIVERY_ALREADY_ACTIVE:409};
+    const messages={DELIVERY_START_NOT_ALLOWED:'Delivery can only start after the booking is confirmed.',DELIVERY_LOCATION_REQUIRED:'A valid delivery address and map location are required before delivery can start.',PAYMENT_REQUIRED_FOR_DELIVERY:'Payment must be confirmed before delivery can start.',DELIVERY_ALREADY_ACTIVE:'Delivery tracking is already active.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:messages[error?.code]||'We could not start delivery right now. Please try again.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/location', supabaseRequireAuth, requireVendor, trackingUpdateRateLimit, async (req,res)=>{
+  const parsed=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location. Please try again.'}});
+  try{
+    const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    const before=await repository.getActiveTrackingSession(req.vendor.id,req.params.id);
+    const session=await repository.updateDeliveryLocation(req.vendor.id,req.params.id,parsed.data);
+    let route=null; let routeUnavailable=false;
+    const movedMeters=before?.lastLatitude!=null?Math.sqrt(Math.pow((parsed.data.latitude-before.lastLatitude)*111320,2)+Math.pow((parsed.data.longitude-before.lastLongitude)*111320*Math.cos(parsed.data.latitude*Math.PI/180),2)):Infinity;
+    const routeDue=!before?.lastRouteAt||Date.now()-new Date(before.lastRouteAt).getTime()>=Math.max(30,Number(process.env.TRACKING_ROUTE_REFRESH_SECONDS||60))*1000||movedMeters>=Math.max(100,Number(process.env.TRACKING_ROUTE_REFRESH_METERS||300));
+    if(routeDue&&booking.deliveryLatitude!=null&&booking.deliveryLongitude!=null){
+      try{
+        const calculated=await getDrivingRoute({latitude:parsed.data.latitude,longitude:parsed.data.longitude},{latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude});
+        route={distanceMeters:calculated.distanceMeters,durationSeconds:calculated.durationSeconds,estimatedDeliveryMinutes:Math.max(1,Math.round(calculated.durationSeconds/60)),provider:calculated.provider,encodedPolyline:calculated.encodedPolyline||null};
+        await repository.updateTrackingRoute(req.vendor.id,req.params.id,route);
+      }catch(routeError){
+        routeUnavailable=true;
+        if(routeError?.code!=='ROUTE_PROVIDER_NOT_CONFIGURED'&&routeError?.code!=='ROUTE_PROVIDER_UNAVAILABLE'&&routeError?.code!=='ROUTE_PROVIDER_TIMEOUT'&&routeError?.code!=='ROUTE_NOT_FOUND')throw routeError;
+      }
+    }
+    const latest=await repository.getActiveTrackingSession(req.vendor.id,req.params.id);
+    const payload={type:'tracking.update',tracking:{session:latest||session,location:{latitude:parsed.data.latitude,longitude:parsed.data.longitude,accuracyMeters:parsed.data.accuracyMeters||null,updatedAt:parsed.data.recordedAt||new Date().toISOString()},route,routeUnavailable}};
+    trackingRealtime.broadcast(req.params.id,payload);
+    res.json({tracking:payload.tracking});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,STALE_LOCATION_UPDATE:409,INVALID_DELIVERY_LOCATION:400,INVALID_DELIVERY_TIMESTAMP:400};
+    const messages={TRACKING_NOT_ACTIVE:'Live delivery tracking is not active.',TRACKING_SESSION_EXPIRED:'This delivery tracking session has expired.',STALE_LOCATION_UPDATE:'That GPS update is older than the last accepted location.',INVALID_DELIVERY_LOCATION:'We could not use that GPS location. Please try again.',INVALID_DELIVERY_TIMESTAMP:'That GPS timestamp is invalid.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_LOCATION_UPDATE_FAILED',message:messages[error?.code]||'We could not update the delivery location right now. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/complete', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({latitude:z.coerce.number().min(-90).max(90).nullable().optional(),longitude:z.coerce.number().min(-180).max(180).nullable().optional()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'The final delivery location is invalid.'}});
+  try{
+    const result=await repository.completeDelivery(req.vendor.id,req.params.id,parsed.data);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,DELIVERY_COMPLETION_NOT_ALLOWED:409,INVALID_DELIVERY_LOCATION:400};
+    const messages={TRACKING_NOT_ACTIVE:'Live delivery tracking is not active.',TRACKING_SESSION_EXPIRED:'This delivery session has expired.',DELIVERY_COMPLETION_NOT_ALLOWED:'Delivery cannot be completed in the current booking state.',INVALID_DELIVERY_LOCATION:'The final delivery location is invalid.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:messages[error?.code]||'We could not mark the vehicle delivered right now. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/abort', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const result=await repository.abortDelivery(req.vendor.id,req.params.id);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.stopped',tracking:{session:result.session,status:'aborted',active:false}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'aborted',active:false}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_ABORT_FAILED',message:error?.code==='TRACKING_NOT_ACTIVE'?'Live delivery tracking is not active.':'We could not stop delivery tracking right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/bookings/:id/tracking', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    const result=await repository.getTrackingForCustomer(req.user.id,req.params.id);
+    const staleThresholdSeconds=Math.max(30,Number(process.env.TRACKING_STALE_SECONDS||90));
+    const last=result.session?.lastLocationAt?new Date(result.session.lastLocationAt).getTime():0;
+    const stale=!last||Date.now()-last>staleThresholdSeconds*1000;
+    const active=Boolean(result.session?.status==='active'&&result.booking.deliveryStatus==='in_delivery'&&!stale);
+    res.json({tracking:{active,stale,staleThresholdSeconds,session:result.session,booking:publicBooking(result.booking)}});
+  }catch(error){
+    res.status(error?.code==='BOOKING_NOT_FOUND'?404:500).json({error:{code:error?.code||'TRACKING_UNAVAILABLE',message:error?.code==='BOOKING_NOT_FOUND'?'Booking not found.':'We could not load live delivery tracking right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/vendor/bookings/:id/customer-reviews', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    const customerId=booking.customerId;
+    const result=await repository.listReviewsReceived(customerId,{limit:10,offset:0});
+    res.json(result);
+  }catch(error){res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load customer rating history right now. Please retry.'}});}
+});
+
 app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
   const parsed=z.object({status:z.enum(['confirmed','rejected','cancelled','in_progress','completed']),note:z.string().trim().max(500).optional()}).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid booking status.',details:parsed.error.flatten()}});
   try{
     const booking=await repository.updateVendorBookingStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
-    res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+    const refund=(parsed.data.status==='rejected'&&['paid','refund_pending'].includes(String(booking.paymentStatus))) ? await requestRefundForBooking(booking.id) : {status:'not_applicable'};
+    const latest=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    res.json({data:publicBooking(latest||booking),booking:publicBooking(latest||booking),refund});
   }catch(error){
     if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
     if(error.code==='INVALID_BOOKING_TRANSITION') return res.status(409).json({error:{code:error.code,message:'Booking cannot move to that status.'}});
+    if(error.code==='PAYMENT_REQUIRED_FOR_ACCEPTANCE') return res.status(409).json({error:{code:error.code,message:'Payment must be confirmed before this booking can be accepted.'}});
     if(error.code==='INVALID_BOOKING_STATUS') return res.status(400).json({error:{code:error.code,message:'Invalid booking status.'}});
+    if(error.code==='REJECTION_REASON_REQUIRED') return res.status(400).json({error:{code:error.code,message:'A rejection reason is required.'}});
+    if(error.code==='DELIVERY_NOT_COMPLETED') return res.status(409).json({error:{code:error.code,message:'Mark the vehicle delivered before completing the rental.'}});
     throw error;
   }
+});
+
+const reviewResponse = (res, error) => {
+  const map = {
+    BOOKING_NOT_FOUND:[404,'Booking not found.'],
+    REVIEW_NOT_ELIGIBLE:[409,'Reviews are available only after the booking is completed.'],
+    REVIEW_ALREADY_EXISTS:[409,'You have already reviewed this booking.'],
+    INVALID_REVIEW_RATING:[400,'Choose a star rating from 1 to 5.'],
+    REVIEW_TARGET_UNAVAILABLE:[409,'The review target is not available for this booking.'],
+    REVIEW_NOT_FOUND:[404,'Review not found.'],
+    REVIEW_EDIT_NOT_ALLOWED:[403,'Vendor reviews cannot be edited after submission.'],
+    REVIEW_EDIT_WINDOW_EXPIRED:[409,'This review can no longer be edited.'],
+    FORBIDDEN:[403,'You do not have permission to perform this review action.'],
+  };
+  const [status,message]=map[error?.code]||[500,'We could not complete that review action right now. Please try again.'];
+  return res.status(status).json({error:{code:error?.code||'REVIEW_FAILED',message}});
+};
+
+const supportResponse = (res, error) => {
+  const map = {
+    FORBIDDEN:[403,'FORBIDDEN','You do not have access to this support resource.'],
+    BOOKING_NOT_FOUND:[404,'BOOKING_NOT_FOUND','Booking not found.'],
+    VENDOR_NOT_FOUND:[404,'VENDOR_NOT_FOUND','Vendor profile not found.'],
+    SUPPORT_TICKET_NOT_FOUND:[404,'SUPPORT_TICKET_NOT_FOUND','Support ticket not found.'],
+    INVALID_SUPPORT_CATEGORY:[400,'INVALID_SUPPORT_CATEGORY','Choose a valid support category.'],
+    INVALID_SUPPORT_PRIORITY:[400,'INVALID_SUPPORT_PRIORITY','Choose a valid priority.'],
+    INVALID_SUPPORT_STATUS:[400,'INVALID_SUPPORT_STATUS','Choose a valid ticket status.'],
+    INVALID_SUPPORT_SUBJECT:[400,'INVALID_SUPPORT_SUBJECT','Please enter a clear support subject.'],
+    INVALID_SUPPORT_DESCRIPTION:[400,'INVALID_SUPPORT_DESCRIPTION','Please describe the issue in at least 10 characters.'],
+    INVALID_SUPPORT_MESSAGE:[400,'INVALID_SUPPORT_MESSAGE','Please enter a message of up to 5000 characters.'],
+    INVALID_SUPPORT_TRANSITION:[409,'INVALID_SUPPORT_TRANSITION','That ticket status change is not available.'],
+    SUPPORT_TICKET_CLOSED:[409,'SUPPORT_TICKET_CLOSED','Reopen the ticket before replying.'],
+    RESOLUTION_REQUIRED:[400,'RESOLUTION_REQUIRED','Add a resolution before marking the ticket resolved.'],
+    INVALID_ASSIGNEE:[400,'INVALID_ASSIGNEE','Tickets can only be assigned to support staff.'],
+    INVALID_IDEMPOTENCY_KEY:[400,'INVALID_IDEMPOTENCY_KEY','The support request key is invalid.'],
+  };
+  const [status,code,message]=map[error?.code]||[503,'SUPPORT_UNAVAILABLE','Support is temporarily unavailable. Please retry.'];
+  console.error(JSON.stringify({level:'error',event:'support_request_failed',requestId:res.req?.requestId,code:error?.code||'SUPPORT_UNAVAILABLE'}));
+  return res.status(status).json({error:{code,message}});
+};
+
+app.post('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer','vendor'), supportRateLimit, async (req,res)=>{
+  const parsed=z.object({
+    bookingId:z.string().uuid().nullable().optional(),
+    category:z.string().trim().max(40),
+    subject:z.string().trim().min(3).max(160),
+    description:z.string().trim().min(10).max(5000),
+    priority:z.enum(['low','normal','high','urgent']).default('normal'),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please check the support request details.',details:parsed.error.flatten()}});
+  try{
+    const result=await repository.createSupportTicket({...parsed.data,raisedByUserId:req.user.id,raisedByRole:req.user.role,idempotencyKey:req.get('Idempotency-Key')||null});
+    res.status(result.idempotentReplay?200:201).json({ticket:result.ticket,idempotentReplay:result.idempotentReplay});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer','vendor'), async (req,res)=>{
+  try{
+    const result=await repository.listMySupportTickets({userId:req.user.id,role:req.user.role,status:req.query.status,category:req.query.category,limit:req.query.limit,offset:req.query.offset});
+    res.json(result);
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets/:id', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), async (req,res)=>{
+  try{
+    const ticket=await repository.getSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role});
+    if(!ticket)return res.status(404).json({error:{code:'SUPPORT_TICKET_NOT_FOUND',message:'Support ticket not found.'}});
+    res.json({ticket});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets/:id/messages', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), async (req,res)=>{
+  try{
+    const messages=await repository.listSupportMessages({ticketId:req.params.id,userId:req.user.id,role:req.user.role});
+    if(!messages)return res.status(404).json({error:{code:'SUPPORT_TICKET_NOT_FOUND',message:'Support ticket not found.'}});
+    res.json({messages});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/messages', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
+  try{
+    const message=await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal});
+    res.status(201).json({message});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/close', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  try{res.json({ticket:await repository.closeSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/reopen', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  try{res.json({ticket:await repository.reopenSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/admin/tickets', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  try{
+    const result=await repository.listSupportTickets({userId:req.user.id,status:req.query.status,category:req.query.category,priority:req.query.priority,limit:req.query.limit,offset:req.query.offset});
+    res.json(result);
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.patch('/api/v1/support/admin/tickets/:id/assignment', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({assignedToUserId:z.string().uuid()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid support assignee.'}});
+  try{res.json({ticket:await repository.assignSupportTicket({ticketId:req.params.id,assignedToUserId:parsed.data.assignedToUserId,actorUserId:req.user.id})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.patch('/api/v1/support/admin/tickets/:id/status', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['open','in_progress','waiting_for_user','resolved','closed']),resolution:z.string().trim().max(5000).optional().nullable()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid status and optional resolution.'}});
+  try{res.json({ticket:await repository.updateSupportTicketStatus({ticketId:req.params.id,userId:req.user.id,role:req.user.role,status:parsed.data.status,resolution:parsed.data.resolution})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/admin/tickets/:id/messages', supabaseRequireAuth, requireSupport, supportRateLimit, async (req,res)=>{
+  const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
+  try{res.status(201).json({message:await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/admin/tickets/:id/resolve', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({resolution:z.string().trim().min(3).max(5000)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'A resolution is required.'}});
+  try{res.json({ticket:await repository.resolveSupportTicket({ticketId:req.params.id,userId:req.user.id,resolution:parsed.data.resolution})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCustomer, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{
+    const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'customer',...parsed.data});
+    res.status(201).json({review});
+  }catch(error){return reviewResponse(res,error);}
+});
+
+app.post('/api/v1/vendor/bookings/:id/review', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});res.status(201).json({review});}catch(error){return reviewResponse(res,error);}
+});
+
+app.post('/api/v1/vendor/bookings/:id/reviews/customer', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{
+    const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});
+    res.status(201).json({review});
+  }catch(error){return reviewResponse(res,error);}
+});
+
+app.get('/api/v1/bookings/:id/reviews/status', supabaseRequireAuth, async (req,res)=>{
+  if(!['customer','vendor'].includes(req.user.role))return res.status(403).json({error:{code:'FORBIDDEN',message:'A valid RideOn account is required.'}});
+  try{res.json({data:await repository.getReviewStatus({bookingId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return reviewResponse(res,error);}
+});
+
+app.patch('/api/v1/reviews/:id', supabaseRequireAuth, requireCustomer, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{res.json({review:await repository.updateReview({reviewId:req.params.id,userId:req.user.id,role:'customer',...parsed.data})});}
+  catch(error){return reviewResponse(res,error);}
+});
+
+app.get('/api/v1/vehicles/:id/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviews({scope:'vehicle',id:req.params.id,limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load vehicle reviews right now. Please retry.'}});}
+});
+
+app.get('/api/v1/vendors/:id/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviews({scope:'vendor',id:req.params.id,limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load vendor reviews right now. Please retry.'}});}
+});
+
+app.get('/api/v1/me/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviewsReceived(req.user.id,{limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load your reviews right now. Please retry.'}});}
 });
 
 app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
@@ -714,6 +1177,26 @@ app.post('/api/v1/bookings/quote', supabaseRequireAuth, requireCustomer, async (
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
 });
 
+app.post('/api/v1/bookings/:id/route', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  try {
+    const booking=await repository.getBooking(req.params.id,req.user.id);
+    if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(!booking.delivery || booking.deliveryLatitude==null || booking.deliveryLongitude==null) return res.status(409).json({error:{code:'ROUTE_LOCATION_REQUIRED',message:'A delivery location is required before estimating delivery time.'}});
+    if(booking.vendorServiceLatitude==null || booking.vendorServiceLongitude==null) return res.status(409).json({error:{code:'VENDOR_SERVICE_LOCATION_UNAVAILABLE',message:'The selected vendor has not set a service location yet.'}});
+    const route=await getDrivingRoute(
+      {latitude:booking.vendorServiceLatitude,longitude:booking.vendorServiceLongitude},
+      {latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude}
+    );
+    const updated=await repository.updateBookingRouteData(req.params.id,req.user.id,route);
+    res.json({route:{...route,estimatedDeliveryMinutes:Math.max(1,Math.round(route.durationSeconds/60))},booking:publicBooking(updated||booking)});
+  } catch(error) {
+    const statusByCode={ROUTE_LOCATION_REQUIRED:409,VENDOR_SERVICE_LOCATION_UNAVAILABLE:409,ROUTE_INVALID_COORDINATES:400,ROUTE_PROVIDER_NOT_CONFIGURED:503,ROUTE_PROVIDER_UNAVAILABLE:503,ROUTE_PROVIDER_TIMEOUT:504,ROUTE_NOT_FOUND:422};
+    const messages={ROUTE_LOCATION_REQUIRED:'A delivery location is required before estimating delivery time.',VENDOR_SERVICE_LOCATION_UNAVAILABLE:'The selected vendor has not set a service location yet.',ROUTE_INVALID_COORDINATES:'Please choose a valid delivery location.',ROUTE_PROVIDER_NOT_CONFIGURED:'Delivery routing is not configured yet.',ROUTE_PROVIDER_UNAVAILABLE:'Delivery routing is temporarily unavailable. Please retry.',ROUTE_PROVIDER_TIMEOUT:'Delivery routing took too long. Please retry.',ROUTE_NOT_FOUND:'No driving route was found for these locations.'};
+    console.error(JSON.stringify({level:'error',event:'booking_route_failed',requestId:req.requestId,code:error?.code||'ROUTE_FAILED'}));
+    res.status(statusByCode[error?.code]||503).json({error:{code:error?.code||'ROUTE_FAILED',message:messages[error?.code]||'We could not estimate delivery time right now. Please retry.'}});
+  }
+});
+
 app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
@@ -740,6 +1223,8 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
       delivery: parsed.data.delivery,
       address: parsed.data.address,
       notes: parsed.data.notes,
+      deliveryLatitude: parsed.data.deliveryLatitude,
+      deliveryLongitude: parsed.data.deliveryLongitude,
       pricing: pricingData,
       idempotencyKey,
     });
@@ -772,18 +1257,29 @@ app.get('/api/v1/bookings/:id', supabaseRequireAuth, requireCustomer, async (req
   res.json({ data: publicBooking(booking), booking: publicBooking(booking) });
 });
 
-app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, async (req, res) => {
-  const booking = await repository.getBooking(req.params.id);
-  if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
-  if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
-  if (booking.paymentStatus === 'paid') return res.status(409).json({ error: { code: 'REFUND_POLICY_REQUIRED', message: 'This paid booking requires an approved refund policy before cancellation.' } });
-  if (booking.paymentStatus === 'refunded') return res.status(409).json({ error: { code: 'INVALID_PAYMENT_STATE', message: 'A refunded booking cannot be cancelled again.' } });
+app.get('/api/v1/bookings/:id/cancellation-preview', supabaseRequireAuth, requireCustomer, async (req,res) => {
   try {
-    const updated = await repository.cancelBooking(req.params.id, req.user.id);
-    if (!updated) return res.status(409).json({ error: { code: 'CANNOT_CANCEL', message: 'This booking can no longer be cancelled.' } });
-    res.json({ data: publicBooking(updated), booking: publicBooking(updated) });
-  } catch (error) {
-    if (error.code === 'CANNOT_CANCEL') return res.status(409).json({ error: { code: error.code, message: error.message } });
+    const preview=await repository.getCancellationPreview(req.params.id,req.user.id);
+    res.json({cancellation:preview});
+  } catch(error) {
+    if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(error.code==='CANCELLATION_NOT_ALLOWED') return res.status(409).json({error:{code:error.code,message:'This booking can no longer be cancelled.'}});
+    throw error;
+  }
+});
+
+app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const parsed=z.object({reason:z.string().trim().max(500).optional()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid cancellation request.'}});
+  try {
+    const result=await repository.cancelBooking(req.params.id,req.user.id,{reason:parsed.data.reason||'customer_cancelled'});
+    const refund=result.calculation.totalRefund>0 ? await requestRefundForBooking(req.params.id) : {status:'not_applicable'};
+    const latest=await repository.getBooking(req.params.id,req.user.id);
+    res.json({data:publicBooking(latest||result.booking),booking:publicBooking(latest||result.booking),cancellation:result.calculation,refund});
+  } catch(error) {
+    if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
+    if(error.code==='CANCELLATION_NOT_ALLOWED') return res.status(409).json({error:{code:error.code,message:'This booking can no longer be cancelled.'}});
+    if(error.code==='INVALID_PAYMENT_STATE') return res.status(409).json({error:{code:error.code,message:'The payment is not in a refundable state.'}});
     throw error;
   }
 });
@@ -831,8 +1327,10 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       }});
     });
   } catch(error) {
-    if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_NOT_CONFIGURED',message:'Paytm payments are not configured on the RideOn server.'}});
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED',message:'Online payment is not configured on the RideOn server.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
+    if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI checkout is not enabled for the configured payment provider yet.'}});
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Verified UPI payment integration is not enabled for the configured provider. No payment has been marked successful.'}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
   }
@@ -840,16 +1338,22 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
 
 app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, async (req,res) => {
   const parsed=z.object({ bookingId:z.string().uuid() }).safeParse(req.body);
-  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'bookingId is required.'}});
-  const payment=await repository.findPaymentById(req.params.id, req.user.id);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid bookingId.'}});
+  let payment=await repository.findPaymentById(req.params.id, req.user.id);
   if(!payment || String(payment.bookingId)!==String(parsed.data.bookingId)) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
-  if(payment.status==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
+  if(String(payment.status).toLowerCase()==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
   try {
-    const verified=await payments.verifyPayment({ providerOrderId:payment.providerOrderId, providerPaymentId:payment.providerPaymentId, amountPaise:payment.amountPaise });
-    if(!verified?.verified) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'Provider has not confirmed this payment.'}});
-    return res.json({payment,verification:'verified',bookingPaymentStatus:'paid'});
-  } catch(error) {
-    if(error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Paytm verification is not enabled for this merchant yet.'}});
+    const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
+    if(!verified?.verified) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The provider has not authoritatively confirmed this payment yet.'}});
+    const providerReference=String(verified.providerReference||payment.providerReference||payment.providerPaymentId||'').trim();
+    if(!providerReference) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The payment is awaiting an authoritative provider reference.'}});
+    const applied=await repository.applyPaymentEvent({eventId:`verify:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'paid'});
+    if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
+    const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
+    const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
+    return res.json({payment:latestPayment,verification:'verified',bookingPaymentStatus:latestBooking?.paymentStatus||'pending'});
+  }catch(error){
+    if(error.code==='PAYTM_ONBOARDING_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI payment verification is not enabled for the configured provider yet. No payment has been marked successful.'}});
     throw error;
   }
 });
@@ -871,10 +1375,10 @@ app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req
 });
 
 app.post('/api/v1/payments/webhook', async (req, res) => {
-  const signature = req.get('X-Paytm-Signature') || req.get('X-Payment-Signature');
+  const signature = req.get('X-Payment-Signature') || req.get('X-Paytm-Signature');
   const body = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
   if (!payments.verifyWebhook(body, signature)) return res.status(401).json({ error:{code:'INVALID_WEBHOOK_SIGNATURE'} });
-  const event = payments.parseWebhook(req.body, { eventId: req.get('X-Paytm-Event-Id') || undefined });
+  const event = payments.parseWebhook(req.body, { eventId: req.get('X-Payment-Event-Id') || req.get('X-Paytm-Event-Id') || undefined });
   if (!event) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT'} });
   if (!event.bookingId && event.providerOrderId) {
     const payment = await repository.findPaymentByProviderOrder(event.providerOrderId);
@@ -895,12 +1399,15 @@ app.use((err, req, res, _next) => {
   if (err.code === 'CUSTOMER_EXISTS') return res.status(409).json({ error: { code: err.code, message: 'A customer with those credentials already exists.' } });
   if (err.code === 'INVALID_CREDENTIALS') return res.status(401).json({ error: { code: err.code, message: 'Phone or password is incorrect.' } });
   if (err.code === 'PAYMENT_PROVIDER_UNSUPPORTED') return res.status(500).json({ error: { code: err.code, message: 'Unsupported payment provider configuration.' } });
-  if (err.code === 'PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Paytm provider onboarding/integration is not enabled.' } });
+  if (err.code === 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Payment provider configuration is required.' } });
+  if (err.code === 'PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Payment provider onboarding/integration is not enabled.' } });
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Unexpected server error' } });
 });
 
 const port = Number(process.env.PORT) || 4000;
+const httpServer=createServer(app);
+const trackingRealtime=createTrackingRealtimeServer({httpServer,repository,authenticate:resolveTrackingUser});
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(port, () => console.log(`RideOn API listening on :${port}`));
+  httpServer.listen(port, () => console.log(`RideOn API listening on :${port}`));
 }
-export { app, repository };
+export { app, repository, httpServer, trackingRealtime };

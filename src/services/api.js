@@ -113,6 +113,33 @@ const encode = (value) => encodeURIComponent(String(value));
 export const rideOnApi = {
   health: () => request('/health'),
   listLocations: () => request('/api/v1/locations'),
+  listMapVendors: (params = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString();
+    return request(`/api/v1/vendors/map${query ? `?${query}` : ''}`);
+  },
+  getRouteEta: (vendorId, latitude, longitude) => request(`/api/v1/routing/eta?vendorId=${encode(vendorId)}&latitude=${encode(latitude)}&longitude=${encode(longitude)}`),
+  geocodeAddress: (address, city) => {
+    const query = new URLSearchParams({ address: String(address || ''), ...(city ? { city: String(city) } : {}) }).toString();
+    return request(`/api/v1/geocoding/search?${query}`);
+  },
+  getVendorServiceLocation: () => request('/api/v1/vendor/service-location'),
+  updateVendorServiceLocation: (payload) => request('/api/v1/vendor/service-location', { method:'PATCH', body:JSON.stringify(payload) }),
+  updateBookingRoute: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/route`, { method:'POST', body: JSON.stringify({}) }),
+  getTracking: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/tracking`),
+  startDelivery: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/start`, { method:'POST', body:JSON.stringify({}) }),
+  updateDeliveryLocation: (bookingId,payload) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/location`, { method:'POST', body:JSON.stringify(payload) }),
+  completeDelivery: (bookingId,payload={}) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/complete`, { method:'POST', body:JSON.stringify(payload) }),
+  abortDelivery: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/abort`, { method:'POST', body:JSON.stringify({}) }),
+  createTrackingSocket: (bookingId, handlers = {}) => {
+    if (!accessToken) throw new Error('RideOn session expired. Please sign in again.');
+    const wsBase = API_URL.replace(/^http/i, 'ws');
+    const socket = new WebSocket(`${wsBase}/ws/tracking/${encode(bookingId)}`, [`rideon-auth.${accessToken}`]);
+    if (handlers.onOpen) socket.onopen = handlers.onOpen;
+    if (handlers.onMessage) socket.onmessage = handlers.onMessage;
+    if (handlers.onClose) socket.onclose = handlers.onClose;
+    if (handlers.onError) socket.onerror = handlers.onError;
+    return socket;
+  },
   listVehicles: (params = {}) => {
     const query = new URLSearchParams(
       Object.entries(params).filter(([, value]) => value != null && value !== '')
@@ -124,7 +151,22 @@ export const rideOnApi = {
   quote: (payload) => request('/api/v1/bookings/quote', { method: 'POST', body: JSON.stringify(payload) }),
   createBooking: (payload, idempotencyKey) => request('/api/v1/bookings', { method: 'POST', headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined, body: JSON.stringify(payload) }),
   getBooking: (id) => request(`/api/v1/bookings/${encode(id)}`),
-  cancelBooking: (id) => request(`/api/v1/bookings/${encode(id)}/cancel`, { method: 'PATCH' }),
+  createSupportTicket: (payload, idempotencyKey) => request('/api/v1/support/tickets', { method:'POST', headers:idempotencyKey ? {'Idempotency-Key':idempotencyKey} : undefined, body:JSON.stringify(payload) }),
+  listSupportTickets: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/support/tickets${query?`?${query}`:''}`); },
+  getSupportTicket: (ticketId) => request(`/api/v1/support/tickets/${encode(ticketId)}`),
+  getSupportMessages: (ticketId) => request(`/api/v1/support/tickets/${encode(ticketId)}/messages`),
+  addSupportMessage: (ticketId,message) => request(`/api/v1/support/tickets/${encode(ticketId)}/messages`, { method:'POST', body:JSON.stringify({message}) }),
+  closeSupportTicket: (ticketId) => request(`/api/v1/support/tickets/${encode(ticketId)}/close`, { method:'POST', body:JSON.stringify({}) }),
+  reopenSupportTicket: (ticketId) => request(`/api/v1/support/tickets/${encode(ticketId)}/reopen`, { method:'POST', body:JSON.stringify({}) }),
+  getReviewStatus: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/reviews/status`),
+  createCustomerReview: (bookingId,payload) => request(`/api/v1/bookings/${encode(bookingId)}/reviews/customer`, { method:'POST', body:JSON.stringify(payload) }),
+  createVendorReview: (bookingId,payload) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/review`, { method:'POST', body:JSON.stringify(payload) }),
+  updateReview: (reviewId,payload) => request(`/api/v1/reviews/${encode(reviewId)}`, { method:'PATCH', body:JSON.stringify(payload) }),
+  getVehicleReviews: (vehicleId,params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/vehicles/${encode(vehicleId)}/reviews${query?`?${query}`:''}`); },
+  getVendorReviews: (vendorId,params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/vendors/${encode(vendorId)}/reviews${query?`?${query}`:''}`); },
+  getMyReviews: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/me/reviews${query?`?${query}`:''}`); },
+  getCancellationPreview: (id) => request(`/api/v1/bookings/${encode(id)}/cancellation-preview`),
+  cancelBooking: (id, payload = {}) => request(`/api/v1/bookings/${encode(id)}/cancel`, { method: 'PATCH', body: JSON.stringify(payload) }),
   requestOtp: (payload) => request('/api/v1/auth/request-otp', { method: 'POST', body: JSON.stringify(payload) }),
   verifyOtp: (payload) => request('/api/v1/auth/verify-otp', { method: 'POST', body: JSON.stringify(payload) }),
   completeRegistration: (payload) => request('/api/v1/auth/complete-registration', { method: 'POST', body: JSON.stringify(payload) }),
@@ -161,7 +203,9 @@ export const rideOnApi = {
   deleteVendorVehicle: (id) => request(`/api/v1/vendor/vehicles/${encode(id)}`, { method:'DELETE' }),
   listVendorBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/vendor/bookings${query ? `?${query}` : ''}`); },
   getVendorBooking: (id) => request(`/api/v1/vendor/bookings/${encode(id)}`),
+  getVendorCustomerReviews: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/customer-reviews`),
   updateVendorBookingStatus: (id,payload) => request(`/api/v1/vendor/bookings/${encode(id)}/status`, { method:'PATCH', body:JSON.stringify(payload) }),
+  getPaymentCapabilities: () => request('/api/v1/payments/capabilities'),
   createPaymentOrder: (payload) => request('/api/v1/payments/create-order', { method:'POST', body:JSON.stringify(payload) }),
   getPayment: (id) => request(`/api/v1/payments/${encode(id)}`),
   getPaymentByBooking: async (bookingId) => {
@@ -169,6 +213,7 @@ export const rideOnApi = {
     const paymentId = result?.booking?.paymentId || result?.booking?.payment?.id;
     return paymentId ? request(`/api/v1/payments/${encode(paymentId)}`) : null;
   },
-  verifyPayment: (id,payload) => request(`/api/v1/payments/${encode(id)}/verify`, { method:'POST', body:JSON.stringify(payload) }),
+  verifyPayment: (id,payload = {}) => request(`/api/v1/payments/${encode(id)}/verify`, { method:'POST', body:JSON.stringify({ bookingId: payload.bookingId }) }),
+  inspectSecurityDeposit: (bookingId,payload = {}) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/security-deposit/inspection`, { method:'POST', body:JSON.stringify(payload) }),
   listBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/bookings${query ? `?${query}` : ''}`); },
 };

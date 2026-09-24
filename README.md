@@ -161,13 +161,17 @@ Authentication endpoints have a dedicated rate limit in addition to the global A
 
 ## Payments
 
-UPI is the primary MVP payment method. The API creates a server-calculated INR payment request and may return a UPI deep link. The mobile app never treats a deep-link return or a customer-entered UTR/reference as proof of payment.
+UPI is the customer-facing payment method; the gateway/provider is a separate server-side concern. The mobile app does not contain merchant secrets and never marks a payment paid from a client callback, deep-link return, or customer-entered UTR.
 
-The payment state machine is explicit:
+The server calculates the payable amount from the persisted booking and stores provider order/payment references in PostgreSQL. Payment state advances only through the provider verification/webhook boundary and the existing idempotent payment state machine:
 
-`unpaid → pending → paid`, `pending → failed`, `paid → refunded`.
+`pending → paid`, `pending → failed`, `paid → held/refund_pending/disputed`, `refund_pending → refunded`.
 
-Production requires `PAYMENT_PROVIDER=upi`, `UPI_VPA`, and `UPI_WEBHOOK_SECRET`. A real authoritative provider callback/verification path must exist before live payments can be considered production-ready.
+The checkout UI is capability-driven. Google Pay, PhonePe, Paytm, other UPI apps, and UPI ID/VPA are shown only when the configured provider explicitly reports support. No provider-specific UPI app availability is faked by the client.
+
+The repository currently keeps the real-provider adapter fail-closed because no verified live gateway SDK/API implementation is committed. In production, `PAYMENT_PROVIDER=mock` is rejected. Missing or unimplemented provider configuration returns a safe payment-configuration/integration error and cannot mark a payment successful.
+
+There is currently no claim of a live production UPI transaction in CI or from this repository alone. A real provider adapter, merchant credentials, verified callback/webhook configuration, and device-level staging payment test are still required before launch.
 
 ## Testing
 
