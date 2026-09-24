@@ -27,7 +27,7 @@ const normalizeVehicle = raw => {
     fuel: raw.fuel ? String(raw.fuel) : null,
     emoji: raw.emoji || (String(raw.type).toLowerCase() === 'car' ? '🚘' : '🏍️'),
     color: raw.color || (String(raw.type).toLowerCase() === 'car' ? '#E7E9EF' : '#F2E9DA'),
-    images: [...new Set([...(Array.isArray(raw.imageUrls) ? raw.imageUrls : []), ...(Array.isArray(raw.images) ? raw.images : []), raw.imageUrl, raw.photoUrl].filter(value => typeof value === 'string' && /^https?:\\/\\//i.test(value)))],
+    images: [...new Set([...(Array.isArray(raw.imageUrls) ? raw.imageUrls : []), ...(Array.isArray(raw.images) ? raw.images : []), raw.imageUrl, raw.photoUrl].filter(value => typeof value === 'string' && /^https?:\/\//i.test(value)))],
   };
 };
 const normalizeVehicleList = payload => {
