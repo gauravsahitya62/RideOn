@@ -13,7 +13,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map(),notifications:new Map(),pushDevices:new Map() };
+  const memory = { analyticsEvents:new Map(), customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map(),notifications:new Map(),pushDevices:new Map() };
 
   const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', accountStatus:row.account_status || row.accountStatus || 'active', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
@@ -72,6 +72,63 @@ export function createRepository({ databaseUrl, fleet }) {
       updatedAt:iso(row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt)
     };
   };
+
+  async function recordAnalyticsEvent({eventName,eventKey,actorUserId=null,bookingId=null,properties={}}={}){
+    if(!eventName||!eventKey) return {recorded:false};
+    if(!useDatabase){
+      const key=String(eventKey);
+      if(!memory.analyticsEvents) memory.analyticsEvents=new Map();
+      if(memory.analyticsEvents.has(key)) return {recorded:false,duplicate:true};
+      const event={id:crypto.randomUUID(),eventName:String(eventName),eventKey:key,actorUserId,bookingId,properties,occurredAt:new Date().toISOString()};
+      memory.analyticsEvents.set(key,event); return {recorded:true,event};
+    }
+    const r=await pool.query(`insert into analytics_events(event_name,event_key,actor_user_id,booking_id,properties) values($1,$2,$3,$4,$5::jsonb) on conflict(event_key) do nothing returning id,event_name,event_key,occurred_at`,[String(eventName),String(eventKey),actorUserId,bookingId,JSON.stringify(properties||{})]);
+    return r.rows[0]?{recorded:true,event:r.rows[0]}:{recorded:false,duplicate:true};
+  }
+  async function getAdminMetrics({from,to}={}){
+    const end=to?new Date(to):new Date();
+    const start=from?new Date(from):new Date(end.getTime()-30*86400000);
+    if(Number.isNaN(start.getTime())||Number.isNaN(end.getTime())||start>end){const e=new Error('Invalid analytics date range');e.code='INVALID_ANALYTICS_RANGE';throw e;}
+    if(!useDatabase){
+      const events=[...(memory.analyticsEvents?.values()||[])].filter(e=>new Date(e.occurredAt)>=start&&new Date(e.occurredAt)<=end);
+      const count=n=>events.filter(e=>e.eventName===n).length;
+      return {from:start.toISOString(),to:end.toISOString(),bookings:{today:count('booking_created'),week:count('booking_created'),month:count('booking_created'),completed:count('booking_completed'),cancelled:count('booking_cancelled')},payments:{success:count('payment_success'),failed:count('payment_failed')},refunds:count('refund_completed'),securityDeposits:count('security_deposit_held')+count('security_deposit_released'),supportTickets:count('support_ticket_created'),reviews:count('review_created'),activeDeliveries:0,customers:0,vendors:0,activeVehicles:0,averageRating:null};
+    }
+    const p=[start,end];
+    const q=async(sql)=>{const r=await pool.query(sql,p);return r.rows[0]||{};};
+    const [bookings,payments,refunds,support,reviews,deliveries,customers,vendors,vehicles,rating]=await Promise.all([
+      q(`select count(*) filter(where created_at >= current_date)::int today,count(*) filter(where created_at >= date_trunc('week',now()))::int week,count(*) filter(where created_at >= date_trunc('month',now()))::int month,count(*) filter(where status='completed' and created_at between $1 and $2)::int completed,count(*) filter(where status='cancelled' and created_at between $1 and $2)::int cancelled,count(*) filter(where created_at between $1 and $2)::int created from bookings`),
+      q(`select count(*) filter(where status='paid' and updated_at between $1 and $2)::int success,count(*) filter(where status='failed' and updated_at between $1 and $2)::int failed from payments`),
+      q(`select count(*) filter(where transaction_type='refund' and status='completed' and created_at between $1 and $2)::int count from financial_transactions`),
+      q(`select count(*) filter(where created_at between $1 and $2)::int count,count(*) filter(where status in ('open','in_progress','waiting_for_user'))::int open from support_tickets`),
+      q(`select count(*) filter(where created_at between $1 and $2)::int count from reviews`),
+      q(`select count(*) filter(where delivery_status='in_delivery')::int active from bookings`),
+      q(`select count(*)::int count from customers`),
+      q(`select count(*)::int count from vendors`),
+      q(`select count(*)::int count from vehicles where active=true`),
+      q(`select round(avg(rating),2) average from reviews`),
+    ]);
+    return {from:start.toISOString(),to:end.toISOString(),bookings:{today:bookings.today||0,week:bookings.week||0,month:bookings.month||0,created:bookings.created||0,completed:bookings.completed||0,cancelled:bookings.cancelled||0},payments:{success:payments.success||0,failed:payments.failed||0},refunds:refunds.count||0,securityDeposits:null,supportTickets:support.count||0,openSupportTickets:support.open||0,reviews:reviews.count||0,activeDeliveries:deliveries.active||0,customers:customers.count||0,vendors:vendors.count||0,activeVehicles:vehicles.count||0,averageRating:rating.average==null?null:Number(rating.average)};
+  }
+  async function getFinancialReconciliation({limit=100}={}){
+    if(!useDatabase) return {generatedAt:new Date().toISOString(),items:[],limitations:['Provider-side state cannot be queried without a live provider reconciliation API.']};
+    const r=await pool.query(`select b.id as booking_id,b.status as booking_status,b.payment_status,p.id as payment_id,p.status as payment_record_status,p.provider_order_id,p.provider_reference,sd.status as deposit_status,ft.status as refund_transaction_status
+      from bookings b left join payments p on p.booking_id=b.id left join security_deposits sd on sd.booking_id=b.id left join financial_transactions ft on ft.booking_id=b.id and ft.transaction_type='refund'
+      where (p.status='pending' or b.payment_status='pending' or b.payment_status='refund_pending' or ft.status='pending' or (b.payment_status='paid' and p.id is null) or (p.status='paid' and b.payment_status not in ('paid','settlement_pending','settled')))
+      order by b.updated_at asc limit $1`,[Math.min(500,Math.max(1,Number(limit)||100))]);
+    return {generatedAt:new Date().toISOString(),items:r.rows.map(x=>({...x})),limitations:['Provider-side state cannot be queried without a live provider reconciliation API.','This report is read-only and does not mutate financial records.']};
+  }
+  async function getOperationalAlerts({limit=100}={}){
+    if(!useDatabase) return {generatedAt:new Date().toISOString(),alerts:[]};
+    const max=Math.min(500,Math.max(1,Number(limit)||100));
+    const [pending,stale,expired,notificationsFailed]=await Promise.all([
+      pool.query(`select id as booking_id,'payment_stuck_pending' as type,updated_at from bookings where payment_status in ('pending','refund_pending') and updated_at < now()-interval '30 minutes' order by updated_at asc limit $1`,[max]),
+      pool.query(`select booking_id,'tracking_stale' as type,last_location_at as updated_at from tracking_sessions where status='active' and (last_location_at is null or last_location_at < now()-interval '3 minutes') order by last_location_at asc nulls first limit $1`,[max]),
+      pool.query(`select booking_id,'tracking_session_expired' as type,expires_at as updated_at from tracking_sessions where status='active' and expires_at < now() order by expires_at asc limit $1`,[max]),
+      pool.query(`select id as notification_id,'notification_delivery_failed' as type,updated_at from push_devices where consecutive_failures >= 5 and enabled=true order by updated_at asc limit $1`,[max]),
+    ]);
+    return {generatedAt:new Date().toISOString(),alerts:[...pending.rows,...stale.rows,...expired.rows,...notificationsFailed.rows].sort((a,b)=>new Date(a.updated_at)-new Date(b.updated_at))};
+  }
 
   async function health() {
     if (!pool) return { mode:'memory', persistent:false };
@@ -2104,5 +2161,5 @@ export function createRepository({ databaseUrl, fleet }) {
     const r=q.rows[0]; return {ticketId:String(r.id),ownerUserId:String(r.raised_by_user_id),bookingId:r.booking_id?String(r.booking_id):null,assignedToUserId:r.assigned_to_user_id?String(r.assigned_to_user_id):null};
   }
 
-  return {health,close,createNotification,listNotifications,countUnreadNotifications,markNotificationRead,markAllNotificationsRead,registerPushDevice,listEnabledPushDevices,disablePushDevice,recordPushDeliverySuccess,recordPushDeliveryFailure,getNotificationPreferences,updateNotificationPreferences,getBookingNotificationRecipients,listSupportUserIds,getSupportTicketNotificationContext,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
+  return {health,close,recordAnalyticsEvent,getAdminMetrics,getFinancialReconciliation,getOperationalAlerts,createNotification,listNotifications,countUnreadNotifications,markNotificationRead,markAllNotificationsRead,registerPushDevice,listEnabledPushDevices,disablePushDevice,recordPushDeliverySuccess,recordPushDeliveryFailure,getNotificationPreferences,updateNotificationPreferences,getBookingNotificationRecipients,listSupportUserIds,getSupportTicketNotificationContext,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
 }
