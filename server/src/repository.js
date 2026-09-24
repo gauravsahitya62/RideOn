@@ -495,9 +495,9 @@ export function createRepository({ databaseUrl, fleet }) {
     return mapBooking({...rows[0],vehicle:{id:String(rows[0].vehicle_id),name:rows[0].v_name,type:String(rows[0].v_type)}});
   }
 
-  async function updateVendorBookingStatus(vendorId, bookingId, nextStatus, note='') {
+  async function updateVendorBookingStatus(vendorId, bookingId, nextStatus, note=''){
     const allowed = {
-      requested: ['confirmed','rejected','cancelled'],
+      requested: ['confirmed','rejected'],
       confirmed: ['in_progress','cancelled'],
       in_progress: ['completed','cancelled'],
       rejected: [],
@@ -509,22 +509,40 @@ export function createRepository({ databaseUrl, fleet }) {
       const b=await getVendorBooking(vendorId,bookingId);
       if(!b){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       if(!allowed[b.status]?.includes(nextStatus)){const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
-      b.status=nextStatus;b.updatedAt=new Date().toISOString();return b;
+      if(nextStatus==='confirmed' && !['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){
+        const e=new Error('Payment must be confirmed before the vendor can accept this booking.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;
+      }
+      b.status=nextStatus;
+      if(nextStatus==='rejected' && b.paymentStatus==='paid') b.paymentStatus='refund_pending';
+      if(nextStatus==='completed' && Number(b.pricing?.securityDeposit||0)>0){
+        memory.securityDeposits.set(String(b.id),{bookingId:String(b.id),customerId:b.customerId,vendorId,originalAmount:Number(b.pricing.securityDeposit),refundableAmount:Number(b.pricing.securityDeposit),approvedDeduction:0,status:'release_pending'});
+      }
+      b.updatedAt=new Date().toISOString();
+      return b;
     }
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
+      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type, v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
       if(!rows[0]){await client.query('rollback');const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       const current=rows[0].status;
       if(!allowed[current]?.includes(nextStatus)){await client.query('rollback');const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
-      const {rows:updated}=await client.query('update bookings set status=$2,updated_at=now() where id=$1 returning *',[bookingId,nextStatus]);
+      if(nextStatus==='confirmed' && !['paid','held','settlement_pending','settled'].includes(String(rows[0].payment_status))){
+        await client.query('rollback');const e=new Error('Payment must be confirmed before the vendor can accept this booking.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;
+      }
+      const nextPaymentStatus=nextStatus==='rejected'&&rows[0].payment_status==='paid'?'refund_pending':rows[0].payment_status;
+      const {rows:updated}=await client.query('update bookings set status=$2,payment_status=$3,updated_at=now() where id=$1 returning *',[bookingId,nextStatus,nextPaymentStatus]);
+      if(nextPaymentStatus==='refund_pending') await client.query('update payments set status=\'refund_pending\',updated_at=now() where booking_id=$1 and status=\'paid\'',[bookingId]);
+      if(nextStatus==='completed' && Number(rows[0].security_deposit_paise||0)>0){
+        await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status)
+          values($1,$2,$3,$4,$4,'release_pending')
+          on conflict (booking_id) do update set status='release_pending',updated_at=now()`,[bookingId,rows[0].customer_id,vendorId,Number(rows[0].security_deposit_paise)]);
+      }
       await client.query('insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$3,\'vendor\',$4,$5)',[bookingId,current,nextStatus,vendorId,note||null]);
       await client.query('commit');
       return mapBooking({...updated[0],vehicle:{id:String(updated[0].vehicle_id),name:rows[0].v_name,type:String(rows[0].v_type)}});
-    } catch(error){try{await client.query('rollback');}catch{};throw error;}finally{client.release();}
+    } catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
-
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
     if (!['customer','vendor'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
