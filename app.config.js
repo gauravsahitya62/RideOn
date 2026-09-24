@@ -17,7 +17,8 @@ module.exports = ({ config }) => {
       ...(Array.isArray(appJson.expo?.plugins) ? appJson.expo.plugins : []),
       'expo-image-picker',
       ['expo-location', { locationWhenInUsePermission: 'Allow RideOn to use your location to find vendors and estimate delivery distance.', locationAlwaysAndWhenInUsePermission: 'Allow RideOn to share your location only while an active vehicle delivery is in progress.', isAndroidBackgroundLocationEnabled: true, isIosBackgroundLocationEnabled: true }],
-      ['expo-task-manager',
+      'expo-task-manager',
+      ['react-native-maps', {
         ...(process.env.EXPO_PUBLIC_GOOGLE_MAPS_ANDROID_KEY ? { androidGoogleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_ANDROID_KEY } : {}),
         ...(process.env.EXPO_PUBLIC_GOOGLE_MAPS_IOS_KEY ? { iosGoogleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_IOS_KEY } : {}),
       }],
