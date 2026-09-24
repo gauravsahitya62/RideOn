@@ -24,5 +24,8 @@
     "expo-task-manager": "~57.0.1",
     "expo-notifications": "~57.0.21"
   },
-  "devDependencies": {}
+  "devDependencies": {},
+  "engines": {
+    "node": ">=20"
+  }
 }
