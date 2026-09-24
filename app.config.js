@@ -2,7 +2,7 @@ const appJson = require('./app.json');
 
 module.exports = ({ config }) => {
   const projectId = process.env.EAS_PROJECT_ID || config.extra?.eas?.projectId;
-  const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://rideon-api-262g.onrender.com';
+  const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://rideon-api-262g.onrender.com';\n  // One-key compatibility: use the generic public Maps key when platform-specific keys are not set.\n  const googleMapsKey = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || '';\n  const androidMapsKey = process.env.EXPO_PUBLIC_GOOGLE_MAPS_ANDROID_KEY || googleMapsKey;\n  const iosMapsKey = process.env.EXPO_PUBLIC_GOOGLE_MAPS_IOS_KEY || googleMapsKey;
   const easChannel = process.env.EAS_UPDATE_CHANNEL || process.env.EAS_CHANNEL || '';
   const isProduction = easChannel === 'production' || process.env.EAS_BUILD_PROFILE === 'production';
 
