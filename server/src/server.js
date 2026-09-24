@@ -857,6 +857,30 @@ app.post('/api/v1/vendor/bookings/:id/delivery/complete', supabaseRequireAuth, r
   }
 });
 
+app.post('/api/v1/vendor/bookings/:id/security-deposit/inspection', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({
+    deductionPaise:z.coerce.number().int().min(0).optional().default(0),
+    reason:z.string().trim().max(1000).optional().default(''),
+    evidenceReference:z.string().trim().max(500).optional().default(''),
+    refundProviderReference:z.string().trim().max(255).optional().default(''),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_SECURITY_DEPOSIT_INSPECTION',message:'Please provide valid deposit inspection details.'}});
+  try{
+    const result=await repository.recordSecurityDepositInspection(req.vendor.id,req.params.id,parsed.data);
+    const deposit=result.deposit;
+    if(deposit?.status==='refund_pending'){
+      void notifications.notifyBooking({bookingId:req.params.id,type:'refund_initiated',title:'Security deposit refund initiated',body:'Your security deposit is awaiting refund processing.',audience:'customer',dedupeKey:`security_deposit_refund_pending:${req.params.id}`});
+    }
+    if(deposit?.status==='deducted'){
+      void notifications.notifyBooking({bookingId:req.params.id,type:'dispute_created',title:'Security deposit deduction recorded',body:'A security deposit deduction was recorded after vehicle return. Review the booking for details.',audience:'customer',dedupeKey:`security_deposit_deducted:${req.params.id}`});
+    }
+    res.json({booking:publicBooking(result.booking),deposit});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,DEPOSIT_INSPECTION_NOT_ALLOWED:409,DEPOSIT_DEDUCTION_INVALID:400,DEPOSIT_DEDUCTION_REASON_REQUIRED:400,DEPOSIT_EVIDENCE_REQUIRED:400};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'SECURITY_DEPOSIT_INSPECTION_FAILED',message:error?.message||'We could not record the security deposit inspection. Please retry.'}});
+  }
+});
+
 app.post('/api/v1/vendor/bookings/:id/delivery/abort', supabaseRequireAuth, requireVendor, async (req,res)=>{
   try{
     const result=await repository.abortDelivery(req.vendor.id,req.params.id);
