@@ -59,7 +59,7 @@ export default function LiveDeliveryMap({booking,onDelivered}){
           try{
             const message=JSON.parse(event.data);
             if(message.type==='tracking.snapshot'||message.type==='tracking.update'){
-              setTracking(current=>({...current,active:true,stale:false,session:message.tracking?.session||current?.session,booking:message.tracking?.booking||current?.booking,location:message.tracking?.location||current?.location,route:message.tracking?.route||current?.route}));
+              setTracking(current=>({...current,active:true,stale:false,session:message.tracking?.session||current?.session,booking:message.tracking?.booking||current?.booking,location:message.tracking?.location||current?.location,route:message.tracking?.routeUnavailable?null:(message.tracking?.route||current?.route),routeUnavailable:Boolean(message.tracking?.routeUnavailable)}));
             }else if(message.type==='tracking.completed'||message.type==='tracking.stopped'){
               setTracking(current=>({...current,active:false,stale:false,session:message.tracking?.session||current?.session,booking:message.tracking?.booking||current?.booking}));
               onDelivered?.();
@@ -78,7 +78,7 @@ export default function LiveDeliveryMap({booking,onDelivered}){
 
   const current=tracking?.location|| (tracking?.session?.lastLatitude!=null?{latitude:tracking.session.lastLatitude,longitude:tracking.session.lastLongitude,updatedAt:tracking.session.lastLocationAt}:null);
   const destination=booking?.deliveryLatitude!=null&&booking?.deliveryLongitude!=null?{latitude:Number(booking.deliveryLatitude),longitude:Number(booking.deliveryLongitude)}:null;
-  const polyline=useMemo(()=>decodePolyline(tracking?.session?.lastRoutePolyline||tracking?.route?.encodedPolyline),[tracking?.session?.lastRoutePolyline,tracking?.route?.encodedPolyline]);
+  const polyline=useMemo(()=>tracking?.routeUnavailable?[]:decodePolyline(tracking?.session?.lastRoutePolyline||tracking?.route?.encodedPolyline),[tracking?.routeUnavailable,tracking?.session?.lastRoutePolyline,tracking?.route?.encodedPolyline]);
   const region=useMemo(()=>{
     const points=[current,destination,...polyline].filter(Boolean);if(!points.length)return DEFAULT;
     const lats=points.map(p=>p.latitude),lons=points.map(p=>p.longitude);
@@ -98,8 +98,8 @@ export default function LiveDeliveryMap({booking,onDelivered}){
 
   const stale=Boolean(tracking.stale||tracking.connectionLost||!current||Date.now()-(new Date(current.updatedAt||tracking.session?.lastLocationAt||0).getTime())>Math.max(30,tracking.staleThresholdSeconds||90)*1000);
   const coordinate=coordinateRef.current;
-  const distance=tracking?.route?.distanceMeters??tracking?.session?.lastRouteDistanceMeters;
-  const duration=tracking?.route?.durationSeconds??tracking?.session?.lastRouteDurationSeconds;
+  const distance=tracking?.routeUnavailable?null:(tracking?.route?.distanceMeters??tracking?.session?.lastRouteDistanceMeters);
+  const duration=tracking?.routeUnavailable?null:(tracking?.route?.durationSeconds??tracking?.session?.lastRouteDurationSeconds);
   const eta=duration!=null?Math.max(1,Math.round(Number(duration)/60)):null;
   return <View style={styles.card}>
     <View style={styles.header}><View style={{flex:1}}><Text style={styles.kicker}>LIVE DELIVERY</Text><Text style={styles.title}>{stale?'Live location temporarily unavailable':'Your vehicle is on the way'}</Text></View><View style={[styles.livePill,stale&&styles.stalePill]}><View style={[styles.dot,stale&&styles.staleDot]}/><Text style={[styles.liveText,stale&&styles.staleText]}>{stale?'STALE':'LIVE'}</Text></View></View>
@@ -112,7 +112,7 @@ export default function LiveDeliveryMap({booking,onDelivered}){
       <View style={styles.metric}><Text style={styles.metricValue}>{distance!=null?(Number(distance)/1000).toFixed(1)+' km':'—'}</Text><Text style={styles.metricLabel}>remaining distance</Text></View>
       <View style={styles.metric}><Text style={styles.metricValue}>{eta!=null?eta+' min':'—'}</Text><Text style={styles.metricLabel}>estimated arrival</Text></View>
     </View>
-    <Text style={styles.estimate}>Estimated delivery time · {stale?'Waiting for a fresh location':'updates as the vehicle moves'}</Text>
+    <Text style={styles.estimate}>Estimated delivery time · {stale?'Waiting for a fresh location':tracking?.routeUnavailable?'Route refresh temporarily unavailable':'updates as the vehicle moves'}</Text>
     <Text style={styles.updated}>{stale?'Location was last updated '+relativeTime(current?.updatedAt||tracking.session?.lastLocationAt)+'.': 'Location updated '+relativeTime(current?.updatedAt||tracking.session?.lastLocationAt)+'.'}</Text>
     {error?<Text style={styles.error}>{error}</Text>:null}
   </View>;
