@@ -1,40 +1,25 @@
-import React from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',line:'#E8EAF0',white:'#FFFFFF',green:'#258565'};
+import React, { useEffect, useMemo, useState } from 'react';
+import { StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',line:'#E8EAF0',white:'#FFFFFF',green:'#258565',bg:'#F6F7F9'};
 
-export default function PaymentMethodSelector({disabled=false}){
+export default function PaymentMethodSelector({disabled=false,capabilities,onChange,selection}){
+ const caps=capabilities||{method:'upi',apps:[]};
+ const intentApps=Array.isArray(caps.apps)?caps.apps:[];
+ const [mode,setMode]=useState(selection?.type||'intent');
+ const [app,setApp]=useState(selection?.appId||intentApps[0]?.id||'');
+ const [upiId,setUpiId]=useState(selection?.upiId||'');
+ useEffect(()=>{if(selection){setMode(selection.type||'intent');setApp(selection.appId||'');setUpiId(selection.upiId||'');}},[selection]);
+ useEffect(()=>{onChange?.(mode==='vpa'?{type:'vpa',upiId:upiId.trim()}: {type:'intent',appId:app});},[mode,app,upiId]);
+ const canIntent=Boolean(caps.supportsIntent&&intentApps.length);
+ const canVpa=Boolean(caps.supportsVpa);
+ const title=useMemo(()=>canIntent?'Choose how you want to pay':'UPI payment',[canIntent]);
  return <View style={styles.card}>
-  <View style={styles.head}>
-   <View style={{flex:1}}>
-    <Text style={styles.kicker}>PAYMENT METHOD</Text>
-    <Text style={styles.title}>UPI</Text>
-   </View>
-   <View style={styles.badge}><Text style={styles.badgeText}>PRIMARY</Text></View>
-  </View>
-  <Text style={styles.note}>Pay the exact server-calculated amount using any supported UPI app. Your payment is confirmed only after RideOn verifies the provider transaction.</Text>
-  <TouchableOpacity disabled={disabled} style={styles.option} accessibilityRole="radio" accessibilityState={{selected:true,disabled}}>
-   <View style={styles.upiMark}><Text style={styles.upiMarkText}>UPI</Text></View>
-   <View style={{flex:1,minWidth:0}}>
-    <Text style={styles.optionTitle}>UPI payment</Text>
-    <Text style={styles.sub}>Rental amount + refundable security deposit</Text>
-   </View>
-   <View style={styles.radio}><View style={styles.dot}/></View>
-  </TouchableOpacity>
+  <View style={styles.head}><View style={{flex:1}}><Text style={styles.kicker}>PAYMENT METHOD</Text><Text style={styles.title}>Pay with UPI</Text></View><View style={styles.badge}><Text style={styles.badgeText}>UPI</Text></View></View>
+  <Text style={styles.note}>Pay the exact server-calculated amount. RideOn confirms payment only after provider-side verification.</Text>
+  {canIntent&&<><Text style={styles.section}>{title}</Text><View style={styles.appGrid}>{intentApps.map(item=><TouchableOpacity key={item.id} disabled={disabled} accessibilityRole="radio" accessibilityState={{selected:mode==='intent'&&app===item.id,disabled}} onPress={()=>{setMode('intent');setApp(item.id)}} style={[styles.appOption,mode==='intent'&&app===item.id&&styles.appOptionActive]}><View style={styles.appIcon}><Text style={styles.appInitial}>{String(item.label||'UPI').charAt(0)}</Text></View><Text style={styles.appLabel}>{item.label}</Text>{mode==='intent'&&app===item.id&&<Text style={styles.check}>✓</Text>}</TouchableOpacity>)}</View></>}
+  {canIntent&&intentApps.length>0&&canVpa&&<View style={styles.or}><View style={styles.orLine}/><Text style={styles.orText}>OR</Text><View style={styles.orLine}/></View>}
+  {canVpa&&<><Text style={styles.section}>Pay using UPI ID</Text><TextInput editable={!disabled} value={upiId} onChangeText={v=>{setUpiId(v);setMode('vpa')}} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" placeholder="e.g. gaurav@upi" placeholderTextColor="#A0A7B1" style={styles.input}/><Text style={styles.hint}>Your UPI ID is validated by the payment provider during payment. Format alone never marks a payment successful.</Text></>}
+  {!canIntent&&!canVpa&&<View style={styles.unavailable}><Text style={styles.unavailableTitle}>UPI checkout unavailable</Text><Text style={styles.hint}>The configured payment provider has not enabled a verified UPI checkout yet.</Text></View>}
  </View>;
 }
-const styles=StyleSheet.create({
- card:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:24,padding:18,marginBottom:16,shadowColor:'#17202D',shadowOpacity:.04,shadowRadius:12,shadowOffset:{width:0,height:4},elevation:2},
- head:{flexDirection:'row',alignItems:'flex-start',justifyContent:'space-between',gap:10},
- kicker:{fontSize:10,letterSpacing:1.5,fontWeight:'900',color:C.muted},
- title:{fontSize:25,fontWeight:'900',color:C.ink,marginTop:3},
- badge:{backgroundColor:'#EAF6F0',paddingHorizontal:10,paddingVertical:6,borderRadius:12},
- badgeText:{fontSize:8,fontWeight:'900',letterSpacing:.8,color:C.green},
- note:{fontSize:12,color:C.muted,lineHeight:18,marginTop:10,marginBottom:14},
- option:{flexDirection:'row',alignItems:'center',gap:11,backgroundColor:'#FFF7F3',borderWidth:1.5,borderColor:C.orange,borderRadius:17,padding:13},
- upiMark:{width:43,height:43,borderRadius:13,backgroundColor:C.orange,alignItems:'center',justifyContent:'center'},
- upiMarkText:{fontSize:11,fontWeight:'900',color:C.white,letterSpacing:-.3},
- radio:{width:22,height:22,borderRadius:11,borderWidth:2,borderColor:C.orange,alignItems:'center',justifyContent:'center'},
- dot:{width:10,height:10,borderRadius:5,backgroundColor:C.orange},
- optionTitle:{fontSize:14,fontWeight:'900',color:C.ink},
- sub:{fontSize:10,color:C.muted,lineHeight:15,marginTop:3}
-});
+const styles=StyleSheet.create({card:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:24,padding:18,marginBottom:16,shadowColor:C.ink,shadowOpacity:.04,shadowRadius:12,shadowOffset:{width:0,height:4},elevation:2},head:{flexDirection:'row',alignItems:'flex-start',justifyContent:'space-between',gap:10},kicker:{fontSize:10,letterSpacing:1.5,fontWeight:'900',color:C.muted},title:{fontSize:25,fontWeight:'900',color:C.ink,marginTop:3},badge:{backgroundColor:'#EAF6F0',paddingHorizontal:10,paddingVertical:6,borderRadius:12},badgeText:{fontSize:8,fontWeight:'900',letterSpacing:.8,color:C.green},note:{fontSize:12,color:C.muted,lineHeight:18,marginTop:10,marginBottom:14},section:{fontSize:11,fontWeight:'900',color:C.ink,marginBottom:9,marginTop:3},appGrid:{gap:8},appOption:{flexDirection:'row',alignItems:'center',gap:11,backgroundColor:C.bg,borderWidth:1,borderColor:C.line,borderRadius:16,padding:12},appOptionActive:{borderColor:C.orange,backgroundColor:'#FFF7F3'},appIcon:{width:42,height:42,borderRadius:13,backgroundColor:'#EEF1F5',alignItems:'center',justifyContent:'center'},appInitial:{fontSize:15,fontWeight:'900',color:C.ink},appLabel:{flex:1,fontSize:13,fontWeight:'900',color:C.ink},check:{fontSize:18,fontWeight:'900',color:C.green},or:{flexDirection:'row',alignItems:'center',gap:9,marginVertical:14},orLine:{flex:1,height:1,backgroundColor:C.line},orText:{fontSize:9,fontWeight:'900',color:C.muted},input:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:13,paddingHorizontal:14,paddingVertical:13,fontSize:14,color:C.ink},hint:{fontSize:10,color:C.muted,lineHeight:15,marginTop:6},unavailable:{backgroundColor:'#FFF8EE',borderWidth:1,borderColor:'#F1DFC0',borderRadius:14,padding:12},unavailableTitle:{fontSize:12,fontWeight:'900',color:C.ink}});

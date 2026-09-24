@@ -1,7 +1,12 @@
 import crypto from 'node:crypto';
 
 const RENTAL_STATUSES = new Set(['pending','paid','held','settlement_pending','settled','refund_pending','refunded','failed','disputed']);
-const PROVIDERS = new Set(['paytm','mock','unconfigured']);
+const PROVIDERS = new Set(['paytm','cashfree','razorpay','mock','unconfigured']);
+const DEFAULT_UPI_APPS = [
+  { id:'gpay', label:'Google Pay', packageName:'com.google.android.apps.nbu.paisa.user' },
+  { id:'phonepe', label:'PhonePe', packageName:'com.phonepe.app' },
+  { id:'paytm', label:'Paytm', packageName:'net.one97.paytm' },
+];
 
 function transition(current, next) {
   if (current === next) return true;
@@ -34,7 +39,14 @@ export function createPaymentService({
     error.code = 'PAYMENT_PROVIDER_UNSUPPORTED';
     throw error;
   }
-  const paytmConfigured = selectedProvider === 'paytm' && Boolean(merchantId && clientId && clientSecret && website && callbackUrl);
+  const providerConfigured = Boolean((selectedProvider==='paytm' && merchantId && clientId && clientSecret && website && callbackUrl) || selectedProvider==='mock');
+  const upiCapabilities = {
+    method:'upi',
+    apps:DEFAULT_UPI_APPS,
+    supportsIntent:selectedProvider==='mock' ? true : false,
+    supportsVpa:selectedProvider==='mock' ? true : false,
+    provider:selectedProvider,
+  };
 
   function verifyWebhook(body, signature) {
     if (!['paytm','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
@@ -63,8 +75,9 @@ export function createPaymentService({
     if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0) {
       const error = new Error('Invalid payment amount.'); error.code = 'PAYMENT_CREATION_FAILED'; throw error;
     }
-    if (selectedProvider === 'mock') return { provider:'mock', status:'pending', providerOrderId:String(orderId), paymentUrl:`https://paytm.test/checkout/${encodeURIComponent(String(orderId))}`, amountPaise:Number(amountPaise), currency:'INR' };
-    if (!paytmConfigured) { const error = new Error('Paytm payment provider is not configured.'); error.code='PAYMENT_NOT_CONFIGURED'; throw error; }
+    if (selectedProvider === 'mock') return { provider:'mock', status:'pending', providerOrderId:String(orderId), paymentUrl:`https://paytm.test/checkout/${encodeURIComponent(String(orderId))}`, amountPaise:Number(amountPaise), currency:'INR', upi:upiCapabilities };
+    if (!providerConfigured) { const error = new Error('Payment provider is not configured.'); error.code='PAYMENT_NOT_CONFIGURED'; throw error; }
+    if (selectedProvider !== 'mock') { const error = new Error('Configured provider does not yet expose a verified UPI checkout implementation.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
     const error = new Error('Verified Paytm checkout integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error;
   }
 
@@ -74,5 +87,5 @@ export function createPaymentService({
   async function getSettlementStatus() { if (selectedProvider === 'mock') return { status:'processing' }; const error=new Error('Verified Paytm settlement-status integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
   async function reconcileTransaction() { if (selectedProvider === 'mock') return { reconciled:true }; const error=new Error('Verified Paytm transaction reconciliation integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
 
-  return { provider:selectedProvider, name:selectedProvider, configured:selectedProvider === 'mock' || paytmConfigured, verifyWebhook, parseWebhook, canTransition, createCustomerPayment, verifyPayment, refundPayment, createVendorSettlement, getSettlementStatus, reconcileTransaction };
+  return { provider:selectedProvider, name:selectedProvider, configured:providerConfigured, capabilities:upiCapabilities, verifyWebhook, parseWebhook, canTransition, createCustomerPayment, verifyPayment, refundPayment, createVendorSettlement, getSettlementStatus, reconcileTransaction };
 }

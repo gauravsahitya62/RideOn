@@ -162,6 +162,7 @@ export const rideOnApi = {
   listVendorBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/vendor/bookings${query ? `?${query}` : ''}`); },
   getVendorBooking: (id) => request(`/api/v1/vendor/bookings/${encode(id)}`),
   updateVendorBookingStatus: (id,payload) => request(`/api/v1/vendor/bookings/${encode(id)}/status`, { method:'PATCH', body:JSON.stringify(payload) }),
+  getPaymentCapabilities: () => request('/api/v1/payments/capabilities'),
   createPaymentOrder: (payload) => request('/api/v1/payments/create-order', { method:'POST', body:JSON.stringify(payload) }),
   getPayment: (id) => request(`/api/v1/payments/${encode(id)}`),
   getPaymentByBooking: async (bookingId) => {

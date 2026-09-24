@@ -684,13 +684,18 @@ test('payment webhook signature and payload are validated', () => {
   assert.equal(service.parseWebhook({...valid,amountPaise:0}),null);
 });
 
-test('paytm provider fails closed until merchant onboarding is configured', async () => {
-  const service = createPaymentService({ provider:'paytm' });
-  assert.equal(service.configured,false);
-  await assert.rejects(
-    () => service.createCustomerPayment({ orderId:'rideon-test', amountPaise:10000 }),
-    (error) => error.code === 'PAYMENT_NOT_CONFIGURED'
-  );
+test('real production provider without verified UPI integration fails closed', async () => {
+  const service = createPaymentService({ provider:'paytm',merchantId:'m',clientId:'c',clientSecret:'s',website:'w',callbackUrl:'cb' });
+  assert.equal(service.configured,true);
+  await assert.rejects(() => service.createCustomerPayment({orderId:'rideon-test',amountPaise:10000}),(error)=>error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED');
+});
+
+test('payment capability model is UPI-first and provider-agnostic', () => {
+  const service = createPaymentService({ provider:'mock', webhookSecret:'mock-secret' });
+  assert.equal(service.capabilities.method,'upi');
+  assert.equal(service.capabilities.supportsIntent,true);
+  assert.equal(service.capabilities.supportsVpa,true);
+  assert.deepEqual(service.capabilities.apps.map(x=>x.id),['gpay','phonepe','paytm']);
 });
 
 test('request correlation is returned on a 404 response', async () => {

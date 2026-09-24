@@ -169,7 +169,7 @@ const paymentWebhookSecret = process.env.PAYTM_WEBHOOK_SECRET || '';
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && paymentProvider !== 'paytm') throw new Error('PAYMENT_PROVIDER must be paytm in production; mock/unconfigured providers are not allowed');
+if (isProduction && ['mock','unconfigured'].includes(paymentProvider)) throw new Error('PAYMENT_PROVIDER must be a real production payment provider.');
 // Paytm credentials are intentionally optional at process startup. This keeps health/API deployment available
 // while live payment operations fail closed with PAYTM_ONBOARDING_REQUIRED until merchant onboarding is complete.
 
@@ -346,6 +346,8 @@ const requireVendor = async (req, res, next) => {
 app.get('/api/v1/version', (_req, res) => {
   res.json({ service:'rideon-api', buildCommit, nodeEnv:process.env.NODE_ENV || 'development', timestamp:new Date().toISOString() });
 });
+
+app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => { res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...(payments.capabilities||{})}}); });
 
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
@@ -833,7 +835,8 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
   } catch(error) {
     if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_NOT_CONFIGURED',message:'Paytm payments are not configured on the RideOn server.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
-    if(error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Paytm checkout is not enabled for this merchant yet. No payment has been marked successful.'}});
+    if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI checkout is not enabled for the configured payment provider yet.'}});
+    if(error.code==='PAYTM_ONBOARDING_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI checkout is not enabled for the configured payment provider yet. No payment has been marked successful.'}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
   }
@@ -864,7 +867,7 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, as
     const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
     return res.json({payment:latestPayment,verification:'verified',bookingPaymentStatus:latestBooking?.paymentStatus||'pending'});
   }catch(error){
-    if(error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Paytm verification is not enabled for this merchant yet. No payment has been marked successful.'}});
+    if(error.code==='PAYTM_ONBOARDING_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI payment verification is not enabled for the configured provider yet. No payment has been marked successful.'}});
     throw error;
   }
 });
