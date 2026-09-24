@@ -1498,7 +1498,8 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
   if(result.applied && !result.duplicate){
     const paymentEventMap={paid:{type:'payment_success',title:'Payment confirmed',body:'Your RideOn payment has been verified.'},failed:{type:'payment_failed',title:'Payment failed',body:'Your RideOn payment could not be confirmed.'},refund_pending:{type:'refund_initiated',title:'Refund initiated',body:'Your RideOn refund has been initiated.'},refunded:{type:'refund_completed',title:'Refund completed',body:'Your RideOn refund has been completed.'}};
     const eventInfo=paymentEventMap[event.status];
-    if(eventInfo) void notifications.notifyBooking({bookingId:event.bookingId,...eventInfo,audience:'customer',dedupeKey:`payment:${event.eventId}:${event.status}`});
+    if(eventInfo) void notifications.notifyBooking({bookingId:event.bookingId,...eventInfo,audience:'customer',dedupeKey:`payment:${event.eventId}:${event.status}:customer`});
+    if(event.status==='paid') void notifications.notifyBooking({bookingId:event.bookingId,type:'payment_received',title:'Payment received',body:'Payment for a RideOn booking has been confirmed.',audience:'vendor',dedupeKey:`payment:${event.eventId}:vendor`});
   }
   res.json({received:true,applied:result.applied,duplicate:result.duplicate});
 });
