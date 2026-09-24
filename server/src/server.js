@@ -322,13 +322,18 @@ const supabaseRequireAuth = async (req, res, next) => {
   }
 
   try {
-    let user = await verifySupabaseAccessToken(token);
-    if (!user?.id || !user?.email) {
-      let fallbackUser = null;
-      await new Promise(resolve => auth.middleware()(req, { status(code){ this.code=code; return this; }, json(body){ this.body=body; return this; } }, () => { fallbackUser = req.user; resolve(); }));
-      if (fallbackUser) return next();
-      return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+    // Legacy password-login tokens are accepted only through the same signed JWT
+    // middleware, which re-resolves role/account status from the database.
+    let untrustedPayload = null;
+    try {
+      const encoded = token.split('.')[1];
+      untrustedPayload = encoded ? JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) : null;
+    } catch {}
+    if (untrustedPayload?.iss && process.env.SUPABASE_URL && !String(untrustedPayload.iss).startsWith(String(process.env.SUPABASE_URL))) {
+      return auth.middleware()(req, res, next);
     }
+    const user = await verifySupabaseAccessToken(token);
+    if (!user?.id || !user?.email) return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
 
     const metadata = user.user_metadata || {};
     let identity = await repository.findCustomerBySupabaseUserId(user.id);
