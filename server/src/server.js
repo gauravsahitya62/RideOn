@@ -765,8 +765,10 @@ app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, as
 app.get('/api/v1/vendor/vehicles', supabaseRequireAuth, requireVendor, async (req,res)=>{
   const activeParam=req.query.active?.toString();
   const active=activeParam===undefined?undefined:activeParam==='true';
-  const vehicles=await repository.listVendorVehicles(req.vendor.id,{active});
-  res.json({data:vehicles,vehicles,meta:{count:vehicles.length}});
+  const limit=Math.min(50,Math.max(1,Number(req.query.limit)||50));
+  const offset=Math.max(0,Number(req.query.offset)||0);
+  const vehicles=await repository.listVendorVehicles(req.vendor.id,{active,limit,offset});
+  res.json({data:vehicles,vehicles,meta:{count:vehicles.length,limit,offset,hasMore:Boolean(vehicles.hasMore)}});
 });
 
 app.post('/api/v1/vendor/vehicles', supabaseRequireAuth, requireVendor, async (req,res)=>{
