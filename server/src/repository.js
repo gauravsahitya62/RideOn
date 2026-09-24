@@ -105,7 +105,36 @@ export function createRepository({ databaseUrl, fleet }) {
         if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
       }
     }
-    if (!rows) throw lastError || new Error('Vehicle inventory query failed.');
+    if (!rows) {
+      // Some existing production databases may be one migration behind.
+      // Retry with only the core inventory columns so public marketplace
+      // browsing does not fail merely because optional vehicle metadata is
+      // missing.
+      try {
+        const fallback = await pool.query(
+          `select id, type, name, city, daily_rate_paise, security_deposit_paise, active
+           from vehicles
+           where ${where.join(' and ')}
+           order by name asc`,
+          params
+        );
+        rows = fallback.rows.map(row => ({
+          ...row,
+          transmission: null,
+          fuel: null,
+          seats: null,
+          make: null,
+          model: null,
+          year: null,
+          description: '',
+          image_urls: [],
+          delivery_available: true,
+          owner_id: null,
+        }));
+      } catch (fallbackError) {
+        throw lastError || fallbackError || new Error('Vehicle inventory query failed.');
+      }
+    }
 
     return rows.map((row) => ({
       id: String(row.id),
