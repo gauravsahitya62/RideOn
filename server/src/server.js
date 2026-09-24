@@ -277,6 +277,7 @@ const payments = createPaymentService({
   callbackUrl: paytmCallbackUrl,
   webhookSecret: paymentWebhookSecret,
 });
+if (isProduction && !payments.liveIntegrationReady) throw new Error('Live payment provider integration is not verified; production startup is blocked until the provider adapter is implemented and tested.');
 
 async function requestRefundForBooking(bookingId) {
   const payment=await repository.findPaymentByBooking(bookingId);
