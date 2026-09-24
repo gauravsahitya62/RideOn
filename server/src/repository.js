@@ -87,13 +87,25 @@ export function createRepository({ databaseUrl, fleet }) {
       where.push(`(name ilike ${params.length}::text or coalesce(make, '') ilike ${params.length}::text or coalesce(model, '') ilike ${params.length}::text)`);
     }
 
-    const { rows } = await pool.query(
-      `select id, owner_id, type, name, make, model, year, city, daily_rate_paise, security_deposit_paise, active, transmission, fuel, seats, description, image_urls, delivery_available
-       from vehicles
-       where ${where.join(' and ')}
-       order by name asc`,
-      params
-    );
+    let rows;
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const result = await pool.query(
+          `select id, owner_id, type, name, make, model, year, city, daily_rate_paise, security_deposit_paise, active, transmission, fuel, seats, description, image_urls, delivery_available
+           from vehicles
+           where ${where.join(' and ')}
+           order by name asc`,
+          params
+        );
+        rows = result.rows;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+      }
+    }
+    if (!rows) throw lastError || new Error('Vehicle inventory query failed.');
 
     return rows.map((row) => ({
       id: String(row.id),
