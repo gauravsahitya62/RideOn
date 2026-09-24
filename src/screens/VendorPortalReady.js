@@ -59,9 +59,9 @@ export default function VendorPortalReady({user,onLogout}){
    try{
      const permission=await ImagePicker.requestMediaLibraryPermissionsAsync();
      if(!permission.granted){Alert.alert('Gallery access required','Please allow photo access in iPhone Settings to upload vehicle photos.');return;}
-     const result=await ImagePicker.launchImageLibraryAsync({mediaTypes:['images'],allowsMultipleSelection:true,selectionLimit:8,quality:0.85});
+     const result=await ImagePicker.launchImageLibraryAsync({mediaTypes:['images'],allowsMultipleSelection:true,selectionLimit:8,quality:0.85,base64:true});
      if(result.canceled)return;
-     const selected=result.assets.map(asset=>asset.uri).filter(Boolean);
+     const selected=result.assets.filter(asset=>asset?.base64).map(asset=>({base64:asset.base64,contentType:asset.mimeType||'image/jpeg'}));
      if(!selected.length)return;
      setBusy(true);
      setBanner('Uploading vehicle photos…');
