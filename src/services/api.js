@@ -113,6 +113,18 @@ const encode = (value) => encodeURIComponent(String(value));
 export const rideOnApi = {
   health: () => request('/health'),
   listLocations: () => request('/api/v1/locations'),
+  listMapVendors: (params = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString();
+    return request(`/api/v1/vendors/map${query ? `?${query}` : ''}`);
+  },
+  getRouteEta: (vendorId, latitude, longitude) => request(`/api/v1/routing/eta?vendorId=${encode(vendorId)}&latitude=${encode(latitude)}&longitude=${encode(longitude)}`),
+  geocodeAddress: (address, city) => {
+    const query = new URLSearchParams({ address: String(address || ''), ...(city ? { city: String(city) } : {}) }).toString();
+    return request(`/api/v1/geocoding/search?${query}`);
+  },
+  getVendorServiceLocation: () => request('/api/v1/vendor/service-location'),
+  updateVendorServiceLocation: (payload) => request('/api/v1/vendor/service-location', { method:'PATCH', body:JSON.stringify(payload) }),
+  updateBookingRoute: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/route`, { method:'POST', body: JSON.stringify({}) }),
   listVehicles: (params = {}) => {
     const query = new URLSearchParams(
       Object.entries(params).filter(([, value]) => value != null && value !== '')
