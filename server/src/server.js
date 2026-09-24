@@ -13,6 +13,7 @@ import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
 import { createTrackingRealtimeServer } from './trackingRealtime.js';
 import { createNotificationService } from './notifications.js';
+import { createObservability } from './observability.js';
 
 const fleet = [];
 
@@ -31,12 +32,12 @@ app.use((req, res, next) => {
   res.setHeader('X-Request-Id', requestId);
   res.on('finish', () => {
     const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-    console.log(JSON.stringify({
-      level:'info', event:'http_request', requestId, timestamp:new Date().toISOString(),
-      method:req.method, route:req.path, status:res.statusCode,
-      durationMs:Math.round(durationMs * 100) / 100,
-      userId:req.user?.id || undefined,
-    }));
+    const rounded=Math.round(durationMs * 100) / 100;
+    observability.log('info','http_request',{requestId,method:req.method,route:req.path,status:res.statusCode,durationMs:rounded,userId:req.user?.id||undefined});
+    if(res.statusCode>=500 || res.statusCode===401 || res.statusCode===403){
+      observability.log(res.statusCode>=500?'error':'warn','request_failure',{requestId,method:req.method,route:req.path,status:res.statusCode,durationMs:rounded,category:res.statusCode>=500?'internal_error':'authorization'});
+    }
+    if(rounded>=Number(process.env.SLOW_REQUEST_MS||1000)) observability.log('warn','slow_request',{requestId,method:req.method,route:req.path,status:res.statusCode,durationMs:rounded});
   });
   next();
 });
@@ -186,6 +187,7 @@ function publicBooking(booking) {
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
 const notifications = createNotificationService({ repository });
+const observability = createObservability({ repository });
 console.log('[RideOnServer][ROUTES_READY]', JSON.stringify({ routes:['GET /health','GET /api/v1/version','GET /api/v1/me','POST /api/v1/auth/request-otp','POST /api/v1/auth/verify-otp','POST /api/v1/auth/complete-registration'] }));
 console.log('[RideOnServer][BOOT]', JSON.stringify({
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -423,6 +425,7 @@ const requireRole = (...roles) => (req, res, next) => {
 };
 
 const requireCustomer = requireRole('customer');
+const requireAdmin = requireRole('admin');
 const requireSupport = requireRole('support','admin');
 
 app.get('/api/v1/notifications', supabaseRequireAuth, async (req,res)=>{
@@ -507,17 +510,36 @@ app.get('/api/v1/version', (_req, res) => {
 
 app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => { res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...(payments.capabilities||{})}}); });
 
-app.get('/health', async (_req, res) => {
-  const storage = await repository.health();
-  const healthy = storage.mode === 'memory' || storage.reachable !== false;
-  res.status(healthy ? 200 : 503).json({
-    status: healthy ? 'ok' : 'degraded',
-    service: 'rideon-api',
-    storage,
-    paymentProvider: payments.name,
-    buildCommit,
-    timestamp: new Date().toISOString(),
-  });
+app.get('/health', (_req, res) => {
+  res.status(200).json({status:'ok',service:'rideon-api',buildCommit,timestamp:new Date().toISOString()});
+});
+app.get('/health/ready', async (_req,res)=>{
+  const storage=await repository.health();
+  const checks={
+    database:storage.mode==='memory'?process.env.NODE_ENV!=='production':storage.reachable===true,
+    paymentProvider:!isProduction || payments.liveIntegrationReady===true,
+    routing:!isProduction || Boolean(process.env.GOOGLE_ROUTES_API_KEY),
+    auth:!isProduction || Boolean(process.env.SUPABASE_URL&&process.env.SUPABASE_PUBLISHABLE_KEY),
+  };
+  const ready=Object.values(checks).every(Boolean);
+  res.status(ready?200:503).json({status:ready?'ready':'not_ready',service:'rideon-api',checks,buildCommit,timestamp:new Date().toISOString()});
+});
+
+app.get('/api/v1/admin/metrics', supabaseRequireAuth, requireAdmin, async (req,res)=>{
+  try{
+    const result=await repository.getAdminMetrics({from:req.query.from,to:req.query.to});
+    res.json({metrics:result});
+  }catch(error){
+    res.status(error?.code==='INVALID_ANALYTICS_RANGE'?400:503).json({error:{code:error?.code||'ADMIN_METRICS_UNAVAILABLE',message:error?.code==='INVALID_ANALYTICS_RANGE'?'Invalid analytics date range.':'Operational metrics are temporarily unavailable. Please retry.'}});
+  }
+});
+app.get('/api/v1/admin/reconciliation', supabaseRequireAuth, requireAdmin, async (req,res)=>{
+  try{res.json({reconciliation:await repository.getFinancialReconciliation({limit:req.query.limit})});}
+  catch{res.status(503).json({error:{code:'RECONCILIATION_UNAVAILABLE',message:'Financial reconciliation is temporarily unavailable. Please retry.'}});}
+});
+app.get('/api/v1/admin/operational-alerts', supabaseRequireAuth, requireAdmin, async (req,res)=>{
+  try{res.json({alerts:await repository.getOperationalAlerts({limit:req.query.limit})});}
+  catch{res.status(503).json({error:{code:'OPERATIONAL_ALERTS_UNAVAILABLE',message:'Operational alerts are temporarily unavailable. Please retry.'}});}
 });
 
 app.get('/api/v1/geocoding/search', supabaseRequireAuth, requireCustomer, async (req,res) => {
@@ -925,6 +947,7 @@ app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVend
     const finalBooking=latest||booking;
     const notificationMap={confirmed:{type:'booking_confirmed',title:'Booking confirmed',body:'Your RideOn booking has been confirmed.'},rejected:{type:'booking_rejected',title:'Booking declined',body:'The vendor declined your RideOn booking.'},cancelled:{type:'booking_cancelled',title:'Booking cancelled',body:'Your RideOn booking has been cancelled.'},in_progress:{type:'booking_confirmed',title:'Rental started',body:'Your RideOn rental is now active.'},completed:{type:'booking_completed',title:'Booking completed',body:'Your RideOn booking is complete. You can now review your experience.'}};
     const event=notificationMap[parsed.data.status];
+    void observability.track({name:`booking_${parsed.data.status}`,eventKey:`booking_status:${finalBooking.id}:${parsed.data.status}`,actorUserId:req.vendor.id,bookingId:finalBooking.id,properties:{status:parsed.data.status}});
     if(event) void notifications.notifyBooking({bookingId:finalBooking.id,...event,audience:'customer',dedupeKey:`booking_status:${finalBooking.id}:${parsed.data.status}`});
     if(parsed.data.status==='confirmed' && finalBooking.delivery){
       void notifications.notifyBooking({bookingId:finalBooking.id,type:'delivery_assigned',title:'Delivery assigned',body:'Your vehicle delivery has been assigned and will be coordinated by the vendor.',audience:'customer',dedupeKey:`delivery_assigned:${finalBooking.id}`});
@@ -1000,6 +1023,7 @@ app.post('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer',
       const issueType=categoryMap[result.ticket.category];
       if(issueType) void notifications.notifySupport({type:issueType,title:'Support issue requires attention',body:`A ${result.ticket.category.toLowerCase()} support issue was created.`,ticketId:result.ticket.id,bookingId:result.ticket.bookingId||null,dedupeKey:`${issueType}:${result.ticket.id}`});
     }
+    if(!result.idempotentReplay) void observability.track({name:'support_ticket_created',eventKey:`support_ticket:${result.ticket.id}`,actorUserId:req.user.id,bookingId:result.ticket.bookingId||null,properties:{category:result.ticket.category,priority:result.ticket.priority}});
     res.status(result.idempotentReplay?200:201).json({ticket:result.ticket,idempotentReplay:result.idempotentReplay});
   }catch(error){return supportResponse(res,error);}
 });
@@ -1097,6 +1121,7 @@ app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCu
   try{
     const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'customer',...parsed.data});
     if(review?.revieweeUserId) void notifications.notify({recipientUserId:review.revieweeUserId,type:'customer_review',title:'New customer review',body:'A customer has left a review for your RideOn service.',bookingId:req.params.id,dedupeKey:`customer_review:${review.id}`});
+    void observability.track({name:'review_created',eventKey:`review:${review.id}`,actorUserId:req.user.id,bookingId:req.params.id,properties:{reviewType:'customer_to_vendor'}});
     res.status(201).json({review});
   }catch(error){return reviewResponse(res,error);}
 });
@@ -1364,6 +1389,7 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
       pricing: pricingData,
       idempotencyKey,
     });
+    void observability.track({name:'booking_created',eventKey:`booking_created:${booking.id}`,actorUserId:req.user.id,bookingId:booking.id,properties:{delivery:Boolean(booking.delivery)}});
     void notifications.notifyBooking({bookingId:booking.id,type:'booking_created',title:'Booking request sent',body:'Your RideOn booking request has been sent to the vendor.',audience:'customer',dedupeKey:`booking_created:${booking.id}`});
     void notifications.notifyBooking({bookingId:booking.id,type:'new_booking',title:'New booking request',body:'A customer has requested your vehicle.',audience:'vendor',dedupeKey:`new_booking:${booking.id}`});
     res.status(201).json({ data: publicBooking(booking), booking: publicBooking(booking) });
@@ -1543,6 +1569,7 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
     }
     if(event.status==='failed') void notifications.notifySupport({type:'payment_issue',title:'Payment issue',body:'A RideOn payment failed provider verification and may require support attention.',bookingId:event.bookingId,dedupeKey:`payment_issue:${event.eventId}`});
   }
+  if(result.applied&&!result.duplicate) void observability.track({name:`payment_${event.status}`,eventKey:`payment_event:${event.eventId}`,bookingId:event.bookingId,properties:{status:event.status}});
   res.json({received:true,applied:result.applied,duplicate:result.duplicate});
 });
 
