@@ -276,6 +276,9 @@ export function createRepository({ databaseUrl, fleet }) {
     status: row.status,
     serviceCity: row.service_city,
     serviceArea: row.service_area || {},
+    serviceLatitude: row.service_latitude == null ? null : Number(row.service_latitude),
+    serviceLongitude: row.service_longitude == null ? null : Number(row.service_longitude),
+    serviceAddress: row.service_address || null,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   });
@@ -306,7 +309,7 @@ export function createRepository({ databaseUrl, fleet }) {
   async function findVendorByCustomerId(customerId) {
     if (!useDatabase) return memory.vendors?.get(customerId) || null;
     const { rows } = await pool.query(
-      'select id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,created_at,updated_at from vendors where owner_customer_id=$1',
+      'select id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,service_latitude,service_longitude,service_address,created_at,updated_at from vendors where owner_customer_id=$1',
       [customerId]
     );
     return rows[0] ? mapVendor(rows[0]) : null;
@@ -353,6 +356,111 @@ export function createRepository({ databaseUrl, fleet }) {
     return rows[0] ? mapVendor(rows[0]) : null;
   }
 
+  async function updateVendorServiceLocation(customerId, input = {}) {
+    const latitude = input.latitude == null || input.latitude === '' ? null : Number(input.latitude);
+    const longitude = input.longitude == null || input.longitude === '' ? null : Number(input.longitude);
+    if ((latitude == null) !== (longitude == null)) {
+      const e = new Error('Provide both service latitude and longitude, or leave both empty.');
+      e.code = 'INVALID_SERVICE_LOCATION';
+      throw e;
+    }
+    if (latitude != null && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)) {
+      const e = new Error('Service latitude must be between -90 and 90.');
+      e.code = 'INVALID_SERVICE_LOCATION';
+      throw e;
+    }
+    if (longitude != null && (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)) {
+      const e = new Error('Service longitude must be between -180 and 180.');
+      e.code = 'INVALID_SERVICE_LOCATION';
+      throw e;
+    }
+    const address = input.address == null ? undefined : String(input.address).trim().slice(0, 300);
+    const serviceCity = input.serviceCity == null ? undefined : String(input.serviceCity).trim().slice(0, 100);
+    if (!useDatabase) {
+      const vendor = await ensureVendorForCustomer(customerId, {});
+      if (address !== undefined) vendor.serviceAddress = address;
+      if (serviceCity !== undefined) vendor.serviceCity = serviceCity;
+      vendor.serviceLatitude = latitude;
+      vendor.serviceLongitude = longitude;
+      vendor.updatedAt = new Date().toISOString();
+      return vendor;
+    }
+    const vendor = await findVendorByCustomerId(customerId);
+    if (!vendor) return null;
+    const { rows } = await pool.query(
+      `update vendors
+       set service_latitude=$2, service_longitude=$3,
+           service_address=case when $4::text is null then service_address else $4 end,
+           service_city=case when $5::text is null then service_city else $5 end,
+           updated_at=now()
+       where owner_customer_id=$1
+       returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,service_latitude,service_longitude,service_address,created_at,updated_at`,
+      [customerId, latitude, longitude, address ?? null, serviceCity ?? null]
+    );
+    return rows[0] ? mapVendor(rows[0]) : null;
+  }
+
+  async function getVendorServiceLocation(customerId) {
+    const vendor = await findVendorByCustomerId(customerId);
+    if (!vendor) return null;
+    return {
+      vendorId: vendor.id,
+      businessName: vendor.businessName,
+      serviceCity: vendor.serviceCity || null,
+      address: vendor.serviceAddress || vendor.address || null,
+      latitude: vendor.serviceLatitude ?? null,
+      longitude: vendor.serviceLongitude ?? null,
+    };
+  }
+
+  async function listMarketplaceVendors({ city } = {}) {
+    if (!useDatabase) {
+      const entries = [...(memory.vendors?.values() || [])]
+        .filter(v => v.serviceLatitude != null && v.serviceLongitude != null)
+        .filter(v => !city || String(v.serviceCity || '').toLowerCase() === String(city).trim().toLowerCase());
+      const counts = new Map();
+      for (const vehicle of [...fleet, ...memory.vehicles.values()]) {
+        if (vehicle.active === false || !vehicle.ownerId) continue;
+        const key = String(vehicle.ownerId);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      return entries.map(v => ({
+        vendorId: v.id,
+        businessName: v.businessName,
+        serviceCity: v.serviceCity || null,
+        address: v.serviceAddress || v.address || null,
+        latitude: Number(v.serviceLatitude),
+        longitude: Number(v.serviceLongitude),
+        availableVehicleCount: counts.get(String(v.id)) || 0,
+      }));
+    }
+    const params=[];
+    const where=[`v.status='active'`, 'v.service_latitude is not null', 'v.service_longitude is not null'];
+    if(city && String(city).trim()) {
+      params.push(String(city).trim());
+      where.push(`lower(trim(v.service_city)) = lower(trim($${params.length}))`);
+    }
+    const { rows } = await pool.query(
+      `select v.id, v.business_name, v.service_city, v.service_address,
+              v.service_latitude, v.service_longitude, count(ve.id)::int as available_vehicle_count
+       from vendors v
+       left join vehicles ve on ve.owner_id=v.id and ve.active=true
+       where ${where.join(' and ')}
+       group by v.id, v.business_name, v.service_city, v.service_address, v.service_latitude, v.service_longitude
+       order by v.business_name asc`,
+      params
+    );
+    return rows.map(v => ({
+      vendorId:String(v.id),
+      businessName:v.business_name,
+      serviceCity:v.service_city || null,
+      address:v.service_address || null,
+      latitude:Number(v.service_latitude),
+      longitude:Number(v.service_longitude),
+      availableVehicleCount:Number(v.available_vehicle_count || 0),
+    }));
+  }
+
   async function updateVendor(customerId, input) {
     if (!useDatabase) {
       const vendor = await ensureVendorForCustomer(customerId, input);
@@ -366,7 +474,7 @@ export function createRepository({ databaseUrl, fleet }) {
        phone=coalesce($4,phone), email=coalesce($5,email), address=coalesce($6,address),
        service_city=coalesce($7,service_city), service_area=coalesce($8,service_area), updated_at=now()
        where owner_customer_id=$1
-       returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,created_at,updated_at`,
+       returning id,owner_customer_id,business_name,contact_name,phone,email,address,support_phone,support_email,status,service_city,service_area,service_latitude,service_longitude,service_address,created_at,updated_at`,
       [customerId,input.businessName,input.contactName,input.phone,input.email,input.address,input.serviceCity,input.serviceArea]
     );
     return rows[0] ? mapVendor(rows[0]) : null;
@@ -1181,5 +1289,5 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
 }
