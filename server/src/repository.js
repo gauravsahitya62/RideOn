@@ -582,7 +582,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if(!q.rows[0]){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       const b=q.rows[0];
       if(String(b.status)!=='completed'){const e=new Error('Vehicle must be returned before deposit inspection.');e.code='DEPOSIT_INSPECTION_NOT_ALLOWED';throw e;}
-      const original=Number(b.original_amount_paise||b.security_deposit_paise||0);
+      const original=Number(b.sd_status ? b.original_amount_paise : b.security_deposit_paise||0);
       if(deduction>original){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}
       if(deduction>0&&!String(reason).trim()){const e=new Error('A deduction reason is required.');e.code='DEPOSIT_DEDUCTION_REASON_REQUIRED';throw e;}
       if(deduction>0&&!String(evidenceReference).trim()){const e=new Error('Evidence/reference is required for a deduction.');e.code='DEPOSIT_EVIDENCE_REQUIRED';throw e;}
@@ -590,7 +590,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if(b.original_amount_paise==null){
         await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,approved_deduction_paise,status,deduction_reason,evidence_reference,provider)
           values($1,$2,$3,$4,$5,$6,$7,$8,$9,null)
-          on conflict (booking_id) do update set refundable_amount_paise=$5,approved_deduction_paise=$6,status=$7,deduction_reason=$8,evidence_reference=$9,updated_at=now()`,[bookingId,b.customer_id,vendorId,original,refundable,deduction,deduction>0?'deducted':'refund_pending',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null,vendorId]);
+          on conflict (booking_id) do update set refundable_amount_paise=$5,approved_deduction_paise=$6,status=$7,deduction_reason=$8,evidence_reference=$9,updated_at=now()`,[bookingId,b.customer_id,vendorId,original,refundable,deduction,deduction>0?'deducted':'refund_pending',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null]);
       }else{
         await client.query("update security_deposits set refundable_amount_paise=$2,approved_deduction_paise=$3,status=$4,deduction_reason=$5,evidence_reference=$6,inspected_at=now(),inspected_by=$7,updated_at=now() where booking_id=$1",[bookingId,refundable,deduction,deduction>0?'deducted':'refund_pending',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null,vendorId]);
       }
