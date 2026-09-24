@@ -51,7 +51,7 @@ export default function LiveDeliveryMap({booking,onDelivered}){
   useEffect(()=>{load();},[load]);
 
   useEffect(()=>{
-    if(!booking?.id||tracking?.active!==true)return;
+    if(!booking?.id||tracking?.session?.status!=='active'||tracking?.booking?.deliveryStatus!=='in_delivery')return;
     let socket;
     try{
       socket=rideOnApi.createTrackingSocket(booking.id,{
