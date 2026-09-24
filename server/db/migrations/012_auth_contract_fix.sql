@@ -1,6 +1,9 @@
 -- Auth contract hardening for customer/vendor onboarding.
 -- Keeps Supabase Auth as the authentication source while ensuring the
 -- RideOn identity schema exists before the server queries it.
+--
+-- NOTE: 006_vendor_marketplace_mvp already creates the vendors table and
+-- owner uniqueness, so this migration only hardens the customers contract.
 
 ALTER TABLE customers
   ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'customer'
