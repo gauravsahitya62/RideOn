@@ -59,19 +59,15 @@ export default function VendorPortalReady({user,onLogout}){
    try{
      const permission=await ImagePicker.requestMediaLibraryPermissionsAsync();
      if(!permission.granted){Alert.alert('Gallery access required','Please allow photo access in iPhone Settings to upload vehicle photos.');return;}
-     const result=await ImagePicker.launchImageLibraryAsync({mediaTypes:['images'],allowsMultipleSelection:true,selectionLimit:8,quality:0.85,base64:true});
+     const result=await ImagePicker.launchImageLibraryAsync({mediaTypes:['images'],allowsMultipleSelection:true,selectionLimit:8,quality:0.7,base64:true});
      if(result.canceled)return;
      const selected=result.assets.filter(asset=>asset?.base64).map(asset=>({base64:asset.base64,contentType:asset.mimeType||'image/jpeg'}));
      if(!selected.length)return;
      setBusy(true);
      setBanner('Uploading vehicle photos…');
      try{
-       const uploaded=[];
-       for(const uri of selected){
-         const response=await rideOnApi.uploadVehicleImage(uri);
-         const url=response?.url||response?.data?.url;
-         if(url)uploaded.push(url);
-       }
+       const results=await Promise.all(selected.map(uri=>rideOnApi.uploadVehicleImage(uri)));
+       const uploaded=results.map(response=>response?.url||response?.data?.url).filter(Boolean);
        if(!uploaded.length)throw new Error('The server did not return image URLs.');
        setImageUrls(old=>[...old,...uploaded].filter((uri,index,all)=>all.indexOf(uri)===index).slice(0,8));
        setBanner(`${uploaded.length} photo${uploaded.length===1?'':'s'} uploaded successfully.`);
