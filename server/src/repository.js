@@ -196,7 +196,7 @@ export function createRepository({ databaseUrl, fleet }) {
       limit ${safeLimit+1} offset ${safeOffset}
     `;
 
-    const queryParams=[...params,safeLimit+1,safeOffset];
+    const queryParams=params;
     let rows;
     try {
       ({ rows } = await pool.query(baseSql, queryParams));
@@ -602,7 +602,7 @@ export function createRepository({ databaseUrl, fleet }) {
     if (active !== undefined) { params.push(active); where.push(`active=$${params.length}`); }
     const { rows } = await pool.query(
       `select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,active,created_at,updated_at
-       from vehicles where ${where.join(' and ')} order by created_at desc limit ${safeLimit+1} offset ${safeOffset}`, [...params,safeLimit+1,safeOffset]);
+       from vehicles where ${where.join(' and ')} order by created_at desc limit ${safeLimit+1} offset ${safeOffset}`, params);
     const hasMore=rows.length>safeLimit;
     const result=rows.slice(0,safeLimit).map(mapManagedVehicle);
     Object.defineProperty(result,'hasMore',{value:hasMore,enumerable:false});
