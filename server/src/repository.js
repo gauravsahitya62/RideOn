@@ -315,6 +315,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createVendorVehicle(vendorId, input) {
+    input = { ...input, city: 'Udaipur' };
     if (!useDatabase) {
       if (!memory.vehicles) memory.vehicles = new Map();
       const id = crypto.randomUUID();
@@ -341,6 +342,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function updateVendorVehicle(vendorId, vehicleId, input) {
+    input = { ...input, ...(input.city ? { city: 'Udaipur' } : {}) };
     if (!useDatabase) {
       const vehicle = await getVendorVehicle(vendorId, vehicleId);
       if (!vehicle) return null;
