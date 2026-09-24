@@ -59,6 +59,7 @@ app.use(express.json({ limit: '12mb', verify: (req, _res, buf) => { req.rawBody 
 app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const supportRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
@@ -353,7 +354,7 @@ const supabaseRequireAuth = async (req, res, next) => {
       });
     }
 
-    if (!identity?.id || !['customer','vendor'].includes(identity.role)) {
+    if (!identity?.id || !['customer','vendor','support','admin'].includes(identity.role)) {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
 
@@ -398,6 +399,7 @@ const requireRole = (...roles) => (req, res, next) => {
 };
 
 const requireCustomer = requireRole('customer');
+const requireSupport = requireRole('support','admin');
 
 const requireVendor = async (req, res, next) => {
   if (!req.user || req.user.role !== 'vendor') {
@@ -835,6 +837,121 @@ const reviewResponse = (res, error) => {
   const [status,message]=map[error?.code]||[500,'We could not complete that review action right now. Please try again.'];
   return res.status(status).json({error:{code:error?.code||'REVIEW_FAILED',message}});
 };
+
+const supportResponse = (res, error) => {
+  const map = {
+    FORBIDDEN:[403,'FORBIDDEN','You do not have access to this support resource.'],
+    BOOKING_NOT_FOUND:[404,'BOOKING_NOT_FOUND','Booking not found.'],
+    VENDOR_NOT_FOUND:[404,'VENDOR_NOT_FOUND','Vendor profile not found.'],
+    SUPPORT_TICKET_NOT_FOUND:[404,'SUPPORT_TICKET_NOT_FOUND','Support ticket not found.'],
+    INVALID_SUPPORT_CATEGORY:[400,'INVALID_SUPPORT_CATEGORY','Choose a valid support category.'],
+    INVALID_SUPPORT_PRIORITY:[400,'INVALID_SUPPORT_PRIORITY','Choose a valid priority.'],
+    INVALID_SUPPORT_STATUS:[400,'INVALID_SUPPORT_STATUS','Choose a valid ticket status.'],
+    INVALID_SUPPORT_SUBJECT:[400,'INVALID_SUPPORT_SUBJECT','Please enter a clear support subject.'],
+    INVALID_SUPPORT_DESCRIPTION:[400,'INVALID_SUPPORT_DESCRIPTION','Please describe the issue in at least 10 characters.'],
+    INVALID_SUPPORT_MESSAGE:[400,'INVALID_SUPPORT_MESSAGE','Please enter a message of up to 5000 characters.'],
+    INVALID_SUPPORT_TRANSITION:[409,'INVALID_SUPPORT_TRANSITION','That ticket status change is not available.'],
+    SUPPORT_TICKET_CLOSED:[409,'SUPPORT_TICKET_CLOSED','Reopen the ticket before replying.'],
+    RESOLUTION_REQUIRED:[400,'RESOLUTION_REQUIRED','Add a resolution before marking the ticket resolved.'],
+    INVALID_ASSIGNEE:[400,'INVALID_ASSIGNEE','Tickets can only be assigned to support staff.'],
+    INVALID_IDEMPOTENCY_KEY:[400,'INVALID_IDEMPOTENCY_KEY','The support request key is invalid.'],
+  };
+  const [status,code,message]=map[error?.code]||[503,'SUPPORT_UNAVAILABLE','Support is temporarily unavailable. Please retry.'];
+  console.error(JSON.stringify({level:'error',event:'support_request_failed',requestId:res.req?.requestId,code:error?.code||'SUPPORT_UNAVAILABLE'}));
+  return res.status(status).json({error:{code,message}});
+};
+
+app.post('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer','vendor'), supportRateLimit, async (req,res)=>{
+  const parsed=z.object({
+    bookingId:z.string().uuid().nullable().optional(),
+    category:z.string().trim().max(40),
+    subject:z.string().trim().min(3).max(160),
+    description:z.string().trim().min(10).max(5000),
+    priority:z.enum(['low','normal','high','urgent']).default('normal'),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please check the support request details.',details:parsed.error.flatten()}});
+  try{
+    const result=await repository.createSupportTicket({...parsed.data,raisedByUserId:req.user.id,raisedByRole:req.user.role,idempotencyKey:req.get('Idempotency-Key')||null});
+    res.status(result.idempotentReplay?200:201).json({ticket:result.ticket,idempotentReplay:result.idempotentReplay});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer','vendor'), async (req,res)=>{
+  try{
+    const result=await repository.listMySupportTickets({userId:req.user.id,role:req.user.role,status:req.query.status,category:req.query.category,limit:req.query.limit,offset:req.query.offset});
+    res.json(result);
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets/:id', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), async (req,res)=>{
+  try{
+    const ticket=await repository.getSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role});
+    if(!ticket)return res.status(404).json({error:{code:'SUPPORT_TICKET_NOT_FOUND',message:'Support ticket not found.'}});
+    res.json({ticket});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets/:id/messages', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), async (req,res)=>{
+  try{
+    const messages=await repository.listSupportMessages({ticketId:req.params.id,userId:req.user.id,role:req.user.role});
+    if(!messages)return res.status(404).json({error:{code:'SUPPORT_TICKET_NOT_FOUND',message:'Support ticket not found.'}});
+    res.json({messages});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/messages', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
+  try{
+    const message=await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal});
+    res.status(201).json({message});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/close', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  try{res.json({ticket:await repository.closeSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/reopen', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  try{res.json({ticket:await repository.reopenSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/admin/tickets', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  try{
+    const result=await repository.listSupportTickets({userId:req.user.id,status:req.query.status,category:req.query.category,priority:req.query.priority,limit:req.query.limit,offset:req.query.offset});
+    res.json(result);
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.patch('/api/v1/support/admin/tickets/:id/assignment', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({assignedToUserId:z.string().uuid()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid support assignee.'}});
+  try{res.json({ticket:await repository.assignSupportTicket({ticketId:req.params.id,assignedToUserId:parsed.data.assignedToUserId,actorUserId:req.user.id})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.patch('/api/v1/support/admin/tickets/:id/status', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['open','in_progress','waiting_for_user','resolved','closed']),resolution:z.string().trim().max(5000).optional().nullable()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid status and optional resolution.'}});
+  try{res.json({ticket:await repository.updateSupportTicketStatus({ticketId:req.params.id,userId:req.user.id,role:req.user.role,status:parsed.data.status,resolution:parsed.data.resolution})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/admin/tickets/:id/messages', supabaseRequireAuth, requireSupport, supportRateLimit, async (req,res)=>{
+  const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
+  try{res.status(201).json({message:await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/admin/tickets/:id/resolve', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({resolution:z.string().trim().min(3).max(5000)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'A resolution is required.'}});
+  try{res.json({ticket:await repository.resolveSupportTicket({ticketId:req.params.id,userId:req.user.id,resolution:parsed.data.resolution})});}
+  catch(error){return supportResponse(res,error);}
+});
 
 app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCustomer, reviewRateLimit, async (req,res)=>{
   const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
