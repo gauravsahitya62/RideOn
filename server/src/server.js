@@ -153,6 +153,12 @@ function publicBooking(booking) {
     securityDepositStatus: booking.securityDepositStatus,
     securityDepositRefundable: booking.securityDepositRefundable || 0,
     securityDepositDeduction: booking.securityDepositDeduction || 0,
+    securityDepositReason: booking.securityDepositReason,
+    securityDepositEvidence: booking.securityDepositEvidence,
+    securityDepositRefundReference: booking.securityDepositRefundReference,
+    securityDepositInspectedAt: booking.securityDepositInspectedAt,
+    securityDepositInspectedBy: booking.securityDepositInspectedBy,
+    rejectionReason: booking.rejectionReason,
   };
 }
 
