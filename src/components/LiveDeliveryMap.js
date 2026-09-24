@@ -35,6 +35,7 @@ export default function LiveDeliveryMap({booking,onDelivered}){
   const socketRef=useRef(null);
   const markerRef=useRef(null);
   const [tick,setTick]=useState(0);
+  const coordinateRef=useRef(new AnimatedRegion(DEFAULT));
 
   const load=useCallback(async()=>{
     if(!booking?.id)return;
@@ -95,7 +96,7 @@ export default function LiveDeliveryMap({booking,onDelivered}){
   if(!tracking||tracking.booking?.deliveryStatus!=='in_delivery')return <View style={styles.state}><Text style={styles.delivered}>✓</Text><Text style={styles.title}>Vehicle delivered</Text><Text style={styles.muted}>Live tracking has stopped for this delivery.</Text></View>;
 
   const stale=Boolean(tracking.stale||tracking.connectionLost||!current||Date.now()-(new Date(current.updatedAt||tracking.session?.lastLocationAt||0).getTime())>Math.max(30,tracking.staleThresholdSeconds||90)*1000);
-  const coordinate=new AnimatedRegion(current||DEFAULT);
+  const coordinate=coordinateRef.current;
   const distance=tracking?.route?.distanceMeters??tracking?.session?.lastRouteDistanceMeters;
   const duration=tracking?.route?.durationSeconds??tracking?.session?.lastRouteDurationSeconds;
   const eta=duration!=null?Math.max(1,Math.round(Number(duration)/60)):null;
