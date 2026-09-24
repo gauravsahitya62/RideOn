@@ -7,46 +7,33 @@ const SUPABASE_PUBLISHABLE_KEY =
 
 export const authService = {
   async sendEmailOtp({ email, fullName }) {
+    if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+      throw new Error('Supabase authentication is not configured in this build.');
+    }
     try {
       return await rideOnApi.requestOtp({ email, fullName });
     } catch (apiError) {
-      if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) throw apiError;
-      const response = await fetch(SUPABASE_URL + '/auth/v1/otp', {
-        method:'POST',
-        headers:{apikey:SUPABASE_PUBLISHABLE_KEY,Authorization:'Bearer '+SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json'},
-        body:JSON.stringify({email,create_user:true,...(fullName?{data:{full_name:fullName}}:{})}),
-      });
-      const payload=await response.json().catch(()=>({}));
-      if(!response.ok){
-        const error=new Error(payload?.msg||payload?.message||payload?.error_description||'Supabase could not send the verification email.');
-        error.code=payload?.error||payload?.error_code; error.status=response.status; throw error;
-      }
-      return payload;
+      // The backend is the source of truth for RideOn authentication. Do not
+      // silently fall back to direct Supabase OTP here because doing so can
+      // hide a broken/old Render deployment and desynchronise auth state.
+      throw apiError;
     }
   },
 
   async verifyEmailOtp(email, token) {
-    try {
-      const result=await rideOnApi.verifyOtp({ email, token });
-      const accessToken=result?.accessToken||result?.data?.accessToken;
-      if(!accessToken) throw new Error('RideOn did not return a valid authentication session.');
-      await persistAccessToken(accessToken); setAccessToken(accessToken);
-      return {access_token:accessToken,refresh_token:result?.data?.refreshToken,expires_in:result?.data?.expiresIn};
-    } catch(apiError) {
-      if(!SUPABASE_URL||!SUPABASE_PUBLISHABLE_KEY) throw apiError;
-      const response=await fetch(SUPABASE_URL+'/auth/v1/verify',{
-        method:'POST',
-        headers:{apikey:SUPABASE_PUBLISHABLE_KEY,Authorization:'Bearer '+SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json'},
-        body:JSON.stringify({email,token,type:'email'}),
-      });
-      const payload=await response.json().catch(()=>({}));
-      if(!response.ok||!payload?.access_token){
-        const error=new Error(payload?.msg||payload?.message||payload?.error_description||'The verification code is invalid or expired.');
-        error.code=payload?.error||payload?.error_code; error.status=response.status; throw error;
-      }
-      await persistAccessToken(payload.access_token); setAccessToken(payload.access_token);
-      return {access_token:payload.access_token,refresh_token:payload.refresh_token,expires_in:payload.expires_in};
+    if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+      throw new Error('Supabase authentication is not configured in this build.');
     }
+    const result=await rideOnApi.verifyOtp({ email, token });
+    const accessToken=result?.accessToken||result?.data?.accessToken;
+    if(!accessToken) throw new Error('RideOn did not return a valid authentication session.');
+    await persistAccessToken(accessToken);
+    setAccessToken(accessToken);
+    return {
+      access_token:accessToken,
+      refresh_token:result?.refreshToken||result?.data?.refreshToken,
+      expires_in:result?.expiresIn||result?.data?.expiresIn,
+    };
   },
 
   async restoreSession() {
