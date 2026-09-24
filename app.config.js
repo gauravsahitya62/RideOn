@@ -22,6 +22,7 @@ module.exports = ({ config }) => {
     plugins: [
       ...(Array.isArray(appJson.expo?.plugins) ? appJson.expo.plugins : []),
       'expo-image-picker',
+      ['expo-notifications', { icon: './assets/notification-icon.png', color: '#E85D35', sounds: [] }],
       ['expo-location', { locationWhenInUsePermission: 'Allow RideOn to use your location to find vendors and estimate delivery distance.', locationAlwaysAndWhenInUsePermission: 'Allow RideOn to share your location only while an active vehicle delivery is in progress.', isAndroidBackgroundLocationEnabled: true, isAndroidForegroundServiceEnabled: true, isIosBackgroundLocationEnabled: true }],
       ['react-native-maps', {
         ...(androidMapsKey ? { androidGoogleMapsApiKey: androidMapsKey } : {}),
