@@ -440,7 +440,7 @@ const vehicleInput=z.object({
 
 app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, express.raw({ type: ['image/jpeg','image/png','image/webp'], limit: '10mb' }), async (req,res)=>{
   try{
-    const supabaseUrl=String(process.env.SUPABASE_URL||'').replace(/\\/$/,'');
+    const supabaseUrl=String(process.env.SUPABASE_URL||'').replace(/\/$/,'');
     const storageKey=process.env.SUPABASE_SERVICE_ROLE_KEY||process.env.SUPABASE_SECRET_KEY;
     const bucket=String(process.env.SUPABASE_VEHICLE_IMAGE_BUCKET||'vehicle-images').trim();
     if(!supabaseUrl||!storageKey) return res.status(503).json({error:{code:'STORAGE_NOT_CONFIGURED',message:'Vehicle image storage is not configured on the API.'}});
