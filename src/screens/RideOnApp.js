@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View, Modal, Switch, KeyboardAvoidingView, Platform, Image } from 'react-native';
+import { SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View, Modal, Switch, KeyboardAvoidingView, Platform, Image, ActivityIndicator } from 'react-native';
 import { rideOnApi, clearStoredAccessToken, persistAccessToken, restoreAccessToken, setAccessToken } from '../services/api';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL;
@@ -44,6 +44,45 @@ const isValidDateTimeInput = (dateValue, timeValue) => {
 };
 const uniqueSorted = values => [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
 const money = n => `₹${Number(n || 0).toLocaleString('en-IN')}`;
+const optimizeVehicleImageUrl = (url, width = 900) => {
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return url;
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^(.*\/storage\/v1\/)object\/public\/(.+)$/);
+    if (!match) return url;
+    const query = new URLSearchParams(parsed.search);
+    query.set('width', String(width));
+    query.set('quality', '72');
+    return `${parsed.origin}${match[1]}render/image/public/${match[2]}${query.toString() ? `?${query.toString()}` : ''}`;
+  } catch {
+    return url;
+  }
+};
+const FastVehicleImage = ({ uri, style, fallback }) => {
+  const [sourceUri, setSourceUri] = useState(() => optimizeVehicleImageUrl(uri));
+  const [loading, setLoading] = useState(Boolean(uri));
+  const [failed, setFailed] = useState(!uri);
+  useEffect(() => {
+    setSourceUri(optimizeVehicleImageUrl(uri));
+    setLoading(Boolean(uri));
+    setFailed(!uri);
+  }, [uri]);
+  if (!uri || failed) return fallback;
+  return <View style={{position:'relative',alignSelf:'stretch'}}>
+    <Image
+      source={{uri:sourceUri, cache:'force-cache'}}
+      style={style}
+      resizeMode="cover"
+      onLoadStart={()=>setLoading(true)}
+      onLoad={()=>setLoading(false)}
+      onError={()=>{
+        if(sourceUri !== uri){ setSourceUri(uri); setLoading(true); }
+        else { setLoading(false); setFailed(true); }
+      }}
+    />
+    {loading && <View style={{position:'absolute',left:0,right:0,top:0,bottom:0,alignItems:'center',justifyContent:'center'}}><ActivityIndicator size="small" color={C.orange}/></View>}
+  </View>;
+};
 const friendlyError = (error, fallback) => {
   const status = Number(error?.status || 0);
   const raw = String(error?.message || '').toLowerCase();
@@ -176,7 +215,7 @@ export default function RideOnApp({ authenticatedUser, onLogout }) {
  const retryPayment=()=>{setPaymentError('');setPaymentState(null);startPayment();};
  const closeFlow=()=>{setScreen('');setSelected(null);setBookingError('');setQuote(null);};
  const Header=({title,back=true})=><View style={s.innerHeader}>{back&&<TouchableOpacity onPress={()=>screen?closeFlow():setPage('Explore')}><Text style={s.back}>‹</Text></TouchableOpacity>}<Text style={s.innerTitle}>{title}</Text><View style={{width:24}}/></View>;
- const VehicleCard=({v})=><View style={s.vehicleCard}><TouchableOpacity onPress={()=>{setSelected(v);setScreen('vehicle')}} activeOpacity={.9} accessibilityRole="button" accessibilityLabel={`View ${v.name} details`}><View style={[s.vehicleArt,{backgroundColor:v.color}]}>{v.images?.length?<Image source={{uri:v.images[0]}} style={s.vehicleImage} resizeMode="cover" onError={()=>{}}/>:<Text style={s.vehicleEmoji}>{v.emoji}</Text>}<Text style={s.artWord}>{v.type.toUpperCase()} · RIDEON FLEET</Text></View><View style={s.vehicleRow}><View style={{flex:1,minWidth:0}}><Text style={s.vehicleName} numberOfLines={1}>{v.name}</Text><Text style={s.smallMuted} numberOfLines={2}>{v.detail||'Vehicle specifications supplied by the fleet API.'}</Text></View><View style={{alignItems:'flex-end',marginLeft:10}}><Text style={s.price}>{money(v.price)}</Text><Text style={s.smallMuted}>/ day</Text></View></View><View style={s.vehicleSpecsRow}>{[v.transmission,v.seats?`${v.seats} seats`:null,v.fuel].filter(Boolean).map(spec=><Text key={spec} style={s.vehicleSpec}>{spec}</Text>)}</View><View style={s.cardBottom}><TouchableOpacity accessibilityRole="button" onPress={()=>{setSelected(v);setScreen('vehicle')}}><Text style={s.link}>View details →</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" onPress={()=>openBooking(v)}><Text style={s.bookLink}>Book now →</Text></TouchableOpacity></View></TouchableOpacity></View>;
+ const VehicleCard=({v})=><View style={s.vehicleCard}><TouchableOpacity onPress={()=>{setSelected(v);setScreen('vehicle')}} activeOpacity={.9} accessibilityRole="button" accessibilityLabel={`View ${v.name} details`}><View style={[s.vehicleArt,{backgroundColor:v.color}]}>{v.images?.length?<FastVehicleImage uri={v.images[0]} style={s.vehicleImage} fallback={<Text style={s.vehicleEmoji}>{v.emoji}</Text>}/>:<Text style={s.vehicleEmoji}>{v.emoji}</Text>}<Text style={s.artWord}>{v.type.toUpperCase()} · RIDEON FLEET</Text></View><View style={s.vehicleRow}><View style={{flex:1,minWidth:0}}><Text style={s.vehicleName} numberOfLines={1}>{v.name}</Text><Text style={s.smallMuted} numberOfLines={2}>{v.detail||'Vehicle specifications supplied by the fleet API.'}</Text></View><View style={{alignItems:'flex-end',marginLeft:10}}><Text style={s.price}>{money(v.price)}</Text><Text style={s.smallMuted}>/ day</Text></View></View><View style={s.vehicleSpecsRow}>{[v.transmission,v.seats?`${v.seats} seats`:null,v.fuel].filter(Boolean).map(spec=><Text key={spec} style={s.vehicleSpec}>{spec}</Text>)}</View><View style={s.cardBottom}><TouchableOpacity accessibilityRole="button" onPress={()=>{setSelected(v);setScreen('vehicle')}}><Text style={s.link}>View details →</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" onPress={()=>openBooking(v)}><Text style={s.bookLink}>Book now →</Text></TouchableOpacity></View></TouchableOpacity></View>;
 
 const normalizeStatus=(value)=>{const v=String(value||'').toLowerCase();if(['cancelled','canceled'].includes(v))return 'Cancelled';if(v==='rejected')return 'Rejected';if(v==='completed')return 'Completed';if(v==='in_progress'||v==='in-progress')return 'In progress';if(v==='confirmed')return 'Confirmed';if(v==='requested')return 'Requested';return 'Other';};
  const normalizeTrip=(raw)=>{const x=raw?.booking||raw?.data||raw||{};const vehicle=x.vehicle||{};const pricing=x.pricing||{};const id=x.bookingId||x.id;return {id,vehicle:x.vehicleName||vehicle.name||'RideOn vehicle',vehicleId:x.vehicleId||vehicle.id||null,vehicleType:x.vehicleType||vehicle.type||null,status:x.status||'unknown',statusLabel:normalizeStatus(x.status),paymentStatus:x.paymentStatus||'unknown',pickupAt:x.startAt||x.startDate||null,returnAt:x.endAt||x.returnDate||null,address:x.address||x.deliveryAddress||'',delivery:x.deliveryRequired??x.delivery??true,pricing,total:Number(x.totalPrice??x.total??pricing.total??0),instructions:x.instructions||x.bookingInstructions||'',raw:x};};
