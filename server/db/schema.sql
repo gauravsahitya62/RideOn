@@ -8,7 +8,7 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 DO $$ BEGIN CREATE TYPE vehicle_type AS ENUM ('car','bike'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE TYPE booking_status AS ENUM ('requested','confirmed','in_progress','completed','cancelled','rejected'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE TYPE payment_status AS ENUM ('unpaid','pending','paid','refunded','failed'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $ BEGIN CREATE TYPE payment_status AS ENUM ('unpaid','pending','paid','held','settlement_pending','settled','refund_pending','refunded','failed','disputed'); EXCEPTION WHEN duplicate_object THEN NULL; END $;
 
 CREATE TABLE IF NOT EXISTS customers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS bookings (
   payment_status payment_status NOT NULL DEFAULT 'unpaid',
   payment_provider_reference TEXT,
   customer_notes TEXT,
+  cancellation_fee_paise BIGINT NOT NULL DEFAULT 0 CHECK (cancellation_fee_paise >= 0),
+  refund_amount_paise BIGINT NOT NULL DEFAULT 0 CHECK (refund_amount_paise >= 0),
+  cancelled_at TIMESTAMPTZ,
+  cancellation_reason TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (end_at > start_at),
@@ -66,6 +70,7 @@ CREATE TABLE IF NOT EXISTS bookings (
 
 CREATE INDEX IF NOT EXISTS bookings_vehicle_window_idx ON bookings(vehicle_id, start_at, end_at);
 CREATE INDEX IF NOT EXISTS bookings_customer_created_idx ON bookings(customer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS bookings_status_created_idx ON bookings(status, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS booking_status_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -116,6 +121,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS payments_provider_payment_idx
 
 CREATE INDEX IF NOT EXISTS payments_booking_created_idx
   ON payments(booking_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS security_deposits (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE RESTRICT,
+  customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  vendor_id UUID REFERENCES vendors(id) ON DELETE RESTRICT,
+  original_amount_paise BIGINT NOT NULL CHECK (original_amount_paise >= 0),
+  refundable_amount_paise BIGINT NOT NULL CHECK (refundable_amount_paise >= 0),
+  approved_deduction_paise BIGINT NOT NULL DEFAULT 0 CHECK (approved_deduction_paise >= 0),
+  status VARCHAR(40) NOT NULL DEFAULT 'pending',
+  provider VARCHAR(40),
+  provider_transaction_id VARCHAR(255),
+  refund_provider_reference VARCHAR(255),
+  deduction_reason TEXT,
+  evidence_reference TEXT,
+  dispute_status VARCHAR(40),
+  idempotency_key VARCHAR(128),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  refunded_at TIMESTAMPTZ,
+  CHECK (approved_deduction_paise <= original_amount_paise),
+  CHECK (refundable_amount_paise + approved_deduction_paise = original_amount_paise)
+);
+CREATE INDEX IF NOT EXISTS security_deposits_booking_status_idx ON security_deposits(booking_id,status,updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS payment_events (
   id BIGSERIAL PRIMARY KEY,
