@@ -1534,7 +1534,13 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
     const paymentEventMap={paid:{type:'payment_success',title:'Payment confirmed',body:'Your RideOn payment has been verified.'},failed:{type:'payment_failed',title:'Payment failed',body:'Your RideOn payment could not be confirmed.'},refund_pending:{type:'refund_initiated',title:'Refund initiated',body:'Your RideOn refund has been initiated.'},refunded:{type:'refund_completed',title:'Refund completed',body:'Your RideOn refund has been completed.'}};
     const eventInfo=paymentEventMap[event.status];
     if(eventInfo) void notifications.notifyBooking({bookingId:event.bookingId,...eventInfo,audience:'customer',dedupeKey:`payment:${event.eventId}:${event.status}:customer`});
-    if(event.status==='paid') void notifications.notifyBooking({bookingId:event.bookingId,type:'payment_received',title:'Payment received',body:'Payment for a RideOn booking has been confirmed.',audience:'vendor',dedupeKey:`payment:${event.eventId}:vendor`});
+    if(event.status==='paid'){
+      void notifications.notifyBooking({bookingId:event.bookingId,type:'payment_received',title:'Payment received',body:'Payment for a RideOn booking has been confirmed.',audience:'vendor',dedupeKey:`payment:${event.eventId}:vendor`});
+      void notifications.notifyBooking({bookingId:event.bookingId,type:'security_deposit_held',title:'Security deposit held',body:'Your refundable security deposit has been held with the booking payment.',audience:'customer',dedupeKey:`security_deposit_held:${event.eventId}`});
+    }
+    if(event.status==='refunded'){
+      void notifications.notifyBooking({bookingId:event.bookingId,type:'security_deposit_released',title:'Security deposit released',body:'Your refundable security deposit has been released with the completed refund.',audience:'customer',dedupeKey:`security_deposit_released:${event.eventId}`});
+    }
     if(event.status==='failed') void notifications.notifySupport({type:'payment_issue',title:'Payment issue',body:'A RideOn payment failed provider verification and may require support attention.',bookingId:event.bookingId,dedupeKey:`payment_issue:${event.eventId}`});
   }
   res.json({received:true,applied:result.applied,duplicate:result.duplicate});
