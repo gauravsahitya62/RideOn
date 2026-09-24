@@ -93,7 +93,6 @@ async function request(path, options = {}) {
   } catch {
     payload = {};
   }
-  console.log('[RideOnNetwork][RESPONSE]', JSON.stringify({ requestId, method, url, status: response.status, ok: response.ok, elapsedMs: Date.now() - startedAt, errorCode: payload?.error?.code || null }));
   if (!response.ok) {
     const message = payload?.error?.message || payload?.message || payload?.error?.code || `Request failed (${response.status})`;
     const error = new Error(`${String(message)} [${response.status} ${path}]`);
@@ -101,10 +100,8 @@ async function request(path, options = {}) {
     error.status = response.status;
     error.path = path;
     error.details = payload?.error?.details;
-    console.error('[RideOnNetwork][HTTP_ERROR]', JSON.stringify({ requestId, method, url, status: response.status, path, errorCode: error.code, message: error.message, response: payload?.error || payload?.message || null }));
     throw error;
   }
-  console.log('[RideOnNetwork][SUCCESS]', JSON.stringify({ requestId, method, path, status: response.status }));
   return payload;
 }
 
@@ -192,7 +189,6 @@ export const rideOnApi = {
       const message = payload?.error?.message || 'Vehicle image upload failed.';
       const error = new Error(`${message} [${response.status} /api/v1/vendor/vehicle-images]`);
       error.code = payload?.error?.code || null; error.status = response.status; error.path = '/api/v1/vendor/vehicle-images';
-      console.error('[RideOnNetwork][UPLOAD_ERROR]', JSON.stringify({requestId,status:response.status,errorCode:error.code,message}));
       throw error;
     }
     return payload;
