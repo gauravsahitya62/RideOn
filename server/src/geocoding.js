@@ -12,7 +12,7 @@ export async function geocodeAddress(address,city){
   if(rawAddress.length<4){const e=new Error('Address is too short.');e.code='GEOCODE_INVALID_QUERY';throw e;}
   const k=normalize(rawAddress+'|'+rawCity);
   const cached=read(k); if(cached)return {...cached,cached:true};
-  const apiKey=String(process.env.GOOGLE_GEOCODING_API_KEY||process.env.GOOGLE_MAPS_SERVER_API_KEY||'').trim();
+  const apiKey=String(process.env.GOOGLE_GEOCODING_API_KEY||process.env.GOOGLE_MAPS_SERVER_API_KEY||process.env.GOOGLE_MAPS_API_KEY||'').trim();
   if(!apiKey){const e=new Error('Address search is not configured.');e.code='GEOCODE_PROVIDER_NOT_CONFIGURED';throw e;}
   const q=rawCity ? `${rawAddress}, ${rawCity}, India` : `${rawAddress}, India`;
   const url='https://maps.googleapis.com/maps/api/geocode/json?'+new URLSearchParams({address:q,key:apiKey,language:'en',region:'in'}).toString();
