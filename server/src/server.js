@@ -284,9 +284,20 @@ const supabaseRequireAuth = async (req, res, next) => {
       }
     }
 
-    // Do not manufacture a customer identity during ordinary authenticated
-    // API requests. Registration completion is the only path that creates a
-    // new RideOn identity after successful Supabase verification.
+    // Repair legacy Supabase accounts that existed before RideOn identity
+    // linking was completed. A token-authenticated user with no RideOn row is
+    // provisioned as a customer; vendor accounts must already have a vendor
+    // profile created by the explicit vendor registration flow.
+    if (!identity?.id) {
+      identity = await repository.createOrLinkCustomerFromSupabase({
+        supabaseUserId:user.id,
+        email:user.email,
+        fullName:metadata.full_name || metadata.name || user.email.split('@')[0],
+        phone:metadata.phone || undefined,
+        role:'customer',
+      });
+    }
+
     if (!identity?.id || !['customer','vendor'].includes(identity.role)) {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
