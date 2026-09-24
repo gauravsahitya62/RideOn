@@ -183,3 +183,33 @@ ON CONFLICT (id) DO UPDATE SET
   transmission = EXCLUDED.transmission,
   fuel = EXCLUDED.fuel,
   seats = EXCLUDED.seats;
+
+
+-- Live delivery tracking (forward migration 018/019).
+ALTER TABLE bookings
+  ADD COLUMN IF NOT EXISTS delivery_status VARCHAR(24) NOT NULL DEFAULT 'scheduled',
+  ADD COLUMN IF NOT EXISTS delivery_started_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS delivery_final_latitude NUMERIC(9,6),
+  ADD COLUMN IF NOT EXISTS delivery_final_longitude NUMERIC(9,6);
+
+CREATE TABLE IF NOT EXISTS tracking_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE RESTRICT,
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ended_at TIMESTAMPTZ,
+  last_latitude NUMERIC(9,6),
+  last_longitude NUMERIC(9,6),
+  last_accuracy_meters NUMERIC(8,2),
+  last_location_at TIMESTAMPTZ,
+  last_route_distance_meters INTEGER,
+  last_route_duration_seconds INTEGER,
+  last_route_polyline TEXT,
+  last_route_at TIMESTAMPTZ,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS tracking_sessions_one_active_booking_idx
+  ON tracking_sessions(booking_id) WHERE status='active';
