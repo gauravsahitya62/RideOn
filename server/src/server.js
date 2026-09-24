@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { createRepository } from './repository.js';
 import { createAuth } from './auth.js';
 import { createPaymentService } from './payments.js';
+import { getDrivingRoute } from './routing.js';
 
 const fleet = [];
 
@@ -66,6 +67,7 @@ const bookingSchema = z.object({
   notes: z.string().max(500).optional(),
   deliveryLatitude: z.union([z.number(), z.string()]).nullable().optional(),
   deliveryLongitude: z.union([z.number(), z.string()]).nullable().optional(),
+  deliveryAddressSource: z.enum(['manual','geocoded','saved']).optional(),
 }).refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt', path: ['endAt'] });
 
 function normalizeBookingInput(body = {}) {
@@ -404,6 +406,51 @@ app.get('/health', async (_req, res) => {
     buildCommit,
     timestamp: new Date().toISOString(),
   });
+});
+
+app.get('/api/v1/routing/eta', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const parsed=z.object({
+    vendorId:z.string().uuid(),
+    latitude:z.coerce.number().min(-90).max(90),
+    longitude:z.coerce.number().min(-180).max(180),
+  }).safeParse(req.query);
+  if(!parsed.success) return res.status(400).json({error:{code:'ROUTE_INVALID_COORDINATES',message:'Please provide a valid delivery location.'}});
+  try{
+    const vendors=await repository.listMarketplaceVendors({});
+    const vendor=vendors.find(item=>String(item.vendorId)===String(parsed.data.vendorId));
+    if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor service location is not available.'}});
+    const route=await getDrivingRoute(
+      {latitude:vendor.latitude,longitude:vendor.longitude},
+      {latitude:parsed.data.latitude,longitude:parsed.data.longitude}
+    );
+    res.json({
+      route:{
+        distanceMeters:route.distanceMeters,
+        durationSeconds:route.durationSeconds,
+        estimatedDeliveryMinutes:Math.max(1,Math.round(route.durationSeconds/60)),
+        provider:route.provider,
+        cached:Boolean(route.cached),
+      }
+    });
+  }catch(error){
+    const statusByCode={
+      ROUTE_INVALID_COORDINATES:400,
+      ROUTE_PROVIDER_NOT_CONFIGURED:503,
+      ROUTE_PROVIDER_UNAVAILABLE:503,
+      ROUTE_PROVIDER_TIMEOUT:504,
+      ROUTE_NOT_FOUND:422,
+    };
+    const status=statusByCode[error?.code]||503;
+    const messages={
+      ROUTE_PROVIDER_NOT_CONFIGURED:'Delivery routing is not configured yet.',
+      ROUTE_PROVIDER_UNAVAILABLE:'Delivery routing is temporarily unavailable. Please retry.',
+      ROUTE_PROVIDER_TIMEOUT:'Delivery routing took too long. Please retry.',
+      ROUTE_NOT_FOUND:'No driving route was found for those locations.',
+      ROUTE_INVALID_COORDINATES:'Please provide a valid delivery location.',
+    };
+    console.error(JSON.stringify({level:'error',event:'routing_eta_failed',requestId:req.requestId,code:error?.code||'ROUTE_FAILED'}));
+    res.status(status).json({error:{code:error?.code||'ROUTE_FAILED',message:messages[error?.code]||'We could not estimate delivery time right now. Please retry.'}});
+  }
 });
 
 app.get('/api/v1/vendors/map', async (req, res) => {
