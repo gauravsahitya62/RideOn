@@ -47,6 +47,9 @@ export function createRepository({ databaseUrl, fleet }) {
       refundAmount:Number(row.refund_amount_paise || 0) / 100,
       cancelledAt:iso(row.cancelled_at),
       cancellationReason:row.cancellation_reason || undefined,
+      securityDepositStatus:row.security_deposit_status || undefined,
+      securityDepositRefundable:Number(row.security_deposit_refundable_paise || 0) / 100,
+      securityDepositDeduction:Number(row.security_deposit_deduction_paise || 0) / 100,
       createdAt:iso(row.created_at ?? row.createdAt),
       updatedAt:iso(row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt)
     };
@@ -471,8 +474,8 @@ export function createRepository({ databaseUrl, fleet }) {
         .slice(offset, offset+limit);
     }
     const { rows } = await pool.query(
-      `select b.*, v.name as v_name, v.type as v_type
-       from bookings b join vehicles v on v.id=b.vehicle_id
+      `select b.*, v.name as v_name, v.type as v_type, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise
+       from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id
        where v.owner_id=$1
        order by b.created_at desc limit $2 offset $3`,
       [vendorId,limit,offset]
@@ -486,8 +489,8 @@ export function createRepository({ databaseUrl, fleet }) {
       return b && String(b.vendorId||'') === String(vendorId) ? b : null;
     }
     const { rows } = await pool.query(
-      `select b.*, v.name as v_name, v.type as v_type
-       from bookings b join vehicles v on v.id=b.vehicle_id
+      `select b.*, v.name as v_name, v.type as v_type, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise
+       from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id
        where b.id=$1 and v.owner_id=$2`,
       [bookingId,vendorId]
     );
@@ -690,14 +693,14 @@ export function createRepository({ databaseUrl, fleet }) {
       return booking && (!customerId || booking.customerId===customerId) ? booking : null;
     }
     const {rows}=await pool.query(
-      'select b.*, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join payments p on p.booking_id=b.id and p.status in (\'unpaid\',\'pending\') left join vehicles v on v.id=b.vehicle_id where b.id=$1 and ($2::uuid is null or b.customer_id=$2)',
+      'select b.*, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join payments p on p.booking_id=b.id and p.status in (\'unpaid\',\'pending\') left join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.id=$1 and ($2::uuid is null or b.customer_id=$2)',
       [id, customerId]
     );
     if(!rows[0]) return null;
     const r=rows[0];
-    return mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
+    return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
-  async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join payments p on p.booking_id=b.id and p.status in (\'unpaid\',\'pending\') left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
+  async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join payments p on p.booking_id=b.id and p.status in (\'unpaid\',\'pending\') left join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
   const canTransition = (current, next) => {
     if (current === next) return true;
     if (current === 'unpaid') return next === 'pending' || next === 'failed';
