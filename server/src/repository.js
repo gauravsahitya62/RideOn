@@ -156,7 +156,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if (ids.length) {
         const optional = await pool.query(
           `select id, description, image_urls, delivery_available, owner_id
-           from vehicles where id::text = any(${1}::text[])`,
+           from vehicles where id::text = any($1::text[])`,
           [ids]
         );
         optionalById = new Map(optional.rows.map(row => [String(row.id), row]));
