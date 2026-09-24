@@ -50,6 +50,10 @@ export function createRepository({ databaseUrl, fleet }) {
       securityDepositStatus:row.security_deposit_status || undefined,
       securityDepositRefundable:Number(row.security_deposit_refundable_paise || 0) / 100,
       securityDepositDeduction:Number(row.security_deposit_deduction_paise || 0) / 100,
+      securityDepositReason:row.security_deposit_reason || undefined,
+      securityDepositEvidence:row.security_deposit_evidence || undefined,
+      securityDepositRefundReference:row.security_deposit_refund_reference || undefined,
+      rejectionReason:row.cancellation_reason && row.status==='rejected' ? row.cancellation_reason : undefined,
       createdAt:iso(row.created_at ?? row.createdAt),
       updatedAt:iso(row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt)
     };
@@ -474,7 +478,7 @@ export function createRepository({ databaseUrl, fleet }) {
         .slice(offset, offset+limit);
     }
     const { rows } = await pool.query(
-      `select b.*, v.name as v_name, v.type as v_type, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise
+      `select b.*, v.name as v_name, v.type as v_type, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference
        from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id
        where v.owner_id=$1
        order by b.created_at desc limit $2 offset $3`,
@@ -502,12 +506,13 @@ export function createRepository({ databaseUrl, fleet }) {
     const allowed = {
       requested: ['confirmed','rejected'],
       confirmed: ['in_progress','cancelled'],
-      in_progress: ['completed','cancelled'],
+      in_progress: ['completed'],
       rejected: [],
       completed: [],
       cancelled: [],
     };
     if (!allowed[nextStatus]) { const e=new Error('invalid status'); e.code='INVALID_BOOKING_STATUS'; throw e; }
+    if (nextStatus==='rejected' && !String(note||'').trim()) { const e=new Error('A rejection reason is required.'); e.code='REJECTION_REASON_REQUIRED'; throw e; }
     if (!useDatabase) {
       const b=await getVendorBooking(vendorId,bookingId);
       if(!b){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
@@ -516,9 +521,9 @@ export function createRepository({ databaseUrl, fleet }) {
         const e=new Error('Payment must be confirmed before the vendor can accept this booking.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;
       }
       b.status=nextStatus;
-      if(nextStatus==='rejected' && b.paymentStatus==='paid') b.paymentStatus='refund_pending';
+      if(nextStatus==='rejected'){b.cancellationReason=String(note).trim(); if(['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))) b.paymentStatus='refund_pending';}
       if(nextStatus==='completed' && Number(b.pricing?.securityDeposit||0)>0){
-        memory.securityDeposits.set(String(b.id),{bookingId:String(b.id),customerId:b.customerId,vendorId,originalAmount:Number(b.pricing.securityDeposit),refundableAmount:Number(b.pricing.securityDeposit),approvedDeduction:0,status:'release_pending'});
+        memory.securityDeposits.set(String(b.id),{bookingId:String(b.id),customerId:b.customerId,vendorId,originalAmount:Number(b.pricing.securityDeposit),refundableAmount:Number(b.pricing.securityDeposit),approvedDeduction:0,status:'review_required'});
       }
       b.updatedAt=new Date().toISOString();
       return b;
@@ -530,22 +535,69 @@ export function createRepository({ databaseUrl, fleet }) {
       if(!rows[0]){await client.query('rollback');const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       const current=rows[0].status;
       if(!allowed[current]?.includes(nextStatus)){await client.query('rollback');const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
+      if(nextStatus==='rejected' && !String(note||'').trim()){await client.query('rollback');const e=new Error('rejection reason required');e.code='REJECTION_REASON_REQUIRED';throw e;}
       if(nextStatus==='confirmed' && !['paid','held','settlement_pending','settled'].includes(String(rows[0].payment_status))){
         await client.query('rollback');const e=new Error('Payment must be confirmed before the vendor can accept this booking.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;
       }
-      const nextPaymentStatus=nextStatus==='rejected'&&rows[0].payment_status==='paid'?'refund_pending':rows[0].payment_status;
-      const {rows:updated}=await client.query('update bookings set status=$2,payment_status=$3,updated_at=now() where id=$1 returning *',[bookingId,nextStatus,nextPaymentStatus]);
-      if(nextPaymentStatus==='refund_pending') { await client.query('update payments set status=\'refund_pending\',updated_at=now() where booking_id=$1 and status=\'paid\'',[bookingId]); await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[bookingId]); }
+      const shouldRefund=['paid','held','settlement_pending','settled'].includes(String(rows[0].payment_status));
+      const nextPaymentStatus=nextStatus==='rejected'&&shouldRefund?'refund_pending':rows[0].payment_status;
+      const cancellationReason=nextStatus==='rejected'?String(note).trim():rows[0].cancellation_reason||null;
+      const {rows:updated}=await client.query('update bookings set status=$2,payment_status=$3,cancellation_reason=$4,cancelled_at=case when $2='rejected' then now() else cancelled_at end,updated_at=now() where id=$1 returning *',[bookingId,nextStatus,nextPaymentStatus,cancellationReason]);
+      if(nextPaymentStatus==='refund_pending') {
+        await client.query("update payments set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('paid','held','settlement_pending','settled')",[bookingId]);
+        await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','review_required','refund_pending')",[bookingId]);
+      }
       if(nextStatus==='completed' && Number(rows[0].security_deposit_paise||0)>0){
         await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status)
-          values($1,$2,$3,$4,$4,'release_pending')
-          on conflict (booking_id) do update set status='release_pending',updated_at=now()`,[bookingId,rows[0].customer_id,vendorId,Number(rows[0].security_deposit_paise)]);
+          values($1,$2,$3,$4,$4,'review_required')
+          on conflict (booking_id) do update set status='review_required',updated_at=now()`,[bookingId,rows[0].customer_id,vendorId,Number(rows[0].security_deposit_paise)]);
       }
       await client.query('insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$3,\'vendor\',$4,$5)',[bookingId,current,nextStatus,vendorId,note||null]);
       await client.query('commit');
       return mapBooking({...updated[0],vehicle:{id:String(updated[0].vehicle_id),name:rows[0].v_name,type:String(rows[0].v_type)}});
     } catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
+
+  async function recordSecurityDepositInspection(vendorId, bookingId, {deductionPaise=0, reason='', evidenceReference='', refundProviderReference=''} = {}) {
+    const deduction = Math.max(0, Math.round(Number(deductionPaise)||0));
+    if (!useDatabase) {
+      const b=await getVendorBooking(vendorId,bookingId);
+      if(!b){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(String(b.status)!=='completed'){const e=new Error('Vehicle must be returned before deposit inspection.');e.code='DEPOSIT_INSPECTION_NOT_ALLOWED';throw e;}
+      const deposit=memory.securityDeposits.get(String(bookingId));
+      const original=Math.round(Number(deposit?.originalAmount ?? b.pricing?.securityDeposit ?? 0)*100);
+      if(deduction>original){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}
+      if(deduction>0&&!String(reason).trim()){const e=new Error('A deduction reason is required.');e.code='DEPOSIT_DEDUCTION_REASON_REQUIRED';throw e;}
+      if(deduction>0&&!String(evidenceReference).trim()){const e=new Error('Evidence/reference is required for a deduction.');e.code='DEPOSIT_EVIDENCE_REQUIRED';throw e;}
+      const refundablePaise=original-deduction;
+      if(deposit){deposit.approvedDeduction=deduction/100;deposit.refundableAmount=refundablePaise/100;deposit.deductionReason=String(reason||'').trim()||undefined;deposit.evidenceReference=String(evidenceReference||'').trim()||undefined;deposit.status=deduction>0?'deducted':'refund_pending';deposit.refundProviderReference=String(refundProviderReference||'').trim()||undefined;}
+      return {booking:b,deposit:{status:deduction>0?'deducted':'refund_pending',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundablePaise}};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query('select b.*,sd.status as sd_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
+      if(!q.rows[0]){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
+      const b=q.rows[0];
+      if(String(b.status)!=='completed'){const e=new Error('Vehicle must be returned before deposit inspection.');e.code='DEPOSIT_INSPECTION_NOT_ALLOWED';throw e;}
+      const original=Number(b.original_amount_paise||b.security_deposit_paise||0);
+      if(deduction>original){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}
+      if(deduction>0&&!String(reason).trim()){const e=new Error('A deduction reason is required.');e.code='DEPOSIT_DEDUCTION_REASON_REQUIRED';throw e;}
+      if(deduction>0&&!String(evidenceReference).trim()){const e=new Error('Evidence/reference is required for a deduction.');e.code='DEPOSIT_EVIDENCE_REQUIRED';throw e;}
+      const refundable=original-deduction;
+      if(b.original_amount_paise==null){
+        await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,approved_deduction_paise,status,deduction_reason,evidence_reference,provider)
+          values($1,$2,$3,$4,$5,$6,$7,$8,$9,null)
+          on conflict (booking_id) do update set refundable_amount_paise=$5,approved_deduction_paise=$6,status=$7,deduction_reason=$8,evidence_reference=$9,updated_at=now()`,[bookingId,b.customer_id,vendorId,original,refundable,deduction,deduction>0?'deducted':'refund_pending',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null]);
+      }else{
+        await client.query("update security_deposits set refundable_amount_paise=$2,approved_deduction_paise=$3,status=$4,deduction_reason=$5,evidence_reference=$6,updated_at=now() where booking_id=$1",[bookingId,refundable,deduction,deduction>0?'deducted':'refund_pending',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null]);
+      }
+      await client.query('insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,\'vendor\',$3,$4)',[bookingId,b.status,vendorId,deduction>0?'security_deposit_deduction':'security_deposit_release']);
+      await client.query('commit');
+      return {booking:mapBooking({...b,security_deposit_refundable_paise:refundable,security_deposit_deduction_paise:deduction,security_deposit_status:deduction>0?'deducted':'refund_pending',security_deposit_reason:String(reason||'').trim()||undefined,security_deposit_evidence:String(evidenceReference||'').trim()||undefined}),deposit:{status:deduction>0?'deducted':'refund_pending',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable}};
+    }catch(error){try{await client.query('rollback')}catch{}finally{client.release();}throw error;}
+  }
+
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
     if (!['customer','vendor'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
@@ -700,7 +752,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const r=rows[0];
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
-  async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
+  async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
   const canTransition = (current, next) => {
     if (current === next) return true;
     const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
