@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 const COLORS = { ink: '#17202D', muted: '#78818E', orange: '#E85D35', bg: '#F6F7F9', line: '#E8EAF0', white: '#FFFFFF' };
