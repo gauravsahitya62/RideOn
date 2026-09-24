@@ -1389,7 +1389,8 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
     const result=await repository.cancelBooking(req.params.id,req.user.id,{reason:parsed.data.reason||'customer_cancelled'});
     const refund=result.calculation.totalRefund>0 ? await requestRefundForBooking(req.params.id) : {status:'not_applicable'};
     const latest=await repository.getBooking(req.params.id,req.user.id);
-    void notifications.notifyBooking({bookingId:req.params.id,type:'booking_cancelled',title:'Booking cancelled',body:'Your RideOn booking has been cancelled.',audience:'vendor',dedupeKey:`booking_cancelled:${req.params.id}:vendor`});
+    void notifications.notifyBooking({bookingId:req.params.id,type:'booking_cancelled',title:'Booking cancelled',body:'Your RideOn booking has been cancelled.',audience:'customer',dedupeKey:`booking_cancelled:${req.params.id}:customer`});
+    void notifications.notifyBooking({bookingId:req.params.id,type:'booking_cancelled',title:'Booking cancelled',body:'A customer cancelled a RideOn booking.',audience:'vendor',dedupeKey:`booking_cancelled:${req.params.id}:vendor`});
     if(result.calculation.totalRefund>0) void notifications.notifyBooking({bookingId:req.params.id,type:'refund_initiated',title:'Refund initiated',body:'Your RideOn refund has been initiated.',audience:'customer',dedupeKey:`refund_initiated:${req.params.id}`});
     res.json({data:publicBooking(latest||result.booking),booking:publicBooking(latest||result.booking),cancellation:result.calculation,refund});
   } catch(error) {
