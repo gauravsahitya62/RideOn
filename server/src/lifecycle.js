@@ -3,7 +3,7 @@ export const BOOKING_STATUSES = Object.freeze(['requested','confirmed','in_progr
 export const BOOKING_TRANSITIONS = Object.freeze({
   requested: ['confirmed','rejected','cancelled'],
   confirmed: ['in_progress','cancelled'],
-  in_progress: ['completed','cancelled'],
+  in_progress: ['completed'],
   rejected: [],
   completed: [],
   cancelled: [],
