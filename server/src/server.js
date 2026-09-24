@@ -173,6 +173,11 @@ function publicBooking(booking) {
     routeDistanceMeters: booking.routeDistanceMeters,
     routeDurationSeconds: booking.routeDurationSeconds,
     routeProvider: booking.routeProvider,
+    deliveryStatus: booking.deliveryStatus || 'scheduled',
+    deliveryStartedAt: booking.deliveryStartedAt,
+    deliveredAt: booking.deliveredAt,
+    deliveryFinalLatitude: booking.deliveryFinalLatitude,
+    deliveryFinalLongitude: booking.deliveryFinalLongitude,
   };
 }
 
