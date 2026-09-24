@@ -1467,6 +1467,8 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, as
     if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
     const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
     const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
+    void notifications.notifyBooking({bookingId:payment.bookingId,type:'payment_success',title:'Payment confirmed',body:'Your RideOn payment has been verified.',audience:'customer',dedupeKey:`payment_verified:${payment.id}:${providerReference}`});
+    void notifications.notifyBooking({bookingId:payment.bookingId,type:'payment_received',title:'Payment received',body:'Payment for a RideOn booking has been confirmed.',audience:'vendor',dedupeKey:`payment_verified_vendor:${payment.id}:${providerReference}`});
     return res.json({payment:latestPayment,verification:'verified',bookingPaymentStatus:latestBooking?.paymentStatus||'pending'});
   }catch(error){
     if(error.code==='PAYTM_ONBOARDING_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI payment verification is not enabled for the configured provider yet. No payment has been marked successful.'}});
