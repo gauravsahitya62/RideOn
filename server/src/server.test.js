@@ -732,7 +732,7 @@ test('marketplace vendor map groups active vehicles by service location', async 
 });
 
 test('route preview returns a friendly configuration error when routing is not configured', async () => {
-  const customer=await register('+911234567942','Route User');
+  await register('+911234567942','Route User');
   const login=await legacyLogin('+911234567942');
   const vendorCustomer=await register('+911234567943','Route Vendor');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
