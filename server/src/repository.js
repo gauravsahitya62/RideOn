@@ -1455,7 +1455,7 @@ export function createRepository({ databaseUrl, fleet }) {
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = memory.customers.get(id);
-    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash, role:c.role || 'customer', supabaseUserId:c.supabaseUserId } : null;
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash, role:c.role || 'customer', accountStatus:c.accountStatus || 'active', supabaseUserId:c.supabaseUserId } : null;
   }
 
   async function createOtp({ customerId = null, channel, destination, codeHash, expiresAt }) {
