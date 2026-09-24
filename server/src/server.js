@@ -800,6 +800,8 @@ const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeader
 app.post('/api/v1/vendor/bookings/:id/delivery/start', supabaseRequireAuth, requireVendor, async (req,res)=>{
   try{
     const session=await repository.startDelivery(req.vendor.id,req.params.id);
+    void notifications.notifyBooking({bookingId:req.params.id,type:'delivery_started',title:'Delivery started',body:'Your vehicle delivery has started. Live tracking is now active.',audience:'customer',dedupeKey:`delivery_started:${req.params.id}`});
+    void notifications.notifyBooking({bookingId:req.params.id,type:'vehicle_in_delivery',title:'Vehicle is on the way',body:'Your RideOn vehicle is now in delivery.',audience:'customer',dedupeKey:`vehicle_in_delivery:${req.params.id}`});
     res.json({tracking:{session,status:'in_delivery',active:true}});
   }catch(error){
     const map={BOOKING_NOT_FOUND:404,DELIVERY_START_NOT_ALLOWED:409,DELIVERY_LOCATION_REQUIRED:409,PAYMENT_REQUIRED_FOR_DELIVERY:409,DELIVERY_ALREADY_ACTIVE:409};
@@ -846,6 +848,7 @@ app.post('/api/v1/vendor/bookings/:id/delivery/complete', supabaseRequireAuth, r
   try{
     const result=await repository.completeDelivery(req.vendor.id,req.params.id,parsed.data);
     trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    void notifications.notifyBooking({bookingId:req.params.id,type:'vehicle_delivered',title:'Vehicle delivered',body:'Your RideOn vehicle has been delivered.',audience:'customer',dedupeKey:`vehicle_delivered:${req.params.id}`});
     res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
   }catch(error){
     const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,DELIVERY_COMPLETION_NOT_ALLOWED:409,INVALID_DELIVERY_LOCATION:400};
@@ -895,7 +898,14 @@ app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVend
     const booking=await repository.updateVendorBookingStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
     const refund=(parsed.data.status==='rejected'&&['paid','refund_pending'].includes(String(booking.paymentStatus))) ? await requestRefundForBooking(booking.id) : {status:'not_applicable'};
     const latest=await repository.getVendorBooking(req.vendor.id,req.params.id);
-    res.json({data:publicBooking(latest||booking),booking:publicBooking(latest||booking),refund});
+    const finalBooking=latest||booking;
+    const notificationMap={confirmed:{type:'booking_confirmed',title:'Booking confirmed',body:'Your RideOn booking has been confirmed.'},rejected:{type:'booking_rejected',title:'Booking declined',body:'The vendor declined your RideOn booking.'},cancelled:{type:'booking_cancelled',title:'Booking cancelled',body:'Your RideOn booking has been cancelled.'},in_progress:{type:'booking_confirmed',title:'Rental started',body:'Your RideOn rental is now active.'},completed:{type:'booking_completed',title:'Booking completed',body:'Your RideOn booking is complete. You can now review your experience.'}};
+    const event=notificationMap[parsed.data.status];
+    if(event) void notifications.notifyBooking({bookingId:finalBooking.id,...event,audience:'customer',dedupeKey:`booking_status:${finalBooking.id}:${parsed.data.status}`});
+    if(parsed.data.status==='confirmed' && finalBooking.delivery) void notifications.notifyBooking({bookingId:finalBooking.id,type:'delivery_required',title:'Delivery required',body:'This confirmed booking includes vehicle delivery.',audience:'vendor',dedupeKey:`delivery_required:${finalBooking.id}`});
+    if(parsed.data.status==='completed') void notifications.notifyBooking({bookingId:finalBooking.id,type:'review_reminder',title:'Share your RideOn experience',body:'Your booking is complete. Leave a review when you are ready.',audience:'customer',dedupeKey:`review_reminder:${finalBooking.id}`});
+    if(parsed.data.status==='completed') void notifications.notifyBooking({bookingId:finalBooking.id,type:'vehicle_returned',title:'Vehicle returned',body:'The vehicle has been marked returned and the booking is complete.',audience:'vendor',dedupeKey:`vehicle_returned:${finalBooking.id}`});
+    res.json({data:publicBooking(finalBooking),booking:publicBooking(finalBooking),refund});
   }catch(error){
     if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
     if(error.code==='INVALID_BOOKING_TRANSITION') return res.status(409).json({error:{code:error.code,message:'Booking cannot move to that status.'}});
@@ -989,6 +999,9 @@ app.post('/api/v1/support/tickets/:id/messages', supabaseRequireAuth, requireRol
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
   try{
     const message=await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal});
+    const supportContext=await repository.getSupportTicketNotificationContext(req.params.id);
+    if(['support','admin'].includes(req.user.role) && !parsed.data.isInternal && supportContext?.ownerUserId) void notifications.notify({recipientUserId:supportContext.ownerUserId,type:'support_reply',title:'Support replied',body:'RideOn support has replied to your ticket.',ticketId:req.params.id,bookingId:supportContext.bookingId,dedupeKey:`support_reply:${message.id}`});
+    if(['customer','vendor'].includes(req.user.role)) void notifications.notifySupport({type:'new_support_ticket',title:'Customer support reply',body:'A customer or vendor replied to a support ticket.',ticketId:req.params.id,bookingId:supportContext?.bookingId||null,dedupeKey:`support_customer_reply:${message.id}`});
     res.status(201).json({message});
   }catch(error){return supportResponse(res,error);}
 });
@@ -1310,6 +1323,8 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
       pricing: pricingData,
       idempotencyKey,
     });
+    void notifications.notifyBooking({bookingId:booking.id,type:'booking_created',title:'Booking request sent',body:'Your RideOn booking request has been sent to the vendor.',audience:'customer',dedupeKey:`booking_created:${booking.id}`});
+    void notifications.notifyBooking({bookingId:booking.id,type:'new_booking',title:'New booking request',body:'A customer has requested your vehicle.',audience:'vendor',dedupeKey:`new_booking:${booking.id}`});
     res.status(201).json({ data: publicBooking(booking), booking: publicBooking(booking) });
   } catch (error) {
     if (error.code === 'IDEMPOTENCY_REPLAY') return res.status(200).json({ data: publicBooking(error.booking), booking: publicBooking(error.booking) });
@@ -1469,6 +1484,11 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
   if (!event.bookingId) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT'} });
   const result = await repository.applyPaymentEvent(event);
   if (result.invalid) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT',message:'Payment event does not match the booking payment.'} });
+  if(result.applied && !result.duplicate){
+    const paymentEventMap={paid:{type:'payment_success',title:'Payment confirmed',body:'Your RideOn payment has been verified.'},failed:{type:'payment_failed',title:'Payment failed',body:'Your RideOn payment could not be confirmed.'},refund_pending:{type:'refund_initiated',title:'Refund initiated',body:'Your RideOn refund has been initiated.'},refunded:{type:'refund_completed',title:'Refund completed',body:'Your RideOn refund has been completed.'}};
+    const eventInfo=paymentEventMap[event.status];
+    if(eventInfo) void notifications.notifyBooking({bookingId:event.bookingId,...eventInfo,audience:'customer',dedupeKey:`payment:${event.eventId}:${event.status}`});
+  }
   res.json({received:true,applied:result.applied,duplicate:result.duplicate});
 });
 
