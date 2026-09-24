@@ -68,7 +68,7 @@ const DatePickerField = ({label, value, onChange, minimumDate}) => {
     </Modal>
   </View>;
 };
-const DEFAULT_CITY = 'Udaipur';
+const DEFAULT_CITY = '';
 const C = { ink: '#17202D', muted: '#78818E', orange: '#E85D35', bg: '#F6F7F9', line: '#E8EAF0', white: '#FFFFFF', navy: '#202B3B', green: '#258565' };
 const titleCaseType = value => {
   const text = String(value || '').trim().toLowerCase();
