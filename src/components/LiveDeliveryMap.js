@@ -36,6 +36,7 @@ export default function LiveDeliveryMap({booking,onDelivered}){
   const markerRef=useRef(null);
   const [tick,setTick]=useState(0);
   const coordinateRef=useRef(new AnimatedRegion(DEFAULT));
+  const [connectionAttempt,setConnectionAttempt]=useState(0);
 
   const load=useCallback(async()=>{
     if(!booking?.id)return;
@@ -65,13 +66,13 @@ export default function LiveDeliveryMap({booking,onDelivered}){
             }
           }catch{}
         },
-        onClose:()=>{setTracking(current=>current?.active?{...current,active:false,stale:true,connectionLost:true}:current);},
+        onClose:()=>{setTracking(current=>current?.active?{...current,stale:true,connectionLost:true}:current);setTimeout(()=>setConnectionAttempt(value=>value+1),10000);},
         onError:()=>setError('Live connection was interrupted. Reopen this trip to reconnect.'),
       });
       socketRef.current=socket;
     }catch(e){setError('Live tracking could not connect right now.');}
     return()=>{try{socket?.close();}catch{}socketRef.current=null;};
-  },[booking?.id,tracking?.active,onDelivered]);
+  },[booking?.id,tracking?.active,connectionAttempt,onDelivered]);
 
   useEffect(()=>{const timer=setInterval(()=>setTick(x=>x+1),15000);return()=>clearInterval(timer);},[]);
 
