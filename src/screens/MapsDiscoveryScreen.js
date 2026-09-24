@@ -2,9 +2,11 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
-import Constants from 'expo-constants';\nimport { rideOnApi } from '../services/api';
+import Constants from 'expo-constants';
+import { rideOnApi } from '../services/api';
 
-const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',white:'#FFFFFF',line:'#E8EAF0',green:'#258565'};\nconst isExpoGo=Constants.appOwnership==='expo';
+const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',white:'#FFFFFF',line:'#E8EAF0',green:'#258565'};
+const isExpoGo=Constants.appOwnership==='expo';
 
 const DEFAULT_REGION={latitude:26.9124,longitude:75.7873,latitudeDelta:0.16,longitudeDelta:0.16};
 const pointFromLocation=(location)=>location?.coords ? {latitude:Number(location.coords.latitude),longitude:Number(location.coords.longitude)} : null;
@@ -69,7 +71,8 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
   },[]);
 
   const geocode=useCallback(async()=>{
-    const requested=deliveryAddress.trim();\n    if(!requested){setRouteError('Enter a delivery address first.');return;}\n    if(/^current location$/i.test(requested)){await requestCurrentLocation();return;}
+    const requested=deliveryAddress.trim();
+    if(!requested){setRouteError('Enter a delivery address first.');return;}\n    if(/^current location$/i.test(requested)){await requestCurrentLocation();return;}
     setRouteLoading(true);setRouteError('');
     try{
       const result=await rideOnApi.geocodeAddress(deliveryAddress,city);
