@@ -188,8 +188,8 @@ function publicBooking(booking) {
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
 const notifications = createNotificationService({ repository });
 const observability = createObservability({ repository });
-console.log('[RideOnServer][ROUTES_READY]', JSON.stringify({ routes:['GET /health','GET /api/v1/version','GET /api/v1/me','POST /api/v1/auth/request-otp','POST /api/v1/auth/verify-otp','POST /api/v1/auth/complete-registration'] }));
-console.log('[RideOnServer][BOOT]', JSON.stringify({
+observability.log('info','routes_ready',{routes:['GET /health','GET /api/v1/version','GET /api/v1/me','POST /api/v1/auth/request-otp','POST /api/v1/auth/verify-otp','POST /api/v1/auth/complete-registration']});
+observability.log('info','server_boot',{
   nodeEnv: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT) || 4000,
   buildCommit,
@@ -1190,11 +1190,7 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
       const providerPayload = await response.text().catch(() => '');
       let providerError = {};
       try { providerError = providerPayload ? JSON.parse(providerPayload) : {}; } catch {}
-      console.error('[rideon-auth] Supabase OTP request failed', {
-        status: response.status,
-        code: providerError?.error_code || providerError?.error,
-        message: providerError?.msg || providerError?.message || providerError?.error_description,
-      });
+      observability.log('error','supabase_otp_request_failed',{requestId:req.requestId,status:response.status,code:providerError?.error_code||providerError?.error});
       return res.status(response.status === 429 ? 429 : 502).json({
         error:{
           code:'OTP_REQUEST_FAILED',
@@ -1211,17 +1207,7 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
 });
 
 app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) => {
-  console.log('[RideOnAuth][COMPLETE_REGISTRATION_REQUEST]', JSON.stringify({
-    requestId:req.requestId,
-    method:req.method,
-    path:req.path,
-    hasAuthorization:Boolean(req.get('Authorization')),
-    bodyKeys:Object.keys(req.body || {}),
-    accountType:req.body?.accountType || null,
-    fullNameLength:String(req.body?.fullName || '').length,
-    hasPhone:Boolean(req.body?.phone),
-    buildCommit
-  }));
+  observability.log('info','registration_request',{requestId:req.requestId,accountType:req.body?.accountType||null,fullNameLength:String(req.body?.fullName||'').length,hasPhone:Boolean(req.body?.phone),buildCommit});
   const header=req.get('Authorization')||'';
   const token=header.startsWith('Bearer ')?header.slice(7).trim():'';
   if(!token) return res.status(401).json({error:{code:'AUTH_REQUIRED',message:'Authentication required.'}});
@@ -1251,9 +1237,8 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
     }
     return res.json({user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},customer,vendor});
   }catch(error){
-    console.error('[RideOnAuth][COMPLETE_REGISTRATION_ERROR]', JSON.stringify({requestId:req.requestId, code:error?.code, message:error?.message, buildCommit}));
+    observability.log('error','registration_completion_failed',{requestId:req.requestId,code:error?.code||'REGISTRATION_COMPLETION_FAILED'});
     if(error.code==='ACCOUNT_TYPE_CONFLICT') return res.status(409).json({error:{code:error.code,message:error.message}});
-    console.error(JSON.stringify({level:'error',event:'registration_completion_failed',requestId:req.requestId,code:error?.code||'REGISTRATION_COMPLETION_FAILED'}));
     return res.status(500).json({error:{code:'REGISTRATION_COMPLETION_FAILED',message:'We could not complete your RideOn registration right now.'}});
   }
 });
@@ -1276,7 +1261,7 @@ app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
     }
     return res.json({ data:{ accessToken:payload.access_token, refreshToken:payload.refresh_token, expiresIn:payload.expires_in }, accessToken:payload.access_token });
   } catch (error) {
-    console.error('[rideon-auth] OTP verification failed', { message:error?.message, code:error?.code });
+    observability.log('warn','otp_verification_failed',{requestId:req.requestId,code:error?.code||'OTP_VERIFICATION_FAILED'});
     return res.status(502).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:'Unable to verify the RideOn code right now.' } });
   }
 });
