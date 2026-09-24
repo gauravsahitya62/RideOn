@@ -72,7 +72,8 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
 
   const geocode=useCallback(async()=>{
     const requested=deliveryAddress.trim();
-    if(!requested){setRouteError('Enter a delivery address first.');return;}\n    if(/^current location$/i.test(requested)){await requestCurrentLocation();return;}
+    if(!requested){setRouteError('Enter a delivery address first.');return;}
+    if(/^current location$/i.test(requested)){await requestCurrentLocation();return;}
     setRouteLoading(true);setRouteError('');
     try{
       const result=await rideOnApi.geocodeAddress(deliveryAddress,city);
