@@ -438,6 +438,34 @@ const vehicleInput=z.object({
   active:z.boolean().optional().default(true),
 });
 
+app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, express.raw({ type: ['image/jpeg','image/png','image/webp'], limit: '10mb' }), async (req,res)=>{
+  try{
+    const supabaseUrl=String(process.env.SUPABASE_URL||'').replace(/\\/$/,'');
+    const storageKey=process.env.SUPABASE_SERVICE_ROLE_KEY||process.env.SUPABASE_SECRET_KEY;
+    const bucket=String(process.env.SUPABASE_VEHICLE_IMAGE_BUCKET||'vehicle-images').trim();
+    if(!supabaseUrl||!storageKey) return res.status(503).json({error:{code:'STORAGE_NOT_CONFIGURED',message:'Vehicle image storage is not configured on the API.'}});
+    if(!Buffer.isBuffer(req.body)||req.body.length===0) return res.status(400).json({error:{code:'IMAGE_REQUIRED',message:'Please select a vehicle image to upload.'}});
+    const contentType=String(req.get('content-type')||'image/jpeg').split(';')[0].toLowerCase();
+    const extension=contentType==='image/png'?'png':contentType==='image/webp'?'webp':'jpg';
+    const path=`vendors/${req.vendor.id}/${crypto.randomUUID()}.${extension}`;
+    const response=await fetch(`${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`,{
+      method:'POST',
+      headers:{Authorization:`Bearer ${storageKey}`,apikey:storageKey,'Content-Type':contentType,'x-upsert':'false'},
+      body:req.body,
+    });
+    if(!response.ok){
+      const details=await response.text().catch(()=> '');
+      console.error(JSON.stringify({level:'error',event:'vehicle_image_upload_failed',requestId:req.requestId,status:response.status,details:details.slice(0,500)}));
+      return res.status(502).json({error:{code:'IMAGE_UPLOAD_FAILED',message:'Vehicle image upload failed. Please try again.'}});
+    }
+    const publicUrl=`${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+    res.status(201).json({data:{url:publicUrl,path,bucket},url:publicUrl});
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'vehicle_image_upload_error',requestId:req.requestId,message:error?.message}));
+    res.status(500).json({error:{code:'IMAGE_UPLOAD_FAILED',message:'Vehicle image upload failed. Please try again.'}});
+  }
+});
+
 app.get('/api/v1/vendor/vehicles', supabaseRequireAuth, requireVendor, async (req,res)=>{
   const activeParam=req.query.active?.toString();
   const active=activeParam===undefined?undefined:activeParam==='true';
