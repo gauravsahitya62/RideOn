@@ -5,10 +5,11 @@ import { authService, normalizeAuthError } from './authService';
 
 const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',line:'#E8EAF0',white:'#FFFFFF'};
 
-const Field=({label,value,onChangeText,placeholder,keyboardType,onFocus,returnKeyType,onSubmitEditing})=>
+const Field=React.forwardRef(({label,value,onChangeText,placeholder,keyboardType,onFocus,returnKeyType,onSubmitEditing},ref)=>
   <View style={s.fieldWrap}>
     <Text style={s.label}>{label}</Text>
     <TextInput
+      ref={ref}
       value={value}
       onChangeText={onChangeText}
       autoCapitalize="none"
@@ -21,7 +22,8 @@ const Field=({label,value,onChangeText,placeholder,keyboardType,onFocus,returnKe
       returnKeyType={returnKeyType}
       onSubmitEditing={onSubmitEditing}
     />
-  </View>;
+  </View>);
+Field.displayName='Field';
 
 export default function AuthScreen({onAuthenticated}) {
   const [mode,setMode]=useState('login');
