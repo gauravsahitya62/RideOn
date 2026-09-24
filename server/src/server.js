@@ -970,7 +970,12 @@ app.post('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer',
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please check the support request details.',details:parsed.error.flatten()}});
   try{
     const result=await repository.createSupportTicket({...parsed.data,raisedByUserId:req.user.id,raisedByRole:req.user.role,idempotencyKey:req.get('Idempotency-Key')||null});
-    if(!result.idempotentReplay) void notifications.notifySupport({type:'new_support_ticket',title:'New support ticket',body:'A new customer or vendor support request needs attention.',ticketId:result.ticket.id,bookingId:result.ticket.bookingId||null,dedupeKey:`new_support_ticket:${result.ticket.id}`});
+    if(!result.idempotentReplay){
+      void notifications.notifySupport({type:'new_support_ticket',title:'New support ticket',body:'A new customer or vendor support request needs attention.',ticketId:result.ticket.id,bookingId:result.ticket.bookingId||null,dedupeKey:`new_support_ticket:${result.ticket.id}`});
+      const categoryMap={Payment:'payment_issue',Refund:'refund_issue','Security Deposit':'payment_issue',Delivery:'delivery_issue','Damage':'dispute_created',Cancellation:'dispute_created'};
+      const issueType=categoryMap[result.ticket.category];
+      if(issueType) void notifications.notifySupport({type:issueType,title:'Support issue requires attention',body:`A ${result.ticket.category.toLowerCase()} support issue was created.`,ticketId:result.ticket.id,bookingId:result.ticket.bookingId||null,dedupeKey:`${issueType}:${result.ticket.id}`});
+    }
     res.status(result.idempotentReplay?200:201).json({ticket:result.ticket,idempotentReplay:result.idempotentReplay});
   }catch(error){return supportResponse(res,error);}
 });
