@@ -980,6 +980,117 @@ test('reviews enforce completed booking ownership, duplicate prevention, and ser
 });
 
 
+
+
+test('support tickets enforce ownership, booking scoping, messaging and lifecycle', async () => {
+  const customer=await register('+911234568001','Support Customer');
+  const customerLogin=await legacyLogin('+911234568001');
+  const other=await register('+911234568002','Other Support Customer');
+  const otherLogin=await legacyLogin('+911234568002');
+
+  const invalid=await jsonRequest('/api/v1/support/tickets','POST',{category:'Not real',subject:'Payment issue',description:'Something went wrong with payment.'},customerLogin.accessToken);
+  assert.equal(invalid.status,400);
+
+  const created=await jsonRequest('/api/v1/support/tickets','POST',{category:'Payment',subject:'Payment verification issue',description:'My payment is not showing as confirmed.',priority:'high'},customerLogin.accessToken,{'Idempotency-Key':'support-test-key-001'});
+  assert.equal(created.status,201);
+  const ticketPayload=await created.json();
+  assert.ok(ticketPayload.ticket.id);
+  assert.match(ticketPayload.ticket.ticketNumber,/^RID-/);
+  assert.equal(ticketPayload.ticket.status,'open');
+
+  const replay=await jsonRequest('/api/v1/support/tickets','POST',{category:'Payment',subject:'Changed subject should not duplicate',description:'This retry must remain idempotent.',priority:'urgent'},customerLogin.accessToken,{'Idempotency-Key':'support-test-key-001'});
+  assert.equal(replay.status,200);
+  assert.equal((await replay.json()).ticket.id,ticketPayload.ticket.id);
+
+  const foreign=await request('/api/v1/support/tickets/'+ticketPayload.ticket.id,{headers:{authorization:'Bearer '+otherLogin.accessToken}});
+  assert.equal(foreign.status,404);
+
+  const foreignMessage=await jsonRequest('/api/v1/support/tickets/'+ticketPayload.ticket.id+'/messages','POST',{message:'I should not access this ticket.'},otherLogin.accessToken);
+  assert.equal(foreignMessage.status,404);
+
+  const message=await jsonRequest('/api/v1/support/tickets/'+ticketPayload.ticket.id+'/messages','POST',{message:'Here is an additional detail for support.'},customerLogin.accessToken);
+  assert.equal(message.status,201);
+
+  const messages=await request('/api/v1/support/tickets/'+ticketPayload.ticket.id+'/messages',{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  assert.equal(messages.status,200);
+  assert.equal((await messages.json()).messages.length,1);
+
+  const closed=await jsonRequest('/api/v1/support/tickets/'+ticketPayload.ticket.id+'/close','POST',{},customerLogin.accessToken);
+  assert.equal(closed.status,200);
+  assert.equal((await closed.json()).ticket.status,'closed');
+
+  const closedReply=await jsonRequest('/api/v1/support/tickets/'+ticketPayload.ticket.id+'/messages','POST',{message:'This should be blocked while closed.'},customerLogin.accessToken);
+  assert.equal(closedReply.status,409);
+
+  const reopened=await jsonRequest('/api/v1/support/tickets/'+ticketPayload.ticket.id+'/reopen','POST',{},customerLogin.accessToken);
+  assert.equal(reopened.status,200);
+  assert.equal((await reopened.json()).ticket.status,'open');
+
+  const listed=await request('/api/v1/support/tickets',{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  assert.equal(listed.status,200);
+  assert.ok((await listed.json()).tickets.some(t=>t.id===ticketPayload.ticket.id));
+
+  const booking=await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',
+    startAt:'2044-01-10T10:00:00.000Z',
+    endAt:'2044-01-11T10:00:00.000Z',
+    delivery:false,
+    address:'18 Support Road, Jaipur',
+  },customerLogin.accessToken,{'Idempotency-Key':'support-booking-001'});
+  assert.equal(booking.status,201);
+  const bookingId=(await booking.json()).booking.bookingId;
+
+  const foreignBookingTicket=await jsonRequest('/api/v1/support/tickets','POST',{
+    bookingId,
+    category:'Booking',
+    subject:'Foreign booking',
+    description:'This must not be linked to another customer booking.',
+  },otherLogin.accessToken,{'Idempotency-Key':'support-foreign-booking'});
+  assert.equal(foreignBookingTicket.status,404);
+});
+
+test('support staff can inspect, assign and transition tickets while internal messages stay private', async () => {
+  const customer=await register('+911234568003','Support Admin Customer');
+  const customerLogin=await legacyLogin('+911234568003');
+  const created=await jsonRequest('/api/v1/support/tickets','POST',{category:'Technical Issue',subject:'App issue',description:'The support flow needs assistance.'},customerLogin.accessToken,{'Idempotency-Key':'support-admin-key-003'});
+  assert.equal(created.status,201);
+  const ticket=(await created.json()).ticket;
+
+  const supportEmail='support-role-test@example.com';
+  const support=await repository.createOrLinkCustomerFromSupabase({
+    supabaseUserId:crypto.randomUUID(),email:supportEmail,fullName:'RideOn Support',phone:'+911234568004',role:'support'
+  });
+  assert.equal(support.role,'support');
+  const supportToken=jwt.sign({sub:support.id,role:'support'},'development-only-secret');
+
+  const adminList=await request('/api/v1/support/admin/tickets',{headers:{authorization:'Bearer '+supportToken}});
+  assert.equal(adminList.status,200);
+  assert.ok((await adminList.json()).tickets.some(t=>t.id===ticket.id));
+
+  const internal=await jsonRequest('/api/v1/support/admin/tickets/'+ticket.id+'/messages','POST',{message:'Internal triage note.',isInternal:true},supportToken);
+  assert.equal(internal.status,201);
+
+  const customerMessages=await request('/api/v1/support/tickets/'+ticket.id+'/messages',{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  const customerMessagesPayload=await customerMessages.json();
+  assert.equal(customerMessages.status,200);
+  assert.equal(customerMessagesPayload.messages.some(m=>m.message==='Internal triage note.'),false);
+
+  const assign=await jsonRequest('/api/v1/support/admin/tickets/'+ticket.id+'/assignment','PATCH',{assignedToUserId:support.id},supportToken);
+  assert.equal(assign.status,200);
+
+  const status=await jsonRequest('/api/v1/support/admin/tickets/'+ticket.id+'/status','PATCH',{status:'in_progress'},supportToken);
+  assert.equal(status.status,200);
+  assert.equal((await status.json()).ticket.status,'in_progress');
+
+  const resolved=await jsonRequest('/api/v1/support/admin/tickets/'+ticket.id+'/resolve','POST',{resolution:'Issue reviewed by RideOn support.'},supportToken);
+  assert.equal(resolved.status,200);
+  assert.equal((await resolved.json()).ticket.status,'resolved');
+
+  const reopened=await jsonRequest('/api/v1/support/tickets/'+ticket.id+'/reopen','POST',{},customerLogin.accessToken);
+  assert.equal(reopened.status,200);
+  assert.equal((await reopened.json()).ticket.status,'open');
+});
+
 test.after(async () => {
   try {
     if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
