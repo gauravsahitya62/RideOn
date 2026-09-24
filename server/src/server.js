@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { createRepository } from './repository.js';
 import { createAuth } from './auth.js';
 import { createPaymentService } from './payments.js';
+import { calculateCancellation } from './lifecycle.js';
 
 const fleet = [];
 
@@ -146,6 +147,13 @@ function publicBooking(booking) {
     paymentId: booking.paymentId,
     createdAt: booking.createdAt,
     updatedAt: booking.updatedAt || booking.createdAt,
+    cancellationFee: booking.cancellationFee || 0,
+    refundAmount: booking.refundAmount || 0,
+    cancelledAt: booking.cancelledAt,
+    cancellationReason: booking.cancellationReason,
+    securityDepositStatus: booking.securityDepositStatus,
+    securityDepositRefundable: booking.securityDepositRefundable || 0,
+    securityDepositDeduction: booking.securityDepositDeduction || 0,
   };
 }
 
@@ -240,6 +248,26 @@ const payments = createPaymentService({
   callbackUrl: paytmCallbackUrl,
   webhookSecret: paymentWebhookSecret,
 });
+
+async function requestRefundForBooking(bookingId) {
+  const payment=await repository.findPaymentByBooking(bookingId);
+  if(!payment) return {status:'not_applicable'};
+  if(payment.status==='refunded') return {status:'refunded',payment};
+  if(!['paid','refund_pending'].includes(String(payment.status))) return {status:'not_eligible',payment};
+  const pending=await repository.markPaymentRefundPending(payment.id);
+  try {
+    const providerResult=await payments.refundPayment({paymentId:payment.id,amountPaise:payment.amountPaise,providerOrderId:payment.providerOrderId});
+    if(providerResult?.confirmed && providerResult?.providerReference){
+      const refunded=await repository.completePaymentRefund({paymentId:payment.id,providerReference:providerResult.providerReference});
+      return {status:'refunded',payment:refunded};
+    }
+    return {status:'refund_pending',payment:pending};
+  } catch(error) {
+    if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return {status:'refund_pending',payment:pending,providerUnavailable:true};
+    throw error;
+  }
+}
+
 
 
 async function verifySupabaseAccessToken(token) {
@@ -535,10 +563,13 @@ app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVend
   if(!parsed.success) return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid booking status.',details:parsed.error.flatten()}});
   try{
     const booking=await repository.updateVendorBookingStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
-    res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+    const refund=(parsed.data.status==='rejected'&&['paid','refund_pending'].includes(String(booking.paymentStatus))) ? await requestRefundForBooking(booking.id) : {status:'not_applicable'};
+    const latest=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    res.json({data:publicBooking(latest||booking),booking:publicBooking(latest||booking),refund});
   }catch(error){
     if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
     if(error.code==='INVALID_BOOKING_TRANSITION') return res.status(409).json({error:{code:error.code,message:'Booking cannot move to that status.'}});
+    if(error.code==='PAYMENT_REQUIRED_FOR_ACCEPTANCE') return res.status(409).json({error:{code:error.code,message:'Payment must be confirmed before this booking can be accepted.'}});
     if(error.code==='INVALID_BOOKING_STATUS') return res.status(400).json({error:{code:error.code,message:'Invalid booking status.'}});
     throw error;
   }
@@ -774,18 +805,30 @@ app.get('/api/v1/bookings/:id', supabaseRequireAuth, requireCustomer, async (req
   res.json({ data: publicBooking(booking), booking: publicBooking(booking) });
 });
 
-app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, async (req, res) => {
-  const booking = await repository.getBooking(req.params.id);
-  if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
-  if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
-  if (booking.paymentStatus === 'paid') return res.status(409).json({ error: { code: 'REFUND_POLICY_REQUIRED', message: 'This paid booking requires an approved refund policy before cancellation.' } });
-  if (booking.paymentStatus === 'refunded') return res.status(409).json({ error: { code: 'INVALID_PAYMENT_STATE', message: 'A refunded booking cannot be cancelled again.' } });
+app.get('/api/v1/bookings/:id/cancellation-preview', supabaseRequireAuth, requireCustomer, async (req,res) => {
   try {
-    const updated = await repository.cancelBooking(req.params.id, req.user.id);
-    if (!updated) return res.status(409).json({ error: { code: 'CANNOT_CANCEL', message: 'This booking can no longer be cancelled.' } });
-    res.json({ data: publicBooking(updated), booking: publicBooking(updated) });
-  } catch (error) {
-    if (error.code === 'CANNOT_CANCEL') return res.status(409).json({ error: { code: error.code, message: error.message } });
+    const preview=await repository.getCancellationPreview(req.params.id,req.user.id);
+    res.json({cancellation:preview});
+  } catch(error) {
+    if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(error.code==='CANCELLATION_NOT_ALLOWED') return res.status(409).json({error:{code:error.code,message:'This booking can no longer be cancelled.'}});
+    throw error;
+  }
+});
+
+app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const parsed=z.object({reason:z.string().trim().max(500).optional()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid cancellation request.'}});
+  try {
+    const preview=await repository.getCancellationPreview(req.params.id,req.user.id);
+    const result=await repository.cancelBooking(req.params.id,req.user.id,{reason:parsed.data.reason||'customer_cancelled'});
+    const refund=result.calculation.totalRefund>0 ? await requestRefundForBooking(req.params.id) : {status:'not_applicable'};
+    const latest=await repository.getBooking(req.params.id,req.user.id);
+    res.json({data:publicBooking(latest||result.booking),booking:publicBooking(latest||result.booking),cancellation:result.calculation,refund});
+  } catch(error) {
+    if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
+    if(error.code==='CANCELLATION_NOT_ALLOWED') return res.status(409).json({error:{code:error.code,message:'This booking can no longer be cancelled.'}});
+    if(error.code==='INVALID_PAYMENT_STATE') return res.status(409).json({error:{code:error.code,message:'The payment is not in a refundable state.'}});
     throw error;
   }
 });
