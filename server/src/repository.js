@@ -367,7 +367,7 @@ export function createRepository({ databaseUrl, fleet }) {
         email: input.email || '',
         address: input.address || input.serviceCity || '',
         status: 'active',
-        serviceCity: input.serviceCity || 'Jaipur',
+        serviceCity: input.serviceCity || '',
         serviceArea: input.serviceArea || {},
       };
       memory.vendors.set(customerId, vendor);
@@ -387,7 +387,7 @@ export function createRepository({ databaseUrl, fleet }) {
         input.phone || (customer.phone?.startsWith('supa-') ? '' : customer.phone) || '',
         input.email || customer.email || '',
         input.address || input.serviceCity || '',
-        input.serviceCity || 'Jaipur',
+        input.serviceCity || null,
         input.serviceArea || {},
       ]
     );
