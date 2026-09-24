@@ -472,6 +472,53 @@ test('cancellation records the actual previous status', async () => {
   assert.equal((await duplicate.json()).error.code,'CANCELLATION_NOT_ALLOWED');
 });
 
+test('vendor rejection requires a reason and cannot be accepted after rejection', async () => {
+  const customer=await register('+911234567930','Reject Customer');
+  const login=await legacyLogin('+911234567930');
+  const vendorCustomer=await register('+911234567931','Reject Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Reject Car',make:'Test',model:'R',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:500,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJ14REJ930',description:'',imageUrls:[],deliveryAvailable:true,active:true});
+  const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2040-01-10T10:00:00.000Z',endAt:'2040-01-11T10:00:00.000Z',delivery:false,address:'1 Reject Road, Jaipur'},login.accessToken,{ 'Idempotency-Key':'reject-test-930'});
+  assert.equal(created.status,201);
+  const booking=(await created.json()).booking;
+  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const noReason=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'rejected'},vendorToken);
+  assert.equal(noReason.status,400);
+  assert.equal((await noReason.json()).error.code,'REJECTION_REASON_REQUIRED');
+  const rejected=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'rejected',note:'Vehicle unavailable for requested dates.'},vendorToken);
+  assert.equal(rejected.status,200);
+  assert.equal((await rejected.json()).booking.status,'rejected');
+  const acceptAgain=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'confirmed'},vendorToken);
+  assert.equal(acceptAgain.status,409);
+});
+
+test('security deposit inspection requires completed rental and protects deduction evidence', async () => {
+  const customer=await register('+911234567932','Deposit Customer');
+  const login=await legacyLogin('+911234567932');
+  const vendorCustomer=await register('+911234567933','Deposit Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Deposit Car',make:'Test',model:'D',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:500,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJ14DEP932',description:'',imageUrls:[],deliveryAvailable:true,active:true});
+  const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2040-02-10T10:00:00.000Z',endAt:'2040-02-11T10:00:00.000Z',delivery:false,address:'2 Deposit Road, Jaipur'},login.accessToken,{ 'Idempotency-Key':'deposit-test-932'});
+  const booking=(await created.json()).booking;
+  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const beforeReturn=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:0},vendorToken);
+  assert.equal(beforeReturn.status,409);
+  await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'confirmed');
+  const payment=await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'deposit-order-'+booking.bookingId,amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
+  await repository.applyPaymentEvent({eventId:'deposit-paid-'+booking.bookingId,bookingId:booking.bookingId,providerReference:'deposit-paid-ref-'+booking.bookingId,providerOrderId:payment.payment.providerOrderId,amountPaise:payment.payment.amountPaise,currency:'INR',status:'paid'});
+  await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'in_progress');
+  await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'completed');
+  const missingEvidence=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:10000,reason:'Damage'},vendorToken);
+  assert.equal(missingEvidence.status,400);
+  assert.equal((await missingEvidence.json()).error.code,'DEPOSIT_EVIDENCE_REQUIRED');
+  const valid=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:10000,reason:'Damage',evidenceReference:'inspection-photo-932'},vendorToken);
+  assert.equal(valid.status,400);
+  assert.equal((await valid.json()).error.code,'DEPOSIT_DEDUCTION_INVALID');
+  const release=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:0},vendorToken);
+  assert.equal(release.status,200);
+  assert.equal((await release.json()).deposit.status,'refund_pending');
+});
+
 test('cancellation preview returns server-calculated refund data', async () => {
   const a = await register('+911234567918', 'Cancellation Preview User');
   const login = await legacyLogin('+911234567918');
