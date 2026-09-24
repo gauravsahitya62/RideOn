@@ -13,7 +13,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map() };
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map() };
 
   const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
@@ -1482,6 +1482,149 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function incrementOtpAttempt(id) {
     if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
+  }
+
+
+  const sanitizeReviewComment = (value) => {
+    if (value == null) return null;
+    const normalized = String(value).replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '').replace(/\\s+/g, ' ').trim();
+    return normalized ? normalized.slice(0, 1000) : null;
+  };
+
+  const mapReview = (row) => row && ({
+    id: String(row.id), bookingId: String(row.booking_id ?? row.bookingId),
+    reviewerUserId: String(row.reviewer_user_id ?? row.reviewerUserId),
+    revieweeUserId: String(row.reviewee_user_id ?? row.revieweeUserId),
+    reviewType: row.review_type ?? row.reviewType, rating: Number(row.rating),
+    comment: row.comment || null, createdAt: iso(row.created_at ?? row.createdAt), updatedAt: iso(row.updated_at ?? row.updatedAt),
+    reviewerName: row.reviewer_name || row.reviewerName || null, revieweeName: row.reviewee_name || row.revieweeName || null,
+    vehicleId: row.vehicle_id == null ? null : String(row.vehicle_id), vehicleName: row.vehicle_name || null,
+    vendorId: row.resolved_vendor_id == null ? (row.vendor_id == null ? null : String(row.vendor_id)) : String(row.resolved_vendor_id),
+    vendorName: row.vendor_name || null,
+  });
+
+  const reviewSummary = (rows = []) => {
+    const distribution = {1:0,2:0,3:0,4:0,5:0};
+    for (const row of rows) { const rating=Number(row.rating); if (rating>=1 && rating<=5) distribution[rating] += 1; }
+    const total=rows.length;
+    const average=total ? Number((rows.reduce((sum,row)=>sum+Number(row.rating),0)/total).toFixed(2)) : 0;
+    return {averageRating:average,totalReviewCount:total,ratingDistribution:distribution};
+  };
+
+  const reviewSelect = 'select r.*, reviewer.full_name as reviewer_name, reviewee.full_name as reviewee_name, b.vehicle_id, b.vendor_id, v.name as vehicle_name, coalesce(b.vendor_id,v.owner_id) as resolved_vendor_id, ven.business_name as vendor_name from reviews r join customers reviewer on reviewer.id=r.reviewer_user_id join customers reviewee on reviewee.id=r.reviewee_user_id join bookings b on b.id=r.booking_id join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=coalesce(b.vendor_id,v.owner_id)';
+
+  async function createReview({bookingId,reviewerId,reviewerRole,rating,comment}) {
+    const normalizedRating=Number(rating);
+    if(!Number.isInteger(normalizedRating)||normalizedRating<1||normalizedRating>5){const e=new Error('Rating must be an integer from 1 to 5.');e.code='INVALID_REVIEW_RATING';throw e;}
+    const normalizedComment=sanitizeReviewComment(comment);
+    if(!useDatabase){
+      const booking=memory.bookings.get(String(bookingId));
+      if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(booking.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
+      const vendor=memory.vendors?.get(String(booking.vendorId)) || [...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(booking.vendorId));
+      const vendorOwnerId=vendor?.ownerCustomerId||vendor?.owner_customer_id;
+      let reviewType,revieweeId;
+      if(reviewerRole==='customer'){
+        if(String(booking.customerId)!==String(reviewerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        if(!vendorOwnerId){const e=new Error('Vendor review target is unavailable.');e.code='REVIEW_TARGET_UNAVAILABLE';throw e;}
+        reviewType='customer_to_vendor';revieweeId=String(vendorOwnerId);
+      }else if(reviewerRole==='vendor'){
+        if(!booking.vendorId||String(booking.vendorId)!==String(vendor?.id||booking.vendorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        reviewType='vendor_to_customer';revieweeId=String(booking.customerId);
+      }else{const e=new Error('Invalid reviewer role.');e.code='FORBIDDEN';throw e;}
+      const duplicate=[...memory.reviews.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.reviewerUserId)===String(reviewerId)&&x.reviewType===reviewType);
+      if(duplicate){const e=new Error('You have already reviewed this booking.');e.code='REVIEW_ALREADY_EXISTS';throw e;}
+      const now=new Date().toISOString();
+      const review={id:crypto.randomUUID(),bookingId:String(bookingId),reviewerUserId:String(reviewerId),revieweeUserId:revieweeId,reviewType,rating:normalizedRating,comment:normalizedComment,createdAt:now,updatedAt:now,vehicleId:String(booking.vehicleId),vehicleName:booking.vehicle?.name||null,vendorId:booking.vendorId?String(booking.vendorId):null,vendorName:vendor?.businessName||null};
+      memory.reviews.set(review.id,review);return review;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query('select b.id,b.customer_id,b.vendor_id,b.vehicle_id,b.status,v.name as vehicle_name,v.owner_id,ven.business_name as vendor_name,ven.owner_customer_id as vendor_owner_customer_id from bookings b join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=coalesce(b.vendor_id,v.owner_id) where b.id=$1 for update',[bookingId]);
+      const b=q.rows[0];
+      if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(b.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
+      let reviewType,revieweeId;
+      if(reviewerRole==='customer'){
+        if(String(b.customer_id)!==String(reviewerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        reviewType='customer_to_vendor';revieweeId=b.vendor_owner_customer_id;
+        if(!revieweeId){const e=new Error('Vendor review target is unavailable.');e.code='REVIEW_TARGET_UNAVAILABLE';throw e;}
+      }else if(reviewerRole==='vendor'){
+        if(!b.vendor_id){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        const vc=await client.query('select id from vendors where id=$1 and owner_customer_id=$2',[b.vendor_id,reviewerId]);
+        if(!vc.rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        reviewType='vendor_to_customer';revieweeId=b.customer_id;
+      }else{const e=new Error('Invalid reviewer role.');e.code='FORBIDDEN';throw e;}
+      try{
+        const inserted=await client.query('insert into reviews(booking_id,reviewer_user_id,reviewee_user_id,review_type,rating,comment) values($1,$2,$3,$4,$5,$6) returning *',[bookingId,reviewerId,revieweeId,reviewType,normalizedRating,normalizedComment]);
+        await client.query('commit');
+        return mapReview({...inserted.rows[0],vehicle_id:b.vehicle_id,vehicle_name:b.vehicle_name,vendor_id:b.vendor_id||b.owner_id,resolved_vendor_id:b.vendor_id||b.owner_id,vendor_name:b.vendor_name});
+      }catch(error){if(error.code==='23505'){const e=new Error('You have already reviewed this booking.');e.code='REVIEW_ALREADY_EXISTS';throw e;}throw error;}
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function getReviewStatus({bookingId,userId,role}) {
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId));
+      if(!b||(role==='customer'&&String(b.customerId)!==String(userId))||(role==='vendor'&&String(b.vendorId)!==String(userId))){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
+      const own=[...memory.reviews.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.reviewerUserId)===String(userId)&&x.reviewType===type);
+      return {eligible:b.status==='completed',review:own||null,reviewType:type};
+    }
+    const b=role==='customer'?await getBooking(bookingId,userId):await getVendorBooking(userId,bookingId);
+    if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+    const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
+    const q=await pool.query(reviewSelect+' where r.booking_id=$1 and r.reviewer_user_id=$2 and r.review_type=$3 limit 1',[bookingId,userId,type]);
+    return {eligible:b.status==='completed',review:q.rows[0]?mapReview(q.rows[0]):null,reviewType:type};
+  }
+
+  async function updateReview({reviewId,userId,role,rating,comment}) {
+    const normalizedRating=Number(rating);
+    if(!Number.isInteger(normalizedRating)||normalizedRating<1||normalizedRating>5){const e=new Error('Rating must be an integer from 1 to 5.');e.code='INVALID_REVIEW_RATING';throw e;}
+    const normalizedComment=sanitizeReviewComment(comment);
+    const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
+    if(role==='vendor'){const e=new Error('Vendor reviews cannot be edited.');e.code='REVIEW_EDIT_NOT_ALLOWED';throw e;}
+    if(!useDatabase){
+      const review=memory.reviews.get(String(reviewId));
+      if(!review||String(review.reviewerUserId)!==String(userId)||review.reviewType!==type){const e=new Error('Review not found.');e.code='REVIEW_NOT_FOUND';throw e;}
+      if(Date.now()-new Date(review.createdAt).getTime()>30*86400000){const e=new Error('The review can no longer be edited.');e.code='REVIEW_EDIT_WINDOW_EXPIRED';throw e;}
+      review.rating=normalizedRating;review.comment=normalizedComment;review.updatedAt=new Date().toISOString();return review;
+    }
+    const q=await pool.query('select * from reviews where id=$1 and reviewer_user_id=$2 and review_type=$3',[reviewId,userId,type]);
+    const review=q.rows[0];if(!review){const e=new Error('Review not found.');e.code='REVIEW_NOT_FOUND';throw e;}
+    if(Date.now()-new Date(review.created_at).getTime()>30*86400000){const e=new Error('The review can no longer be edited.');e.code='REVIEW_EDIT_WINDOW_EXPIRED';throw e;}
+    const updated=await pool.query('update reviews set rating=$2,comment=$3,updated_at=now() where id=$1 returning *',[reviewId,normalizedRating,normalizedComment]);
+    return mapReview(updated.rows[0]);
+  }
+
+  async function listReviews({scope,id,limit=10,offset=0}) {
+    const safeLimit=Math.max(1,Math.min(50,Number(limit)||10)),safeOffset=Math.max(0,Number(offset)||0);
+    if(!useDatabase){
+      let rows=[...memory.reviews.values()];
+      if(scope==='vehicle')rows=rows.filter(x=>String(x.vehicleId)===String(id)&&x.reviewType==='customer_to_vendor');
+      else if(scope==='vendor')rows=rows.filter(x=>String(x.vendorId)===String(id)&&x.reviewType==='customer_to_vendor');
+      else if(scope==='user')rows=rows.filter(x=>String(x.revieweeUserId)===String(id));
+      rows.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return {summary:reviewSummary(rows),reviews:rows.slice(safeOffset,safeOffset+safeLimit)};
+    }
+    let filter="r.review_type='customer_to_vendor'",params=[];
+    if(scope==='vehicle'){params=[id];filter+=' and b.vehicle_id=$1';}
+    else if(scope==='vendor'){params=[id];filter+=' and coalesce(b.vendor_id,v.owner_id)=$1';}
+    else if(scope==='user'){params=[id];filter='r.reviewee_user_id=$1';}
+    const summaryRows=await pool.query('select r.rating,count(*)::int as count from reviews r join bookings b on b.id=r.booking_id join vehicles v on v.id=b.vehicle_id where '+filter+' group by r.rating order by r.rating',params);
+    const counts={1:0,2:0,3:0,4:0,5:0};let total=0,weighted=0;
+    for(const row of summaryRows.rows){const rating=Number(row.rating),count=Number(row.count);if(counts[rating]!==undefined){counts[rating]=count;total+=count;weighted+=rating*count;}}
+    const recent=await pool.query(reviewSelect+' where '+filter+' order by r.created_at desc limit health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,createReview,getReviewStatus,updateReview,listReviews,listReviewsReceived,seedMemoryVehicles};
+}
++(params.length+1)+' offset health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+}
++(params.length+2),[...params,safeLimit,safeOffset]);
+    return {summary:{averageRating:total?Number((weighted/total).toFixed(2)):0,totalReviewCount:total,ratingDistribution:counts},reviews:recent.rows.map(mapReview)};
+  }
+
+  async function listReviewsReceived(userId,{limit=20,offset=0}={}) {
+    return listReviews({scope:'user',id:userId,limit,offset});
   }
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
