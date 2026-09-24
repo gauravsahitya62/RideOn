@@ -544,7 +544,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const shouldRefund=['paid','held','settlement_pending','settled'].includes(String(rows[0].payment_status));
       const nextPaymentStatus=nextStatus==='rejected'&&shouldRefund?'refund_pending':rows[0].payment_status;
       const cancellationReason=nextStatus==='rejected'?String(note).trim():rows[0].cancellation_reason||null;
-      const {rows:updated}=await client.query('update bookings set status=$2,payment_status=$3,cancellation_reason=$4,cancelled_at=case when $2='rejected' then now() else cancelled_at end,updated_at=now() where id=$1 returning *',[bookingId,nextStatus,nextPaymentStatus,cancellationReason]);
+      const {rows:updated}=await client.query("update bookings set status=$2,payment_status=$3,cancellation_reason=$4,cancelled_at=case when $2='rejected' then now() else cancelled_at end,updated_at=now() where id=$1 returning *",[bookingId,nextStatus,nextPaymentStatus,cancellationReason]);
       if(nextPaymentStatus==='refund_pending') {
         await client.query("update payments set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('paid','held','settlement_pending','settled')",[bookingId]);
         await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','review_required','refund_pending')",[bookingId]);
