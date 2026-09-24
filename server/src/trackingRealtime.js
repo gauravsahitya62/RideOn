@@ -35,6 +35,7 @@ export function createTrackingRealtimeServer({httpServer,authenticate,repository
       const protocols=String(req.headers['sec-websocket-protocol']||'').split(',').map(x=>x.trim());const authProtocol=protocols.find(x=>x.startsWith('rideon-auth.'));const token=authProtocol?.slice('rideon-auth.'.length)||'';
       if(!token){socket.write('HTTP/1.1 401 Unauthorized\\r\\nConnection: close\\r\\n\\r\\n');socket.destroy();return;}
       const user=await authenticate(token);if(!user){socket.write('HTTP/1.1 401 Unauthorized\\r\\nConnection: close\\r\\n\\r\\n');socket.destroy();return;}
+      if(user.role!=='customer'){socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');socket.destroy();return;}
       const tracking=await repository.getTrackingForCustomer(user.id,bookingId);if(!tracking?.session||tracking.booking.deliveryStatus!=='in_delivery'){socket.write('HTTP/1.1 409 Conflict\\r\\nConnection: close\\r\\n\\r\\n');socket.destroy();return;}
       const key=req.headers['sec-websocket-key'];if(!key){socket.destroy();return;}
       const accept=crypto.createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
