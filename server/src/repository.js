@@ -535,7 +535,7 @@ export function createRepository({ databaseUrl, fleet }) {
       }
       const nextPaymentStatus=nextStatus==='rejected'&&rows[0].payment_status==='paid'?'refund_pending':rows[0].payment_status;
       const {rows:updated}=await client.query('update bookings set status=$2,payment_status=$3,updated_at=now() where id=$1 returning *',[bookingId,nextStatus,nextPaymentStatus]);
-      if(nextPaymentStatus==='refund_pending') await client.query('update payments set status=\'refund_pending\',updated_at=now() where booking_id=$1 and status=\'paid\'',[bookingId]);
+      if(nextPaymentStatus==='refund_pending') { await client.query('update payments set status=\'refund_pending\',updated_at=now() where booking_id=$1 and status=\'paid\'',[bookingId]); await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[bookingId]); }
       if(nextStatus==='completed' && Number(rows[0].security_deposit_paise||0)>0){
         await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status)
           values($1,$2,$3,$4,$4,'release_pending')
@@ -772,6 +772,8 @@ export function createRepository({ databaseUrl, fleet }) {
       const paymentRecord = event.providerOrderId
         ? [...memory.payments.values()].find(p => p.providerOrderId === String(event.providerOrderId))
         : memory.payments.get(String(resolvedBookingId));
+      if (event.status==='paid') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='held'; }
+      if (event.status==='refund_pending') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='refund_pending'; }
       if (paymentRecord) {
         paymentRecord.status = event.status;
         paymentRecord.providerReference = event.providerReference;
@@ -810,6 +812,8 @@ export function createRepository({ databaseUrl, fleet }) {
       }
       await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[resolvedBookingId,event.status,event.providerReference]);
       await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
+      if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
+      if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[resolvedBookingId]);
       await client.query('commit');
       return { applied:true, duplicate:false };
     } catch(e) {
