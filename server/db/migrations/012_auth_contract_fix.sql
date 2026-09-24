@@ -13,13 +13,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS customers_supabase_user_id_uidx
   ON customers(supabase_user_id)
   WHERE supabase_user_id IS NOT NULL;
 
-DO $$ BEGIN
-  ALTER TABLE vendors
-    ADD CONSTRAINT vendors_owner_customer_uidx UNIQUE (owner_customer_id);
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
-END $$;
-
 CREATE INDEX IF NOT EXISTS customers_email_lower_idx
   ON customers ((lower(email)))
   WHERE email IS NOT NULL;
