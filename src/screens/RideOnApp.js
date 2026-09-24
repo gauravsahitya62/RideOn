@@ -304,6 +304,14 @@ export default function RideOnApp({ authenticatedUser, onLogout }) {
    }finally{setPaymentBusy(false);}
  };
  const retryPayment=()=>{setPaymentError('');setPaymentState(null);startPayment();};
+ useEffect(()=>{
+   if(screen!=='payment'||!selectedBooking?.id) return;
+   const subscription=AppState.addEventListener('change', state=>{
+     if(state==='active') refreshPaymentStatus();
+   });
+   return()=>subscription.remove();
+ },[screen,selectedBooking?.id]);
+
  const refreshPaymentStatus=async()=>{
    if(!selectedBooking?.id||paymentBusy)return;
    setPaymentBusy(true);setPaymentError('');
