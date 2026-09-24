@@ -329,7 +329,7 @@ const supabaseRequireAuth = async (req, res, next) => {
       const encoded = token.split('.')[1];
       untrustedPayload = encoded ? JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) : null;
     } catch {}
-    if (untrustedPayload?.iss && process.env.SUPABASE_URL && !String(untrustedPayload.iss).startsWith(String(process.env.SUPABASE_URL))) {
+    if (untrustedPayload && (!untrustedPayload.iss || (process.env.SUPABASE_URL && !String(untrustedPayload.iss).startsWith(String(process.env.SUPABASE_URL))))) {
       return auth.middleware()(req, res, next);
     }
     const user = await verifySupabaseAccessToken(token);
