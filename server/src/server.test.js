@@ -92,6 +92,16 @@ test('health endpoint reports memory storage when DATABASE_URL is absent', async
   assert.equal(payload.storage.persistent, false);
 });
 
+test('readiness endpoint distinguishes memory test mode from production dependency readiness', async () => {
+  const response=await request('/health/ready');
+  const payload=await response.json();
+  assert.equal(response.status,200);
+  assert.equal(payload.status,'ready');
+  assert.equal(payload.checks.database,true);
+  assert.equal(payload.checks.auth,true);
+});
+
+
 test('vehicle list preserves existing aliases and search contract', async () => {
   const response = await request('/api/v1/vehicles?q=CRETA');
   const payload = await response.json();
