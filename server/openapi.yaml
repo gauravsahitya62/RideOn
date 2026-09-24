@@ -8,6 +8,50 @@ servers:
 paths:
   /health:
     get:
+      summary: API liveness
+      responses:
+        '200':
+          description: API process is alive
+  /health/ready:
+    get:
+      summary: Production readiness
+      responses:
+        '200':
+          description: Critical production dependencies are ready
+        '503':
+          description: One or more critical dependencies are not ready
+  /api/v1/admin/metrics:
+    get:
+      summary: Server-side operational metrics
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Aggregated operational metrics
+        '403':
+          description: Admin access required
+  /api/v1/admin/reconciliation:
+    get:
+      summary: Read-only financial reconciliation
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Reconciliation findings
+        '403':
+          description: Admin access required
+  /api/v1/admin/operational-alerts:
+    get:
+      summary: Operational attention items
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Operational alerts
+        '403':
+          description: Admin access required
+  /health:
+    get:
       summary: API health check
       responses:
         '200':
