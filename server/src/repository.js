@@ -161,31 +161,34 @@ export function createRepository({ databaseUrl, fleet }) {
       }
     }
 
-    // Optional fields are enriched only after the core inventory query has
-    // succeeded. If this metadata is missing in production, the vehicle still
-    // remains visible to customers.
-    let optionalById = new Map();
+    // Enrich active vehicles with vendor service-location data. Missing location
+    // must never hide a valid vehicle from the marketplace.
+    let vendorByVehicleId = new Map();
     try {
       const ids = rows.map(row => String(row.id)).filter(Boolean);
       if (ids.length) {
         const optional = await pool.query(
-          `select id, description, image_urls, delivery_available, owner_id
-           from vehicles where id::text = any($1::text[])`,
+          `select ve.id, ve.owner_id, v.id as vendor_id, v.business_name, v.service_city,
+                  v.service_address, v.service_latitude, v.service_longitude
+           from vehicles ve
+           left join vendors v on v.id=ve.owner_id
+           where ve.id::text = any($1::text[])`,
           [ids]
         );
-        optionalById = new Map(optional.rows.map(row => [String(row.id), row]));
+        vendorByVehicleId = new Map(optional.rows.map(row => [String(row.id), row]));
       }
-    } catch (optionalError) {
+    } catch (vendorError) {
       console.warn(JSON.stringify({
-        level: 'warn',
-        event: 'vehicle_optional_metadata_unavailable',
-        message: optionalError?.message || 'Optional vehicle metadata query failed',
-        code: optionalError?.code || null,
+        level:'warn',
+        event:'vehicle_vendor_location_unavailable',
+        message:vendorError?.message || 'Vendor location enrichment failed',
+        code:vendorError?.code || null,
       }));
     }
 
     return rows.map((row) => {
       const extra = optionalById.get(String(row.id)) || {};
+      const vendor = vendorByVehicleId.get(String(row.id)) || {};
       return {
         id: String(row.id),
         type: String(row.type),
@@ -201,6 +204,14 @@ export function createRepository({ databaseUrl, fleet }) {
         imageUrls: Array.isArray(extra.image_urls) ? extra.image_urls : [],
         deliveryAvailable: extra.delivery_available !== false,
         ownerId: extra.owner_id ? String(extra.owner_id) : null,
+        vendorId: vendor.vendor_id ? String(vendor.vendor_id) : null,
+        vendorName: vendor.business_name || null,
+        vendorServiceLocation: vendor.service_latitude != null && vendor.service_longitude != null ? {
+          latitude:Number(vendor.service_latitude),
+          longitude:Number(vendor.service_longitude),
+          address:vendor.service_address || null,
+          city:vendor.service_city || row.city || null,
+        } : null,
         seats: row.seats == null ? null : Number(row.seats),
         transmission: row.transmission || null,
         fuel: row.fuel || null,
