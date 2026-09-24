@@ -17,7 +17,8 @@
     "react-native": "0.86.3",
     "expo-asset": "~57.0.18",
     "expo-constants": "~57.0.19",
-    "react-native-safe-area-context": "~5.6.0"
+    "react-native-safe-area-context": "~5.6.0",
+    "expo-image-picker": "~17.0.7"
   },
   "devDependencies": {}
 }
