@@ -822,6 +822,7 @@ const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeader
 app.post('/api/v1/vendor/bookings/:id/delivery/start', supabaseRequireAuth, requireVendor, async (req,res)=>{
   try{
     const session=await repository.startDelivery(req.vendor.id,req.params.id);
+    void observability.track({name:'delivery_started',eventKey:`delivery_started:${req.params.id}`,actorUserId:req.vendor.id,bookingId:req.params.id});
     void notifications.notifyBooking({bookingId:req.params.id,type:'delivery_started',title:'Delivery started',body:'Your vehicle delivery has started. Live tracking is now active.',audience:'customer',dedupeKey:`delivery_started:${req.params.id}`});
     void notifications.notifyBooking({bookingId:req.params.id,type:'vehicle_in_delivery',title:'Vehicle is on the way',body:'Your RideOn vehicle is now in delivery.',audience:'customer',dedupeKey:`vehicle_in_delivery:${req.params.id}`});
     res.json({tracking:{session,status:'in_delivery',active:true}});
@@ -869,6 +870,7 @@ app.post('/api/v1/vendor/bookings/:id/delivery/complete', supabaseRequireAuth, r
   if(!parsed.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'The final delivery location is invalid.'}});
   try{
     const result=await repository.completeDelivery(req.vendor.id,req.params.id,parsed.data);
+    void observability.track({name:'delivery_completed',eventKey:`delivery_completed:${req.params.id}`,actorUserId:req.vendor.id,bookingId:req.params.id});
     trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
     void notifications.notifyBooking({bookingId:req.params.id,type:'vehicle_delivered',title:'Vehicle delivered',body:'Your RideOn vehicle has been delivered.',audience:'customer',dedupeKey:`vehicle_delivered:${req.params.id}`});
     res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
@@ -889,6 +891,7 @@ app.post('/api/v1/vendor/bookings/:id/security-deposit/inspection', supabaseRequ
   if(!parsed.success)return res.status(400).json({error:{code:'INVALID_SECURITY_DEPOSIT_INSPECTION',message:'Please provide valid deposit inspection details.'}});
   try{
     const result=await repository.recordSecurityDepositInspection(req.vendor.id,req.params.id,parsed.data);
+    void observability.track({name:`security_deposit_${result.deposit?.status||'updated'}`,eventKey:`security_deposit:${req.params.id}:${result.deposit?.status||'updated'}`,actorUserId:req.vendor.id,bookingId:req.params.id,properties:{status:result.deposit?.status||'updated'}});
     const deposit=result.deposit;
     if(deposit?.status==='refund_pending'){
       void notifications.notifyBooking({bookingId:req.params.id,type:'refund_initiated',title:'Security deposit refund initiated',body:'Your security deposit is awaiting refund processing.',audience:'customer',dedupeKey:`security_deposit_refund_pending:${req.params.id}`});
@@ -1472,6 +1475,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       }
       const paymentReference = `rideon_${booking.id}`;
       const paymentRequest=await payments.createCustomerPayment({ orderId:paymentReference, amountPaise });
+      void observability.track({name:'payment_creation_requested',eventKey:`payment_creation:${booking.id}:${req.get('Idempotency-Key')||'default'}`,actorUserId:req.user.id,bookingId:booking.id});
       const result=await repository.createOrGetPaymentOrder({
         bookingId:booking.id,
         customerId:req.user.id,
@@ -1516,6 +1520,7 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, as
     if(!providerReference) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The payment is awaiting an authoritative provider reference.'}});
     const applied=await repository.applyPaymentEvent({eventId:`verify:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'paid'});
     if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
+    void observability.track({name:'payment_verified',eventKey:`payment_verified:${payment.id}:${providerReference}`,actorUserId:req.user.id,bookingId:payment.bookingId});
     const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
     const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
     void notifications.notifyBooking({bookingId:payment.bookingId,type:'payment_success',title:'Payment confirmed',body:'Your RideOn payment has been verified.',audience:'customer',dedupeKey:`payment_verified:${payment.id}:${providerReference}`});
@@ -1575,10 +1580,7 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
 
 app.use((req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found', requestId:req.requestId } }));
 app.use((err, req, res, _next) => {
-  console.error(JSON.stringify({
-    level:'error', event:'api_error', requestId:req.requestId, timestamp:new Date().toISOString(),
-    method:req.method, route:req.path, status:500, code:err?.code || 'INTERNAL_ERROR', userId:req.user?.id || undefined,
-  }));
+  observability.log('error','api_error',{requestId:req.requestId,method:req.method,route:req.path,status:500,category:err?.code||'INTERNAL_ERROR',userId:req.user?.id||undefined});
   if (err.code === 'CUSTOMER_EXISTS') return res.status(409).json({ error: { code: err.code, message: 'A customer with those credentials already exists.' } });
   if (err.code === 'INVALID_CREDENTIALS') return res.status(401).json({ error: { code: err.code, message: 'Phone or password is incorrect.' } });
   if (err.code === 'PAYMENT_PROVIDER_UNSUPPORTED') return res.status(500).json({ error: { code: err.code, message: 'Unsupported payment provider configuration.' } });
