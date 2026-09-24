@@ -56,6 +56,13 @@ export function createRepository({ databaseUrl, fleet }) {
       securityDepositInspectedAt:iso(row.security_deposit_inspected_at),
       securityDepositInspectedBy:row.security_deposit_inspected_by ? String(row.security_deposit_inspected_by) : undefined,
       rejectionReason:row.cancellation_reason && row.status==='rejected' ? row.cancellation_reason : undefined,
+      deliveryLatitude:row.delivery_latitude == null ? null : Number(row.delivery_latitude),
+      deliveryLongitude:row.delivery_longitude == null ? null : Number(row.delivery_longitude),
+      vendorServiceLatitude:row.vendor_service_latitude == null ? null : Number(row.vendor_service_latitude),
+      vendorServiceLongitude:row.vendor_service_longitude == null ? null : Number(row.vendor_service_longitude),
+      routeDistanceMeters:row.route_distance_meters == null ? null : Number(row.route_distance_meters),
+      routeDurationSeconds:row.route_duration_seconds == null ? null : Number(row.route_duration_seconds),
+      routeProvider:row.route_provider || undefined,
       createdAt:iso(row.created_at ?? row.createdAt),
       updatedAt:iso(row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt)
     };
@@ -887,6 +894,31 @@ export function createRepository({ databaseUrl, fleet }) {
     if(Number(input.pricing.securityDeposit||0)>0) memory.securityDeposits.set(id,{bookingId:id,customerId:input.customerId,vendorId:input.vehicle.ownerId||null,originalAmount:Number(input.pricing.securityDeposit),refundableAmount:Number(input.pricing.securityDeposit),approvedDeduction:0,status:'pending'});memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
   }
 
+  async function updateBookingRouteData(id, customerId, route = {}) {
+    const distanceMeters = Number(route.distanceMeters);
+    const durationSeconds = Number(route.durationSeconds);
+    if(!Number.isFinite(distanceMeters) || distanceMeters < 0 || !Number.isFinite(durationSeconds) || durationSeconds < 0){
+      const e=new Error('Invalid route data.'); e.code='ROUTE_INVALID_DATA'; throw e;
+    }
+    if(!useDatabase){
+      const booking=memory.bookings.get(id);
+      if(!booking || String(booking.customerId)!==String(customerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      booking.routeDistanceMeters=Math.round(distanceMeters);
+      booking.routeDurationSeconds=Math.round(durationSeconds);
+      booking.routeProvider=String(route.provider||'').slice(0,40)||null;
+      booking.updatedAt=new Date().toISOString();
+      return booking;
+    }
+    const {rows}=await pool.query(
+      `update bookings
+       set route_distance_meters=$3, route_duration_seconds=$4, route_provider=$5, updated_at=now()
+       where id=$1 and customer_id=$2
+       returning *`,
+      [id,customerId,Math.round(distanceMeters),Math.round(durationSeconds),String(route.provider||'').slice(0,40)||null]
+    );
+    return rows[0] ? mapBooking(rows[0]) : null;
+  }
+
   async function getBooking(id, customerId = null){
     if(!useDatabase){
       const booking=memory.bookings.get(id);
@@ -1327,5 +1359,5 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles};
 }
