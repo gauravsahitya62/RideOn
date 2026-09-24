@@ -729,6 +729,21 @@ test('real production provider without verified UPI integration fails closed', a
   await assert.rejects(() => service.createCustomerPayment({orderId:'rideon-test',amountPaise:10000}),(error)=>error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED');
 });
 
+test('unconfigured provider exposes no customer UPI methods and fails closed', async () => {
+  const service = createPaymentService({ provider:'unconfigured' });
+  assert.equal(service.configured,false);
+  assert.equal(service.capabilities.supportsIntent,false);
+  assert.equal(service.capabilities.supportsVpa,false);
+  assert.deepEqual(service.capabilities.apps,[]);
+  await assert.rejects(() => service.createCustomerPayment({orderId:'rideon-test',amountPaise:10000}), error => error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
+});
+
+test('mock provider never reports authoritative payment success', async () => {
+  const service = createPaymentService({ provider:'mock' });
+  const verification = await service.verifyPayment({providerOrderId:'order-1',providerPaymentId:'pay-1',amountPaise:10000});
+  assert.equal(verification.verified,false);
+});
+
 test('payment capability model is UPI-first and provider-agnostic', () => {
   const service = createPaymentService({ provider:'mock', webhookSecret:'mock-secret' });
   assert.equal(service.capabilities.method,'upi');
