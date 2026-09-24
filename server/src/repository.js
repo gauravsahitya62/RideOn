@@ -763,6 +763,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
       if (event.providerOrderId && payment.providerOrderId !== String(event.providerOrderId)) return { applied:false, duplicate:false, invalid:true };
       const expectedPaise = Math.round(Number(booking.pricing?.total || 0) * 100);
+      if (event.status==='paid' && !['requested','confirmed'].includes(String(booking.status))) return { applied:false, duplicate:false, invalid:true };
       if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedPaise || !event.providerReference || !canTransition(booking.paymentStatus || 'unpaid', event.status)) {
         return { applied:false, duplicate:false, invalid:true };
       }
@@ -774,6 +775,7 @@ export function createRepository({ databaseUrl, fleet }) {
         : memory.payments.get(String(resolvedBookingId));
       if (event.status==='paid') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='held'; }
       if (event.status==='refund_pending') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='refund_pending'; }
+      if (event.status==='refunded') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) { deposit.status='refunded'; deposit.refundProviderReference=event.providerReference; } }
       if (paymentRecord) {
         paymentRecord.status = event.status;
         paymentRecord.providerReference = event.providerReference;
@@ -801,6 +803,7 @@ export function createRepository({ databaseUrl, fleet }) {
         return { applied:false, duplicate:false, invalid:true };
       }
       const booking = bookingResult.rows[0];
+      if (event.status==='paid' && !['requested','confirmed'].includes(String(booking.status))) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
       if (event.currency !== 'INR' || Number(event.amountPaise) !== Number(booking.total_paise) || Number(event.amountPaise) !== Number(payment.amount_paise) || !event.providerReference || !canTransition(booking.payment_status, event.status)) {
         await client.query('rollback');
         return { applied:false, duplicate:false, invalid:true };
@@ -814,6 +817,7 @@ export function createRepository({ databaseUrl, fleet }) {
       await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
       if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
       if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[resolvedBookingId]);
+      if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id=$1 and status in ('held','refund_pending','release_pending')",[resolvedBookingId,event.providerReference]);
       await client.query('commit');
       return { applied:true, duplicate:false };
     } catch(e) {
