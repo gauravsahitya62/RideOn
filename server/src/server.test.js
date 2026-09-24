@@ -664,6 +664,24 @@ test('payment creation rejects anonymous callers', async () => {
 });
 
 
+test('refund requests are server-side idempotent', async () => {
+  const user = await register('+911234567921', 'Refund Idempotency User');
+  const login = await legacyLogin('+911234567921');
+  const created = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',startAt:'2038-01-10T10:00:00.000Z',endAt:'2038-01-11T10:00:00.000Z',
+    delivery:false,address:'18 Refund Road, Jaipur',
+  },login.accessToken,{ 'Idempotency-Key':'refund-idempotency-booking' });
+  const booking=(await created.json()).booking;
+  const amountPaise=Math.round(booking.pricing.total*100);
+  await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:user.customer.id,provider:'mock',amountPaise,currency:'INR',providerOrder:{id:'refund-order-'+booking.bookingId,amountPaise,currency:'INR'}});
+  await repository.applyPaymentEvent({eventId:'refund-paid-'+booking.bookingId,bookingId:booking.bookingId,providerReference:'refund-paid-ref-'+booking.bookingId,providerOrderId:'refund-order-'+booking.bookingId,amountPaise,currency:'INR',status:'paid'});
+  const first=await repository.claimRefundRequest((await repository.findPaymentByBooking(booking.bookingId)).id);
+  const second=await repository.claimRefundRequest((await repository.findPaymentByBooking(booking.bookingId)).id);
+  assert.equal(first.created,true);
+  assert.equal(second.created,false);
+  assert.equal(second.idempotencyKey,first.idempotencyKey);
+});
+
 test('payment provider state machine blocks client-side paid transitions', () => {
   const service = createPaymentService({ provider:'mock', webhookSecret:'mock-secret' });
   assert.equal(service.canTransition('pending','paid'), true);
