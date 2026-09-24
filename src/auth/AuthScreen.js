@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
-import { SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import React, { useRef, useState } from 'react';
+import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { authService, normalizeAuthError } from './authService';
 
 const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',line:'#E8EAF0',white:'#FFFFFF'};
 
-const Field=({label,value,onChangeText,placeholder,keyboardType})=>
+const Field=({label,value,onChangeText,placeholder,keyboardType,onFocus,returnKeyType,onSubmitEditing})=>
   <View style={s.fieldWrap}>
     <Text style={s.label}>{label}</Text>
     <TextInput
@@ -16,6 +17,9 @@ const Field=({label,value,onChangeText,placeholder,keyboardType})=>
       placeholder={placeholder}
       placeholderTextColor="#A0A7B1"
       style={s.field}
+      onFocus={onFocus}
+      returnKeyType={returnKeyType}
+      onSubmitEditing={onSubmitEditing}
     />
   </View>;
 
@@ -29,6 +33,18 @@ export default function AuthScreen({onAuthenticated}) {
   const [otpSent,setOtpSent]=useState(false);
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
+  const scrollRef=useRef(null);
+  const nameRef=useRef(null);
+  const phoneRef=useRef(null);
+  const emailRef=useRef(null);
+  const otpRef=useRef(null);
+
+  const focusField=(ref)=>{
+    requestAnimationFrame(()=>{
+      ref.current?.focus?.();
+      setTimeout(()=>scrollRef.current?.scrollToEnd?.({animated:true}),120);
+    });
+  };
 
   const sendOtp=async()=>{
     const e=email.trim().toLowerCase();
@@ -72,8 +88,22 @@ export default function AuthScreen({onAuthenticated}) {
     finally{setBusy(false);}
   };
 
-  return <SafeAreaView style={s.safe}>
-    <ScrollView contentContainerStyle={s.page} keyboardShouldPersistTaps="handled">
+  return <SafeAreaView style={s.safe} edges={['top','bottom']}>
+    <KeyboardAvoidingView
+      style={s.keyboard}
+      behavior={Platform.OS==='ios'?'padding':undefined}
+      keyboardVerticalOffset={Platform.OS==='ios'?12:0}
+    >
+    <ScrollView
+      ref={scrollRef}
+      contentContainerStyle={s.page}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode="interactive"
+      automaticallyAdjustKeyboardInsets
+      showsVerticalScrollIndicator={false}
+      scrollEventThrottle={16}
+      onContentSizeChange={()=>{ if(otpSent && otp) return; }}
+    >
       <Text style={s.brand}>ride<Text style={{color:C.orange}}>.on</Text></Text>
       <Text style={s.kicker}>SECURE ACCESS</Text>
       <Text style={s.title}>{otpSent?'Verify your email':'Welcome to RideOn'}</Text>
@@ -101,16 +131,16 @@ export default function AuthScreen({onAuthenticated}) {
               <Text style={[s.tabText,accountType==='vendor'&&s.tabTextActive]}>Vendor</Text>
             </TouchableOpacity>
           </View>
-          <Field label="FULL NAME" value={name} onChangeText={setName} placeholder="Your full name"/>
-          <Field label="PHONE NUMBER" value={phone} onChangeText={setPhone} placeholder="+91 9876543210" keyboardType="phone-pad"/>
+          <Field ref={nameRef} label="FULL NAME" value={name} onChangeText={setName} placeholder="Your full name" onFocus={()=>focusField(nameRef)} returnKeyType="next" onSubmitEditing={()=>focusField(phoneRef)}/>
+          <Field ref={phoneRef} label="PHONE NUMBER" value={phone} onChangeText={setPhone} placeholder="+91 9876543210" keyboardType="phone-pad" onFocus={()=>focusField(phoneRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>
         </>}
 
-        <Field label="EMAIL ADDRESS" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address"/>
+        <Field ref={emailRef} label="EMAIL ADDRESS" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" onFocus={()=>focusField(emailRef)} returnKeyType="done"/>
         <TouchableOpacity disabled={busy} onPress={sendOtp} style={[s.button,busy&&s.disabled]}>
           <Text style={s.buttonText}>{busy?'Sending…':'Send verification code'}</Text>
         </TouchableOpacity>
       </> : <>
-        <Field label="VERIFICATION CODE" value={otp} onChangeText={v=>setOtp(v.replace(/\D/g,'').slice(0,6))} placeholder="123456" keyboardType="number-pad"/>
+        <Field ref={otpRef} label="VERIFICATION CODE" value={otp} onChangeText={v=>setOtp(v.replace(/\D/g,'').slice(0,6))} placeholder="123456" keyboardType="number-pad" onFocus={()=>focusField(otpRef)} returnKeyType="done"/>
         <TouchableOpacity disabled={busy} onPress={verifyOtp} style={[s.button,busy&&s.disabled]}>
           <Text style={s.buttonText}>{busy?'Verifying…':'Verify & continue'}</Text>
         </TouchableOpacity>
@@ -122,11 +152,13 @@ export default function AuthScreen({onAuthenticated}) {
       {!!error&&<View style={s.error}><Text style={s.errorText}>{error}</Text></View>}
       <Text style={s.note}>Authentication is handled by Supabase. RideOn stores only the session token required for authenticated API access.</Text>
     </ScrollView>
+    </KeyboardAvoidingView>
   </SafeAreaView>
 }
 
 const s=StyleSheet.create({
   safe:{flex:1,backgroundColor:C.bg},
+  keyboard:{flex:1},
   page:{padding:22,paddingTop:46,paddingBottom:40},
   brand:{fontSize:34,fontWeight:'900',letterSpacing:-1.8,color:C.ink},
   kicker:{fontSize:10,fontWeight:'900',letterSpacing:2,color:C.muted,marginTop:7},
@@ -141,7 +173,7 @@ const s=StyleSheet.create({
   sectionTitle:{fontSize:11,fontWeight:'900',letterSpacing:1,color:'#596371',marginBottom:9},
   fieldWrap:{marginBottom:15},
   label:{fontSize:11,fontWeight:'900',letterSpacing:.6,color:'#596371',marginBottom:8},
-  field:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:14,paddingHorizontal:14,paddingVertical:14,fontSize:14,color:C.ink},
+  field:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:14,paddingHorizontal:14,paddingVertical:14,fontSize:16,lineHeight:22,color:C.ink,minHeight:54},
   button:{backgroundColor:C.orange,paddingVertical:15,borderRadius:15,alignItems:'center',marginTop:2},
   buttonText:{color:C.white,fontSize:14,fontWeight:'900'},
   change:{color:C.orange,fontSize:12,fontWeight:'800',textAlign:'center',marginTop:18},
