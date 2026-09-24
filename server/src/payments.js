@@ -39,14 +39,14 @@ export function createPaymentService({
     error.code = 'PAYMENT_PROVIDER_UNSUPPORTED';
     throw error;
   }
-  const providerConfigured = Boolean((selectedProvider==='paytm' && merchantId && clientId && clientSecret && website && callbackUrl) || selectedProvider==='mock');
-  const upiCapabilities = {
-    method:'upi',
-    apps:DEFAULT_UPI_APPS,
-    supportsIntent:selectedProvider==='mock' ? true : false,
-    supportsVpa:selectedProvider==='mock' ? true : false,
-    provider:selectedProvider,
-  };
+  const providerConfigured = selectedProvider === 'mock'
+    ? true
+    : selectedProvider === 'paytm'
+      ? Boolean(merchantId && clientId && clientSecret && website && callbackUrl)
+      : false;
+  const upiCapabilities = selectedProvider === 'mock'
+    ? { method:'upi', apps:DEFAULT_UPI_APPS, supportsIntent:true, supportsVpa:true, supportsHostedCheckout:true, provider:selectedProvider }
+    : { method:'upi', apps:[], supportsIntent:false, supportsVpa:false, supportsHostedCheckout:false, provider:selectedProvider };
 
   function verifyWebhook(body, signature) {
     if (!['paytm','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
@@ -75,17 +75,28 @@ export function createPaymentService({
     if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0) {
       const error = new Error('Invalid payment amount.'); error.code = 'PAYMENT_CREATION_FAILED'; throw error;
     }
-    if (selectedProvider === 'mock') return { provider:'mock', status:'pending', providerOrderId:String(orderId), paymentUrl:`https://paytm.test/checkout/${encodeURIComponent(String(orderId))}`, amountPaise:Number(amountPaise), currency:'INR', upi:upiCapabilities };
-    if (!providerConfigured) { const error = new Error('Payment provider is not configured.'); error.code='PAYMENT_NOT_CONFIGURED'; throw error; }
-    if (selectedProvider !== 'mock') { const error = new Error('Configured provider does not yet expose a verified UPI checkout implementation.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
-    const error = new Error('Verified Paytm checkout integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error;
+    if (selectedProvider === 'mock') return { provider:'mock', status:'pending', providerOrderId:String(orderId), paymentUrl:null, amountPaise:Number(amountPaise), currency:'INR', upi:upiCapabilities };
+    if (!providerConfigured) { const error = new Error('Payment provider is not configured.'); error.code='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'; throw error; }
+    const error = new Error('A verified payment-provider UPI checkout implementation is required before live checkout can be enabled.');
+    error.code='UPI_PROVIDER_INTEGRATION_REQUIRED';
+    throw error;
   }
 
-  async function verifyPayment({ providerReference } = {}) { if (selectedProvider === 'mock') return { verified:true, providerReference:providerReference ? String(providerReference) : undefined }; const error=new Error('Verified Paytm payment-status integration is not configured for this merchant.'); error.code='PAYTM_ONBOARDING_REQUIRED'; throw error; }
-  async function refundPayment({ paymentId, amountPaise, providerOrderId, idempotencyKey } = {}) { if (selectedProvider === 'mock') return { accepted:true, confirmed:false, providerReference:undefined, paymentId, amountPaise, providerOrderId, idempotencyKey }; const error=new Error('Verified refund integration is not configured for this provider.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
-  async function createVendorSettlement() { if (selectedProvider === 'mock') return { accepted:true, confirmed:false }; const error=new Error('Verified vendor settlement integration is not configured for this provider.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
-  async function getSettlementStatus() { if (selectedProvider === 'mock') return { status:'processing' }; const error=new Error('Verified settlement-status integration is not configured for this provider.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
-  async function reconcileTransaction() { if (selectedProvider === 'mock') return { reconciled:true }; const error=new Error('Verified transaction reconciliation integration is not configured for this provider.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
+  async function verifyPayment({ providerPaymentId, providerOrderId, providerReference, amountPaise } = {}) {
+    if (selectedProvider === 'mock') return { verified:false, providerReference:undefined };
+    if (!providerConfigured) { const error=new Error('Payment provider is not configured.'); error.code='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'; throw error; }
+    const error=new Error('A verified payment-provider status lookup is required before a payment can be marked paid.');
+    error.code='UPI_PROVIDER_INTEGRATION_REQUIRED';
+    throw error;
+  }
+  async function refundPayment({ paymentId, amountPaise, providerOrderId, idempotencyKey } = {}) {
+    if (selectedProvider === 'mock') return { accepted:true, confirmed:false, providerReference:undefined, paymentId, amountPaise, providerOrderId, idempotencyKey };
+    if (!providerConfigured) { const error=new Error('Payment provider is not configured.'); error.code='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'; throw error; }
+    const error=new Error('A verified payment-provider refund integration is required before refunds can complete.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error;
+  }
+  async function createVendorSettlement() { if (selectedProvider === 'mock') return { accepted:true, confirmed:false }; const error=new Error('A verified vendor settlement integration is required before settlement can complete.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
+  async function getSettlementStatus() { if (selectedProvider === 'mock') return { status:'processing' }; const error=new Error('A verified settlement-status integration is required before settlement can be reconciled.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
+  async function reconcileTransaction() { if (selectedProvider === 'mock') return { reconciled:true }; const error=new Error('A verified transaction reconciliation integration is required before live reconciliation can run.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
 
   return { provider:selectedProvider, name:selectedProvider, configured:providerConfigured, capabilities:upiCapabilities, verifyWebhook, parseWebhook, canTransition, createCustomerPayment, verifyPayment, refundPayment, createVendorSettlement, getSettlementStatus, reconcileTransaction };
 }
