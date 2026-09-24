@@ -294,6 +294,7 @@ async function requestRefundForBooking(bookingId) {
     const providerResult=await payments.refundPayment({paymentId:payment.id,amountPaise:payment.amountPaise,providerOrderId:payment.providerOrderId,idempotencyKey:claim.idempotencyKey});
     if(providerResult?.confirmed && providerResult?.providerReference){
       const refunded=await repository.completePaymentRefund({paymentId:payment.id,providerReference:providerResult.providerReference});
+      void observability.track({name:'refund_completed',eventKey:`refund:${payment.id}:${providerResult.providerReference}`,bookingId:bookingId,properties:{status:'refunded'}});
       return {status:'refunded',payment:refunded,idempotencyKey:claim.idempotencyKey};
     }
     return {status:'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
@@ -1235,6 +1236,7 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
       });
       if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
     }
+    void observability.track({name:'registration_completed',eventKey:`registration:${customer.id}`,actorUserId:customer.id,properties:{role:customer.role}});
     return res.json({user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},customer,vendor});
   }catch(error){
     observability.log('error','registration_completion_failed',{requestId:req.requestId,code:error?.code||'REGISTRATION_COMPLETION_FAILED'});
@@ -1430,6 +1432,7 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
     const latest=await repository.getBooking(req.params.id,req.user.id);
     void notifications.notifyBooking({bookingId:req.params.id,type:'booking_cancelled',title:'Booking cancelled',body:'Your RideOn booking has been cancelled.',audience:'customer',dedupeKey:`booking_cancelled:${req.params.id}:customer`});
     void notifications.notifyBooking({bookingId:req.params.id,type:'booking_cancelled',title:'Booking cancelled',body:'A customer cancelled a RideOn booking.',audience:'vendor',dedupeKey:`booking_cancelled:${req.params.id}:vendor`});
+    void observability.track({name:'booking_cancelled',eventKey:`booking_cancelled:${req.params.id}`,actorUserId:req.user.id,bookingId:req.params.id,properties:{refundAmount:result.calculation.totalRefund>0}});
     if(result.calculation.totalRefund>0) void notifications.notifyBooking({bookingId:req.params.id,type:'refund_initiated',title:'Refund initiated',body:'Your RideOn refund has been initiated.',audience:'customer',dedupeKey:`refund_initiated:${req.params.id}`});
     res.json({data:publicBooking(latest||result.booking),booking:publicBooking(latest||result.booking),cancellation:result.calculation,refund});
   } catch(error) {
