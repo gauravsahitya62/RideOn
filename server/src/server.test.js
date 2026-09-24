@@ -967,6 +967,13 @@ test('reviews enforce completed booking ownership, duplicate prevention, and ser
   assert.equal(historyPayload.summary.totalReviewCount,1);
   assert.equal(historyPayload.reviews[0].rating,4);
 
+  const vendorEdit=await jsonRequest('/api/v1/reviews/'+historyPayload.reviews[0].id,'PATCH',{rating:2},vendorToken);
+  assert.equal(vendorEdit.status,403);
+  assert.equal((await vendorEdit.json()).error.code,'FORBIDDEN');
+
+  const longComment=await jsonRequest('/api/v1/bookings/'+booking.bookingId+'/reviews/customer','POST',{rating:3,comment:'x'.repeat(1001)},customerLogin.accessToken);
+  assert.equal(longComment.status,400);
+
   const edited=await jsonRequest('/api/v1/reviews/'+statusPayload.data.review.id,'PATCH',{rating:3,comment:'Updated after thinking it over.'},customerLogin.accessToken);
   assert.equal(edited.status,200);
   assert.equal((await edited.json()).review.rating,3);
