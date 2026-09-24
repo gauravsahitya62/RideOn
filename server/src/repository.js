@@ -1529,7 +1529,7 @@ export function createRepository({ databaseUrl, fleet }) {
         if(!vendorOwnerId){const e=new Error('Vendor review target is unavailable.');e.code='REVIEW_TARGET_UNAVAILABLE';throw e;}
         reviewType='customer_to_vendor';revieweeId=String(vendorOwnerId);
       }else if(reviewerRole==='vendor'){
-        if(!booking.vendorId||String(booking.vendorId)!==String(vendor?.id||booking.vendorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+        if(!vendor||String(vendor.ownerCustomerId||vendor.owner_customer_id)!==String(reviewerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
         reviewType='vendor_to_customer';revieweeId=String(booking.customerId);
       }else{const e=new Error('Invalid reviewer role.');e.code='FORBIDDEN';throw e;}
       const duplicate=[...memory.reviews.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.reviewerUserId)===String(reviewerId)&&x.reviewType===reviewType);
@@ -1567,7 +1567,8 @@ export function createRepository({ databaseUrl, fleet }) {
   async function getReviewStatus({bookingId,userId,role}) {
     if(!useDatabase){
       const b=memory.bookings.get(String(bookingId));
-      if(!b||(role==='customer'&&String(b.customerId)!==String(userId))||(role==='vendor'&&String(b.vendorId)!==String(userId))){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const vendor=role==='vendor' ? [...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(b?.vendorId)) : null;
+      if(!b||(role==='customer'&&String(b.customerId)!==String(userId))||(role==='vendor'&&(!vendor||String(vendor.ownerCustomerId||vendor.owner_customer_id)!==String(userId)))){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
       const own=[...memory.reviews.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.reviewerUserId)===String(userId)&&x.reviewType===type);
       return {eligible:b.status==='completed',review:own||null,reviewType:type};
