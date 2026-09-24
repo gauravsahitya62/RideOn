@@ -89,7 +89,6 @@ paths:
         '200': { description: Booking cancelled }
         '404': { description: Booking not found }
         '409': { description: Booking cannot be cancelled }
-paths:
   /api/v1/notifications:
     get:
       summary: List authenticated user's notifications
