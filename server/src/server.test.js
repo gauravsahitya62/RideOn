@@ -898,6 +898,81 @@ test('request correlation is returned on a 404 response', async () => {
   assert.equal(payload.error.requestId,'rideon-test-123');
 });
 
+
+test('reviews enforce completed booking ownership, duplicate prevention, and server aggregation', async () => {
+  const customer=await register('+911234567941','Reviews Customer');
+  const customerLogin=await legacyLogin('+911234567941');
+  const other=await register('+911234567942','Other Customer');
+  const otherLogin=await legacyLogin('+911234567942');
+  const vendorCustomer=await register('+911234567943','Reviews Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Reviews Car',make:'RideOn',model:'R1',year:2035,city:'Jaipur',dailyRate:1500,securityDeposit:0,transmission:'Automatic',fuel:'Petrol',seats:5,registrationNumber:'RJ14REV941',description:'Reviews test vehicle',imageUrls:[],deliveryAvailable:false,active:true});
+  const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2042-01-10T10:00:00.000Z',endAt:'2042-01-11T10:00:00.000Z',delivery:false,address:'1 Reviews Road, Jaipur'},customerLogin.accessToken,{'Idempotency-Key':'reviews-booking-941'});
+  assert.equal(created.status,201);
+  const booking=(await created.json()).booking;
+  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+
+  const beforeComplete=await jsonRequest('/api/v1/bookings/'+booking.bookingId+'/reviews/customer','POST',{rating:5,comment:'Too early'},customerLogin.accessToken);
+  assert.equal(beforeComplete.status,409);
+  assert.equal((await beforeComplete.json()).error.code,'REVIEW_NOT_ELIGIBLE');
+
+  const payment=await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'review-order-'+booking.bookingId,amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
+  await repository.applyPaymentEvent({eventId:'review-paid-'+booking.bookingId,bookingId:booking.bookingId,providerReference:'review-paid-ref-'+booking.bookingId,providerOrderId:payment.payment.providerOrderId,amountPaise:payment.payment.amountPaise,currency:'INR',status:'paid'});
+  await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'confirmed');
+  await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'in_progress');
+  await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'completed');
+
+  const invalid=await jsonRequest('/api/v1/bookings/'+booking.bookingId+'/reviews/customer','POST',{rating:6},customerLogin.accessToken);
+  assert.equal(invalid.status,400);
+  assert.equal((await invalid.json()).error.code,'INVALID_REVIEW');
+
+  const foreign=await jsonRequest('/api/v1/bookings/'+booking.bookingId+'/reviews/customer','POST',{rating:5},otherLogin.accessToken);
+  assert.equal(foreign.status,404);
+
+  const customerReview=await jsonRequest('/api/v1/bookings/'+booking.bookingId+'/reviews/customer','POST',{rating:5,comment:'Excellent vehicle and smooth rental.'},customerLogin.accessToken);
+  assert.equal(customerReview.status,201);
+  assert.equal((await customerReview.json()).review.rating,5);
+
+  const duplicate=await jsonRequest('/api/v1/bookings/'+booking.bookingId+'/reviews/customer','POST',{rating:4,comment:'Second review'},customerLogin.accessToken);
+  assert.equal(duplicate.status,409);
+  assert.equal((await duplicate.json()).error.code,'REVIEW_ALREADY_EXISTS');
+
+  const vendorReview=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/review','POST',{rating:4,comment:'Responsible customer.'},vendorToken);
+  assert.equal(vendorReview.status,201);
+  assert.equal((await vendorReview.json()).review.rating,4);
+
+  const status=await request('/api/v1/bookings/'+booking.bookingId+'/reviews/status',{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  const statusPayload=await status.json();
+  assert.equal(status.status,200);
+  assert.equal(statusPayload.data.eligible,true);
+  assert.equal(statusPayload.data.review.rating,5);
+
+  const vehicleReviews=await request('/api/v1/vehicles/'+vehicle.id+'/reviews',{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  const vehiclePayload=await vehicleReviews.json();
+  assert.equal(vehicleReviews.status,200);
+  assert.equal(vehiclePayload.summary.totalReviewCount,1);
+  assert.equal(vehiclePayload.summary.averageRating,5);
+  assert.equal(vehiclePayload.summary.ratingDistribution[5],1);
+  assert.equal(vehiclePayload.reviews[0].reviewType,'customer_to_vendor');
+
+  const vendorReviews=await request('/api/v1/vendors/'+vendor.id+'/reviews',{headers:{authorization:'Bearer '+customerLogin.accessToken}});
+  const vendorPayload=await vendorReviews.json();
+  assert.equal(vendorReviews.status,200);
+  assert.equal(vendorPayload.summary.totalReviewCount,1);
+  assert.equal(vendorPayload.summary.averageRating,5);
+
+  const customerHistory=await request('/api/v1/vendor/bookings/'+booking.bookingId+'/customer-reviews',{headers:{authorization:'Bearer '+vendorToken}});
+  const historyPayload=await customerHistory.json();
+  assert.equal(customerHistory.status,200);
+  assert.equal(historyPayload.summary.totalReviewCount,1);
+  assert.equal(historyPayload.reviews[0].rating,4);
+
+  const edited=await jsonRequest('/api/v1/reviews/'+statusPayload.data.review.id,'PATCH',{rating:3,comment:'Updated after thinking it over.'},customerLogin.accessToken);
+  assert.equal(edited.status,200);
+  assert.equal((await edited.json()).review.rating,3);
+});
+
+
 test.after(async () => {
   try {
     if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
