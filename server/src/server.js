@@ -150,6 +150,7 @@ function publicBooking(booking) {
 }
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
+console.log('[RideOnServer][ROUTES_READY]', JSON.stringify({ routes:['GET /health','GET /api/v1/version','GET /api/v1/me','POST /api/v1/auth/request-otp','POST /api/v1/auth/verify-otp','POST /api/v1/auth/complete-registration'] }));
 console.log('[RideOnServer][BOOT]', JSON.stringify({
   nodeEnv: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT) || 4000,
@@ -330,6 +331,10 @@ const requireVendor = async (req, res, next) => {
     return res.status(404).json({ error:{ code:'VENDOR_NOT_FOUND', message:'Vendor profile not found.' } });
   }
 };
+
+app.get('/api/v1/version', (_req, res) => {
+  res.json({ service:'rideon-api', buildCommit, nodeEnv:process.env.NODE_ENV || 'development', timestamp:new Date().toISOString() });
+});
 
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
