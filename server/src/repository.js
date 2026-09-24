@@ -96,7 +96,7 @@ export function createRepository({ databaseUrl, fleet }) {
     }
     const p=[start,end];
     const q=async(sql)=>{const r=await pool.query(sql,p);return r.rows[0]||{};};
-    const [bookings,payments,refunds,support,reviews,deliveries,customers,vendors,vehicles,rating]=await Promise.all([
+    const [bookings,payments,refunds,support,reviews,deliveries,customers,vendors,vehicles,rating,deposits]=await Promise.all([
       q(`select count(*) filter(where created_at >= current_date)::int today,count(*) filter(where created_at >= date_trunc('week',now()))::int week,count(*) filter(where created_at >= date_trunc('month',now()))::int month,count(*) filter(where status='completed' and created_at between $1 and $2)::int completed,count(*) filter(where status='cancelled' and created_at between $1 and $2)::int cancelled,count(*) filter(where created_at between $1 and $2)::int created from bookings`),
       q(`select count(*) filter(where status='paid' and updated_at between $1 and $2)::int success,count(*) filter(where status='failed' and updated_at between $1 and $2)::int failed from payments`),
       q(`select count(*) filter(where transaction_type='refund' and status='completed' and created_at between $1 and $2)::int count from financial_transactions`),
@@ -108,7 +108,7 @@ export function createRepository({ databaseUrl, fleet }) {
       q(`select count(*)::int count from vehicles where active=true`),
       q(`select round(avg(rating),2) average from reviews`),
     ]);
-    return {from:start.toISOString(),to:end.toISOString(),bookings:{today:bookings.today||0,week:bookings.week||0,month:bookings.month||0,created:bookings.created||0,completed:bookings.completed||0,cancelled:bookings.cancelled||0},payments:{success:payments.success||0,failed:payments.failed||0},refunds:refunds.count||0,securityDeposits:null,supportTickets:support.count||0,openSupportTickets:support.open||0,reviews:reviews.count||0,activeDeliveries:deliveries.active||0,customers:customers.count||0,vendors:vendors.count||0,activeVehicles:vehicles.count||0,averageRating:rating.average==null?null:Number(rating.average)};
+    return {from:start.toISOString(),to:end.toISOString(),bookings:{today:bookings.today||0,week:bookings.week||0,month:bookings.month||0,created:bookings.created||0,completed:bookings.completed||0,cancelled:bookings.cancelled||0},payments:{success:payments.success||0,failed:payments.failed||0},refunds:refunds.count||0,securityDeposits:{held:deposits.held||0,released:deposits.released||0,deducted:deposits.deducted||0},supportTickets:support.count||0,openSupportTickets:support.open||0,reviews:reviews.count||0,activeDeliveries:deliveries.active||0,customers:customers.count||0,vendors:vendors.count||0,activeVehicles:vehicles.count||0,averageRating:rating.average==null?null:Number(rating.average)};
   }
   async function getFinancialReconciliation({limit=100}={}){
     if(!useDatabase) return {generatedAt:new Date().toISOString(),items:[],limitations:['Provider-side state cannot be queried without a live provider reconciliation API.']};
