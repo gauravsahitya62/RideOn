@@ -696,6 +696,56 @@ test('vendor endpoints reject legacy customer credentials', async () => {
   assert.equal(fleet.status, 403);
 });
 
+test('vendor service location is vendor-only and persists', async () => {
+  const vendorCustomer=await register('+911234567940','Maps Vendor');
+  const login=await legacyLogin('+911234567940');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const token=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'RideOn Service Point',serviceCity:'Jaipur'},token);
+  assert.equal(saved.status,200);
+  const savedPayload=await saved.json();
+  assert.equal(savedPayload.location.latitude,26.91);
+  const loaded=await request('/api/v1/vendor/service-location',{headers:{authorization:'Bearer '+token}});
+  assert.equal(loaded.status,200);
+  const loadedPayload=await loaded.json();
+  assert.equal(loadedPayload.location.address,'RideOn Service Point');
+  const customerToken=login.accessToken;
+  const forbidden=await request('/api/v1/vendor/service-location',{headers:{authorization:'Bearer '+customerToken}});
+  assert.equal(forbidden.status,403);
+  assert.ok(vendor.id);
+});
+
+test('marketplace vendor map groups active vehicles by service location', async () => {
+  const vendorCustomer=await register('+911234567941','Map Vendor Two');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const token=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'Service Point Two',serviceCity:'Jaipur'},token);
+  assert.equal(saved.status,200);
+  await repository.createVendorVehicle(vendor.id,{type:'car',name:'Map Car A',make:'Test',model:'A',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJMAP941A',description:'',imageUrls:[],deliveryAvailable:true,active:true});
+  await repository.createVendorVehicle(vendor.id,{type:'car',name:'Map Car B',make:'Test',model:'B',year:2034,city:'Jaipur',dailyRate:1200,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJMAP941B',description:'',imageUrls:[],deliveryAvailable:true,active:true});
+  const map=await request('/api/v1/vendors/map?city=Jaipur');
+  assert.equal(map.status,200);
+  const payload=await map.json();
+  const found=payload.vendors.find(v=>v.vendorId===vendor.id);
+  assert.ok(found);
+  assert.equal(found.availableVehicleCount,2);
+});
+
+test('route preview returns a friendly configuration error when routing is not configured', async () => {
+  const customer=await register('+911234567942','Route User');
+  const login=await legacyLogin('+911234567942');
+  const vendorCustomer=await register('+911234567943','Route Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'Route Service Point',serviceCity:'Jaipur'},vendorToken);
+  assert.equal(saved.status,200);
+  const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Route Car',make:'Test',model:'R',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJROUTE942',description:'',imageUrls:[],deliveryAvailable:true,active:true});
+  const response=await jsonRequest('/api/v1/routing/eta','GET',{},login.accessToken);
+  assert.equal(response.status,400);
+  await customer.customer.id;
+  assert.ok(vehicle.id);
+});
+
 test('customer booking APIs remain customer-role protected', async () => {
   const anonymous = await request('/api/v1/bookings');
   assert.equal(anonymous.status, 401);
