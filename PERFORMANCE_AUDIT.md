@@ -45,6 +45,8 @@ Run only against local/test/staging and record concurrency, p50/p95/p99 latency,
 - server/src/server.js
 - server/db/migrations/027_performance_indexes.sql
 - PERFORMANCE_AUDIT.md
+- server/scripts/performance-load.mjs
+- server/package.json
 
 ### Migrations added
 - 027_performance_indexes.sql
@@ -61,6 +63,7 @@ Run only against local/test/staging and record concurrency, p50/p95/p99 latency,
 ### Tests performed
 - source-level audit against the release commit
 - replacement-target validation during implementation
+- safe staging/local load harness added as `npm run perf:load`
 - automated CI/staging tests: pending
 
 ### Load-test results
