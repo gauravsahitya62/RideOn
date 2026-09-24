@@ -17,7 +17,7 @@ SET delivery_status = 'scheduled'
 WHERE delivery_status IS NULL
    OR delivery_status NOT IN ('scheduled','in_delivery','delivered','aborted');
 
-DO $ BEGIN
+DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='bookings_delivery_status_allowed') THEN
     ALTER TABLE bookings ADD CONSTRAINT bookings_delivery_status_allowed
       CHECK (delivery_status IN ('scheduled','in_delivery','delivered','aborted'));
