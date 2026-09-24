@@ -196,6 +196,7 @@ export const rideOnApi = {
   deleteVendorVehicle: (id) => request(`/api/v1/vendor/vehicles/${encode(id)}`, { method:'DELETE' }),
   listVendorBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/vendor/bookings${query ? `?${query}` : ''}`); },
   getVendorBooking: (id) => request(`/api/v1/vendor/bookings/${encode(id)}`),
+  getVendorCustomerReviews: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/customer-reviews`),
   updateVendorBookingStatus: (id,payload) => request(`/api/v1/vendor/bookings/${encode(id)}/status`, { method:'PATCH', body:JSON.stringify(payload) }),
   getPaymentCapabilities: () => request('/api/v1/payments/capabilities'),
   createPaymentOrder: (payload) => request('/api/v1/payments/create-order', { method:'POST', body:JSON.stringify(payload) }),
