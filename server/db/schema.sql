@@ -141,6 +141,10 @@ CREATE TABLE IF NOT EXISTS security_deposits (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   refunded_at TIMESTAMPTZ,
+  deduction_reason TEXT,
+  evidence_reference TEXT,
+  inspected_at TIMESTAMPTZ,
+  inspected_by UUID REFERENCES customers(id) ON DELETE SET NULL,
   CHECK (approved_deduction_paise <= original_amount_paise),
   CHECK (refundable_amount_paise + approved_deduction_paise = original_amount_paise)
 );
