@@ -58,6 +58,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function listVehicles({ type, city, q } = {}) {
+    const serviceCity = 'Udaipur';
+    if (city && String(city).trim().toLowerCase() !== serviceCity.toLowerCase()) return [];
     if (!useDatabase) {
       const typeValue = type?.toLowerCase();
       const cityValue = city?.toLowerCase();
@@ -116,15 +118,17 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function listLocations() {
+    const serviceCity = 'Udaipur';
     if (!useDatabase) {
       return [...new Set([...fleet, ...memory.vehicles.values()]
-        .filter(v => v.active !== false)
+        .filter(v => v.active !== false && String(v.city || '').trim().toLowerCase() === serviceCity.toLowerCase())
         .map(v => String(v.city || '').trim())
         .filter(Boolean))]
         .sort((a,b)=>a.localeCompare(b));
     }
     const { rows } = await pool.query(
-      "select distinct trim(city) as city from vehicles where active=true and city is not null and trim(city)<>'' order by trim(city) asc"
+      "select distinct trim(city) as city from vehicles where active=true and lower(trim(city))=lower($1) order by trim(city) asc",
+      [serviceCity]
     );
     return rows.map(row => row.city).filter(Boolean);
   }
