@@ -1511,6 +1511,7 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
     const eventInfo=paymentEventMap[event.status];
     if(eventInfo) void notifications.notifyBooking({bookingId:event.bookingId,...eventInfo,audience:'customer',dedupeKey:`payment:${event.eventId}:${event.status}:customer`});
     if(event.status==='paid') void notifications.notifyBooking({bookingId:event.bookingId,type:'payment_received',title:'Payment received',body:'Payment for a RideOn booking has been confirmed.',audience:'vendor',dedupeKey:`payment:${event.eventId}:vendor`});
+    if(event.status==='failed') void notifications.notifySupport({type:'payment_issue',title:'Payment issue',body:'A RideOn payment failed provider verification and may require support attention.',bookingId:event.bookingId,dedupeKey:`payment_issue:${event.eventId}`});
   }
   res.json({received:true,applied:result.applied,duplicate:result.duplicate});
 });
