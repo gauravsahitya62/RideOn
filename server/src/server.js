@@ -166,7 +166,7 @@ console.log('[RideOnServer][BOOT]', JSON.stringify({
   hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
   hasSupabaseKey: Boolean(process.env.SUPABASE_PUBLISHABLE_KEY)
 }));
-const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'paytm' : 'mock')).toLowerCase();
+const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'unconfigured' : 'mock')).toLowerCase();
 const paytmMerchantId = process.env.PAYTM_MERCHANT_ID || '';
 const paytmClientId = process.env.PAYTM_CLIENT_ID || '';
 const paytmClientSecret = process.env.PAYTM_CLIENT_SECRET || '';
@@ -176,7 +176,7 @@ const paymentWebhookSecret = process.env.PAYTM_WEBHOOK_SECRET || '';
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && ['mock','unconfigured'].includes(paymentProvider)) throw new Error('PAYMENT_PROVIDER must be a real production payment provider.');
+if (isProduction && paymentProvider === 'mock') throw new Error('PAYMENT_PROVIDER=mock is not allowed in production.');
 // Paytm credentials are intentionally optional at process startup. This keeps health/API deployment available
 // while live payment operations fail closed with PAYTM_ONBOARDING_REQUIRED until merchant onboarding is complete.
 
@@ -876,29 +876,21 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       }});
     });
   } catch(error) {
-    if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_NOT_CONFIGURED',message:'Paytm payments are not configured on the RideOn server.'}});
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED',message:'Online payment is not configured on the RideOn server.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
     if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI checkout is not enabled for the configured payment provider yet.'}});
-    if(error.code==='PAYTM_ONBOARDING_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI checkout is not enabled for the configured payment provider yet. No payment has been marked successful.'}});
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Verified UPI payment integration is not enabled for the configured provider. No payment has been marked successful.'}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
   }
 });
 
 app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, async (req,res) => {
-  const parsed=z.object({ bookingId:z.string().uuid(), transactionReference:z.string().trim().min(4).max(128).optional() }).safeParse(req.body);
+  const parsed=z.object({ bookingId:z.string().uuid() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid bookingId and transaction reference.'}});
   let payment=await repository.findPaymentById(req.params.id, req.user.id);
   if(!payment || String(payment.bookingId)!==String(parsed.data.bookingId)) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
   if(String(payment.status).toLowerCase()==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
-  if(parsed.data.transactionReference){
-    try{payment=await repository.submitPaymentReference({paymentId:req.params.id,bookingId:parsed.data.bookingId,customerId:req.user.id,providerReference:parsed.data.transactionReference});}
-    catch(error){
-      if(error.code==='PAYMENT_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Payment not found.'}});
-      if(error.code==='PAYMENT_VERIFICATION_FAILED') return res.status(409).json({error:{code:error.code,message:'The transaction reference could not be recorded.'}});
-      throw error;
-    }
-  }
   try {
     const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
     if(!verified?.verified) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The provider has not authoritatively confirmed this payment yet.'}});
@@ -956,7 +948,8 @@ app.use((err, req, res, _next) => {
   if (err.code === 'CUSTOMER_EXISTS') return res.status(409).json({ error: { code: err.code, message: 'A customer with those credentials already exists.' } });
   if (err.code === 'INVALID_CREDENTIALS') return res.status(401).json({ error: { code: err.code, message: 'Phone or password is incorrect.' } });
   if (err.code === 'PAYMENT_PROVIDER_UNSUPPORTED') return res.status(500).json({ error: { code: err.code, message: 'Unsupported payment provider configuration.' } });
-  if (err.code === 'PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Paytm provider onboarding/integration is not enabled.' } });
+  if (err.code === 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Payment provider configuration is required.' } });
+  if (err.code === 'PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Payment provider onboarding/integration is not enabled.' } });
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Unexpected server error' } });
 });
 
