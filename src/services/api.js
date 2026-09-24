@@ -112,6 +112,7 @@ const encode = (value) => encodeURIComponent(String(value));
 
 export const rideOnApi = {
   health: () => request('/health'),
+  listLocations: () => request('/api/v1/locations'),
   listVehicles: (params = {}) => {
     const query = new URLSearchParams(
       Object.entries(params).filter(([, value]) => value != null && value !== '')
