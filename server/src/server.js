@@ -1594,6 +1594,6 @@ const port = Number(process.env.PORT) || 4000;
 const httpServer=createServer(app);
 const trackingRealtime=createTrackingRealtimeServer({httpServer,repository,authenticate:resolveTrackingUser});
 if (process.env.NODE_ENV !== 'test') {
-  httpServer.listen(port, () => console.log(`RideOn API listening on :${port}`));
+  httpServer.listen(port, () => observability.log('info','api_listening',{port,buildCommit}));
 }
 export { app, repository, httpServer, trackingRealtime };
