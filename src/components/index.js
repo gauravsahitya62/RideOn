@@ -10,3 +10,6 @@ export { default as BookingConfirmation } from './BookingConfirmation';
 
 export { default as DeliveryLocationPicker } from './DeliveryLocationPicker';
 export { default as ServiceLocationEditor } from './ServiceLocationEditor';
+
+export { default as ReviewComposer } from './ReviewComposer';
+export { default as ReviewsSection } from './ReviewsSection';
