@@ -9,6 +9,7 @@ import { createRepository } from './repository.js';
 import { createAuth } from './auth.js';
 import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
+import { geocodeAddress } from './geocoding.js';
 
 const fleet = [];
 
@@ -406,6 +407,27 @@ app.get('/health', async (_req, res) => {
     buildCommit,
     timestamp: new Date().toISOString(),
   });
+});
+
+app.get('/api/v1/geocoding/search', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const address=String(req.query.address||'').trim();
+  const city=String(req.query.city||'').trim();
+  if(address.length<4) return res.status(400).json({error:{code:'GEOCODE_INVALID_QUERY',message:'Enter a delivery address or landmark.'}});
+  try {
+    const result=await geocodeAddress(address,city);
+    res.json({location:result.location,formattedAddress:result.formattedAddress,provider:result.provider,cached:Boolean(result.cached)});
+  } catch(error) {
+    const statusByCode={GEOCODE_INVALID_QUERY:400,GEOCODE_PROVIDER_NOT_CONFIGURED:503,GEOCODE_PROVIDER_UNAVAILABLE:503,GEOCODE_PROVIDER_TIMEOUT:504,GEOCODE_NOT_FOUND:422};
+    const messages={
+      GEOCODE_INVALID_QUERY:'Enter a delivery address or landmark.',
+      GEOCODE_PROVIDER_NOT_CONFIGURED:'Address search is not configured yet. You can choose a point on the map.',
+      GEOCODE_PROVIDER_UNAVAILABLE:'Address search is temporarily unavailable. Please retry or choose a point on the map.',
+      GEOCODE_PROVIDER_TIMEOUT:'Address search took too long. Please retry.',
+      GEOCODE_NOT_FOUND:'We could not find that address. Try a nearby landmark or choose a point on the map.',
+    };
+    console.error(JSON.stringify({level:'error',event:'geocoding_failed',requestId:req.requestId,code:error?.code||'GEOCODE_FAILED'}));
+    res.status(statusByCode[error?.code]||503).json({error:{code:error?.code||'GEOCODE_FAILED',message:messages[error?.code]||'We could not find that address right now. Please retry.'}});
+  }
 });
 
 app.get('/api/v1/routing/eta', supabaseRequireAuth, requireCustomer, async (req,res) => {
@@ -850,6 +872,26 @@ app.post('/api/v1/bookings/quote', supabaseRequireAuth, requireCustomer, async (
   let quote;
   try { quote = { vehicleId: vehicle.id, ...pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery) }; } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
+});
+
+app.post('/api/v1/bookings/:id/route', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  try {
+    const booking=await repository.getBooking(req.params.id,req.user.id);
+    if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(!booking.delivery || booking.deliveryLatitude==null || booking.deliveryLongitude==null) return res.status(409).json({error:{code:'ROUTE_LOCATION_REQUIRED',message:'A delivery location is required before estimating delivery time.'}});
+    if(booking.vendorServiceLatitude==null || booking.vendorServiceLongitude==null) return res.status(409).json({error:{code:'VENDOR_SERVICE_LOCATION_UNAVAILABLE',message:'The selected vendor has not set a service location yet.'}});
+    const route=await getDrivingRoute(
+      {latitude:booking.vendorServiceLatitude,longitude:booking.vendorServiceLongitude},
+      {latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude}
+    );
+    const updated=await repository.updateBookingRouteData(req.params.id,req.user.id,route);
+    res.json({route:{...route,estimatedDeliveryMinutes:Math.max(1,Math.round(route.durationSeconds/60))},booking:publicBooking(updated||booking)});
+  } catch(error) {
+    const statusByCode={ROUTE_LOCATION_REQUIRED:409,VENDOR_SERVICE_LOCATION_UNAVAILABLE:409,ROUTE_INVALID_COORDINATES:400,ROUTE_PROVIDER_NOT_CONFIGURED:503,ROUTE_PROVIDER_UNAVAILABLE:503,ROUTE_PROVIDER_TIMEOUT:504,ROUTE_NOT_FOUND:422};
+    const messages={ROUTE_LOCATION_REQUIRED:'A delivery location is required before estimating delivery time.',VENDOR_SERVICE_LOCATION_UNAVAILABLE:'The selected vendor has not set a service location yet.',ROUTE_INVALID_COORDINATES:'Please choose a valid delivery location.',ROUTE_PROVIDER_NOT_CONFIGURED:'Delivery routing is not configured yet.',ROUTE_PROVIDER_UNAVAILABLE:'Delivery routing is temporarily unavailable. Please retry.',ROUTE_PROVIDER_TIMEOUT:'Delivery routing took too long. Please retry.',ROUTE_NOT_FOUND:'No driving route was found for these locations.'};
+    console.error(JSON.stringify({level:'error',event:'booking_route_failed',requestId:req.requestId,code:error?.code||'ROUTE_FAILED'}));
+    res.status(statusByCode[error?.code]||503).json({error:{code:error?.code||'ROUTE_FAILED',message:messages[error?.code]||'We could not estimate delivery time right now. Please retry.'}});
+  }
 });
 
 app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
