@@ -239,3 +239,25 @@ The current PR's GitHub checks must be green before release; a queued check is n
 7. Real Privacy Policy, Terms, Support URL and contact details are still required.
 8. Physical-device Android/iOS release testing is still required.
 9. Current GitHub CI checks on the hardening branch were queued at audit time and must finish successfully.
+
+
+## 14. Notifications
+
+RideOn now uses Expo Notifications for optional push delivery and a server-backed in-app Notification Center.
+
+Mobile configuration:
+- `expo-notifications` is installed for Expo SDK 57.
+- Android creates the `rideon-transactional` notification channel.
+- Notification permission is requested only when the user taps **Enable** in the Notification Center.
+- The app continues to work if permission is denied.
+- Notification response taps carry only notification type plus booking/ticket identifiers; they never carry payment credentials or GPS coordinates.
+- Push tokens are registered against the authenticated RideOn user and may exist on multiple devices.
+- Invalid/expired tokens are disabled after provider errors and repeated failures.
+- Foreground notifications are handled by the Expo notification handler; notification taps are routed to the relevant booking/support area when the target still exists.
+
+Server configuration:
+- No push provider secret is required for standard Expo Push Service delivery.
+- Optional `EXPO_ACCESS_TOKEN` may be configured on Render if the Expo project requires authenticated push API access. It is server-only and must never be embedded in Expo public variables.
+- No push token or credential is logged.
+
+The notification system does not send GPS-coordinate updates. Live tracking remains realtime/map data.
