@@ -665,6 +665,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const b=await getVendorBooking(vendorId,bookingId);
       if(!b){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       if(!allowed[b.status]?.includes(nextStatus)){const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
+      if(nextStatus==='completed' && b.delivery && b.deliveryStatus!=='delivered'){const e=new Error('Delivery must be completed before the rental can be completed.');e.code='DELIVERY_NOT_COMPLETED';throw e;}
       if(nextStatus==='confirmed' && !['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){
         const e=new Error('Payment must be confirmed before the vendor can accept this booking.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;
       }
