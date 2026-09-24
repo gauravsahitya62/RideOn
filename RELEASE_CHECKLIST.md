@@ -92,3 +92,13 @@ eas build --platform ios --profile production
 ```
 
 Build only. Do not run `eas submit` until the checklist is complete.
+
+
+## Observability
+- [ ] `GET /health` returns liveness 200.
+- [ ] `GET /health/ready` returns readiness only when production dependencies are ready.
+- [ ] Request IDs and structured failure logs visible in Render.
+- [ ] Admin metrics, reconciliation and operational-alert endpoints verified with an admin account.
+- [ ] Analytics migration 026 applied successfully.
+- [ ] No secrets, tokens, OTPs or exact private GPS locations appear in logs/analytics.
+- [ ] Production operations runbook reviewed.
