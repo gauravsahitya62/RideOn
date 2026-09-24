@@ -4,6 +4,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { rideOnApi } from '../services/api';
 
 const O='#E95735',N='#172033',M='#7D8796',B='#F5F6F8',L='#E6E9EF',W='#FFFFFF';
+const RIDEON_SERVICE_CITY='Udaipur';
 const Button=({children,onPress,outline=false,disabled=false})=><TouchableOpacity disabled={disabled} onPress={onPress} style={[S.button,outline&&S.outline,disabled&&{opacity:.5}]}><Text style={[S.buttonText,outline&&{color:N}]}>{children}</Text></TouchableOpacity>;
 const Tag=({children})=><View style={S.tag}><Text style={S.tagText}>{children}</Text></View>;
 const Head=({title,action,onAction})=><View style={S.head}><Text style={S.h2}>{title}</Text>{action&&<TouchableOpacity onPress={onAction}><Text style={S.action}>{action} →</Text></TouchableOpacity>}</View>;
@@ -26,7 +27,7 @@ const normalizeBooking=b=>({id:b.bookingId||b.id,vehicle:b.vehicleName||b.vehicl
 export default function VendorPortalReady({user,onLogout}){
  const [tab,setTab]=useState('Dashboard'),[screen,setScreen]=useState(''),[fleet,setFleet]=useState([]),[bookings,setBookings]=useState([]),[picked,setPicked]=useState(null),[filter,setFilter]=useState('All');
  const [loading,setLoading]=useState(true),[error,setError]=useState('');
- const [vname,setVname]=useState(''),[make,setMake]=useState(''),[model,setModel]=useState(''),[reg,setReg]=useState(''),[vtype,setVtype]=useState('bike'),[rate,setRate]=useState(''),[securityDeposit,setSecurityDeposit]=useState(''),[fuel,setFuel]=useState('Petrol'),[transmission,setTransmission]=useState(''),[seats,setSeats]=useState(''),[city,setCity]=useState('Jaipur'),[description,setDescription]=useState(''),[imageUrls,setImageUrls]=useState('');
+ const [vname,setVname]=useState(''),[make,setMake]=useState(''),[model,setModel]=useState(''),[reg,setReg]=useState(''),[vtype,setVtype]=useState('bike'),[rate,setRate]=useState(''),[securityDeposit,setSecurityDeposit]=useState(''),[fuel,setFuel]=useState('Petrol'),[transmission,setTransmission]=useState(''),[seats,setSeats]=useState(''),[city,setCity]=useState(RIDEON_SERVICE_CITY),[description,setDescription]=useState(''),[imageUrls,setImageUrls]=useState('');
  const [business,setBusiness]=useState(user?.vendor?.businessName || user?.name || 'RideOn Vendor'),[owner,setOwner]=useState(user?.name||''),[email,setEmail]=useState(user?.email||''),[phone,setPhone]=useState('');
  const [busy,setBusy]=useState(false),[banner,setBanner]=useState('');
  const scrollRef=useRef(null);
@@ -52,8 +53,8 @@ export default function VendorPortalReady({user,onLogout}){
    pending:bookings.filter(b=>b.status==='requested').length
  }),[fleet,bookings]);
 
- const resetVehicleForm=()=>{setVname('');setMake('');setModel('');setReg('');setVtype('bike');setRate('');setSecurityDeposit('');setFuel('Petrol');setTransmission('');setSeats('');setCity('Jaipur');setDescription('');setImageUrls([]);};
- const loadForEdit=v=>{const x=v.raw||{};setVname(x.name||v.name);setMake(x.make||'');setModel(x.model||'');setReg(x.registrationNumber||v.id);setVtype(x.type||'bike');setRate(String(x.dailyRate??v.price??''));setSecurityDeposit(String(x.securityDeposit??''));setFuel(x.fuel||'');setTransmission(x.transmission||'');setSeats(x.seats?String(x.seats):'');setCity(x.city||'Jaipur');setDescription(x.description||'');setImageUrls(Array.isArray(x.imageUrls)?x.imageUrls:[]);setScreen('Edit vehicle');};
+ const resetVehicleForm=()=>{setVname('');setMake('');setModel('');setReg('');setVtype('bike');setRate('');setSecurityDeposit('');setFuel('Petrol');setTransmission('');setSeats('');setCity(RIDEON_SERVICE_CITY);setDescription('');setImageUrls([]);};
+ const loadForEdit=v=>{const x=v.raw||{};setVname(x.name||v.name);setMake(x.make||'');setModel(x.model||'');setReg(x.registrationNumber||v.id);setVtype(x.type||'bike');setRate(String(x.dailyRate??v.price??''));setSecurityDeposit(String(x.securityDeposit??''));setFuel(x.fuel||'');setTransmission(x.transmission||'');setSeats(x.seats?String(x.seats):'');setCity(x.city||RIDEON_SERVICE_CITY);setDescription(x.description||'');setImageUrls(Array.isArray(x.imageUrls)?x.imageUrls:[]);setScreen('Edit vehicle');};
  const pickVehicleImages=async()=>{
    try{
      const permission=await ImagePicker.requestMediaLibraryPermissionsAsync();
