@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: RideOn API
   version: 1.0.0
-  description: Demo API contract for RideOn vehicle discovery and rental booking requests. Not production-ready.
+  description: RideOn API contract for vehicle discovery, bookings, payments, support, delivery tracking and notifications.
 servers:
   - url: http://localhost:4000
 paths:
