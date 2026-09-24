@@ -254,16 +254,18 @@ async function requestRefundForBooking(bookingId) {
   if(!payment) return {status:'not_applicable'};
   if(payment.status==='refunded') return {status:'refunded',payment};
   if(!['paid','refund_pending'].includes(String(payment.status))) return {status:'not_eligible',payment};
-  const pending=await repository.markPaymentRefundPending(payment.id);
+  const claim=await repository.claimRefundRequest(payment.id);
+  if(!claim.created) return {status:claim.status==='completed'?'refunded':'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
   try {
-    const providerResult=await payments.refundPayment({paymentId:payment.id,amountPaise:payment.amountPaise,providerOrderId:payment.providerOrderId});
+    const providerResult=await payments.refundPayment({paymentId:payment.id,amountPaise:payment.amountPaise,providerOrderId:payment.providerOrderId,idempotencyKey:claim.idempotencyKey});
     if(providerResult?.confirmed && providerResult?.providerReference){
       const refunded=await repository.completePaymentRefund({paymentId:payment.id,providerReference:providerResult.providerReference});
-      return {status:'refunded',payment:refunded};
+      return {status:'refunded',payment:refunded,idempotencyKey:claim.idempotencyKey};
     }
-    return {status:'refund_pending',payment:pending};
+    return {status:'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
   } catch(error) {
-    if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return {status:'refund_pending',payment:pending,providerUnavailable:true};
+    await repository.markRefundRetryable(payment.id).catch(()=>{});
+    if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return {status:'refund_pending',payment,providerUnavailable:true,idempotencyKey:claim.idempotencyKey};
     throw error;
   }
 }
