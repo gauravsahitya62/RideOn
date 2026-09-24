@@ -39,10 +39,14 @@ export function createPaymentService({
     error.code = 'PAYMENT_PROVIDER_UNSUPPORTED';
     throw error;
   }
+  // The repository currently contains the payment state machine and fail-closed
+  // provider boundary, but no verified live Paytm checkout/status/refund adapter.
+  // Do not represent credentials alone as a production-ready integration.
+  const liveIntegrationReady = selectedProvider === 'mock' ? true : false;
   const providerConfigured = selectedProvider === 'mock'
     ? true
     : selectedProvider === 'paytm'
-      ? Boolean(merchantId && clientId && clientSecret && website && callbackUrl)
+      ? Boolean(liveIntegrationReady && merchantId && clientId && clientSecret && website && callbackUrl && webhookSecret)
       : false;
   const upiCapabilities = selectedProvider === 'mock'
     ? { method:'upi', apps:DEFAULT_UPI_APPS, supportsIntent:true, supportsVpa:true, supportsHostedCheckout:true, provider:selectedProvider }
@@ -98,5 +102,5 @@ export function createPaymentService({
   async function getSettlementStatus() { if (selectedProvider === 'mock') return { status:'processing' }; const error=new Error('A verified settlement-status integration is required before settlement can be reconciled.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
   async function reconcileTransaction() { if (selectedProvider === 'mock') return { reconciled:true }; const error=new Error('A verified transaction reconciliation integration is required before live reconciliation can run.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
 
-  return { provider:selectedProvider, name:selectedProvider, configured:providerConfigured, capabilities:upiCapabilities, verifyWebhook, parseWebhook, canTransition, createCustomerPayment, verifyPayment, refundPayment, createVendorSettlement, getSettlementStatus, reconcileTransaction };
+  return { provider:selectedProvider, name:selectedProvider, configured:providerConfigured, liveIntegrationReady, capabilities:upiCapabilities, verifyWebhook, parseWebhook, canTransition, createCustomerPayment, verifyPayment, refundPayment, createVendorSettlement, getSettlementStatus, reconcileTransaction };
 }
