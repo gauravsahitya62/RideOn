@@ -354,7 +354,7 @@ const supabaseRequireAuth = async (req, res, next) => {
       });
     }
 
-    if (!identity?.id || !['customer','vendor','support','admin'].includes(identity.role)) {
+    if (!identity?.id || !['customer','vendor','support','admin','delivery_staff'].includes(identity.role)) {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
 
