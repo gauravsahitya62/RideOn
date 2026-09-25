@@ -1128,6 +1128,74 @@ export function createRepository({ databaseUrl, fleet }) {
     } catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
 
+
+  async function getFleetBookingLifecycle(bookingId) {
+    if (!useDatabase) {
+      const b=memory.bookings.get(String(bookingId));
+      if (!b) return null;
+      return { bookingId:String(b.id), lifecycleState:String(b.lifecycleState || (b.status==='confirmed'?'CONFIRMED':b.status==='in_progress'?'ACTIVE_RENTAL':'CONFIRMED')), vehicleId:String(b.vehicleId), customerId:String(b.customerId) };
+    }
+    const q=await pool.query('select id,vehicle_id,customer_id,lifecycle_state,status from bookings where id=$1',[bookingId]);
+    if (!q.rows[0]) return null;
+    const row=q.rows[0];
+    return {bookingId:String(row.id),lifecycleState:String(row.lifecycle_state||'CONFIRMED'),vehicleId:String(row.vehicle_id),customerId:String(row.customer_id),status:row.status};
+  }
+
+  async function listFleetDamageCases({status,bookingId,limit=100,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(200,Number(limit)||100)),safeOffset=Math.max(0,Number(offset)||0);
+    const wanted=status?String(status).toLowerCase():null;
+    const valid=new Set(['reported','under_review','approved','disputed','resolved','rejected']);
+    if(wanted&&!valid.has(wanted)){const e=new Error('Invalid damage case status.');e.code='INVALID_DAMAGE_STATUS';throw e;}
+    if(!useDatabase){
+      const cases=[...(memory.damageCases?.values()||[])].filter(x=>(!wanted||x.status===wanted)&&(!bookingId||String(x.bookingId)===String(bookingId)));
+      return cases.slice(safeOffset,safeOffset+safeLimit);
+    }
+    const params=[];const where=[];
+    if(wanted){params.push(wanted);where.push('d.status=$'+params.length);}
+    if(bookingId){params.push(bookingId);where.push('d.booking_id=$'+params.length);}
+    params.push(safeLimit,safeOffset);
+    const q=await pool.query(`select d.*,c.full_name as customer_name,c.phone as customer_phone,v.name as vehicle_name,v.registration_number,
+      i.inspection_status,i.inspected_at
+      from fleet_damage_cases d
+      join customers c on c.id=d.customer_id
+      join vehicles v on v.id=d.vehicle_id
+      left join vehicle_inspections i on i.id=d.inspection_id
+      ${where.length?'where '+where.join(' and '):''}
+      order by d.created_at desc limit $${params.length-1} offset $${params.length}`,params);
+    return q.rows.map(row=>({
+      id:String(row.id),bookingId:String(row.booking_id),vehicleId:String(row.vehicle_id),customerId:String(row.customer_id),
+      customer:{id:String(row.customer_id),name:row.customer_name,phone:row.customer_phone},
+      vehicle:{id:String(row.vehicle_id),name:row.vehicle_name,registrationNumber:row.registration_number||null},
+      inspectionId:row.inspection_id?String(row.inspection_id):null,inspectionStatus:row.inspection_status||null,
+      description:row.description,evidencePhotos:row.evidence_photos||[],estimatedAmountPaise:Number(row.estimated_amount_paise||0),
+      status:row.status,approvedDeductionPaise:Number(row.approved_deduction_paise||0),createdAt:iso(row.created_at),updatedAt:iso(row.updated_at),resolvedAt:iso(row.resolved_at||null)
+    }));
+  }
+
+  async function updateFleetDamageCase({caseId,status,approvedDeductionPaise=0,note='',actorUserId}={}) {
+    const allowed=new Set(['reported','under_review','approved','disputed','resolved','rejected']);
+    const next=String(status||'').toLowerCase();
+    if(!allowed.has(next)){const e=new Error('Invalid damage case status.');e.code='INVALID_DAMAGE_STATUS';throw e;}
+    const deduction=Math.max(0,Math.round(Number(approvedDeductionPaise)||0));
+    const actor=await findCustomerById(actorUserId);
+    if(!['admin','support'].includes(actor?.role)){const e=new Error('Damage review access is required.');e.code='FORBIDDEN';throw e;}
+    if(!useDatabase){
+      const d=memory.damageCases?.get(String(caseId));if(!d){const e=new Error('Damage case not found.');e.code='DAMAGE_CASE_NOT_FOUND';throw e;}
+      if(deduction>d.estimatedAmountPaise){const e=new Error('Approved deduction cannot exceed the estimate.');e.code='DAMAGE_DEDUCTION_INVALID';throw e;}
+      if(next==='approved'&&deduction<=0){const e=new Error('An approved damage case requires an authorized deduction amount.');e.code='DAMAGE_DEDUCTION_REQUIRED';throw e;}
+      d.status=next;d.approvedDeductionPaise=deduction;d.updatedAt=new Date().toISOString();if(next==='resolved')d.resolvedAt=d.updatedAt;return d;
+    }
+    const client=await pool.connect();try{await client.query('begin');
+      const q=await client.query('select * from fleet_damage_cases where id=$1 for update',[caseId]);const d=q.rows[0];
+      if(!d){const e=new Error('Damage case not found.');e.code='DAMAGE_CASE_NOT_FOUND';throw e;}
+      if(deduction>Number(d.estimated_amount_paise||0)){const e=new Error('Approved deduction cannot exceed the estimate.');e.code='DAMAGE_DEDUCTION_INVALID';throw e;}
+      if(next==='approved'&&deduction<=0){const e=new Error('An approved damage case requires an authorized deduction amount.');e.code='DAMAGE_DEDUCTION_REQUIRED';throw e;}
+      const updated=await client.query(`update fleet_damage_cases set status=$2,approved_deduction_paise=$3,updated_at=now(),resolved_at=case when $2='resolved' then now() else resolved_at end where id=$1 returning *`,[caseId,next,deduction]);
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,details) values($1,$2,$3,$4,$5)',[d.vehicle_id,d.booking_id,actorUserId,'damage_'+next,JSON.stringify({caseId:String(caseId),approvedDeductionPaise:deduction,note:String(note||'').slice(0,2000)})]);
+      await client.query('commit');return {...updated.rows[0],id:String(updated.rows[0].id),bookingId:String(updated.rows[0].booking_id),status:updated.rows[0].status,approvedDeductionPaise:Number(updated.rows[0].approved_deduction_paise||0)};
+    }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
+  }
+
   async function settleFleetSecurityDeposit({bookingId,actorUserId,deductionPaise=0,reason='',evidenceReference='',refundProviderReference=''}={}) {
     const actor=await findCustomerById(actorUserId);if(!['admin','support'].includes(actor?.role)){const e=new Error('Fleet operations access is required.');e.code='FORBIDDEN';throw e;}
     const deduction=Math.max(0,Math.round(Number(deductionPaise)||0));
@@ -4132,7 +4200,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getFleetBookingOperations,getRideOnFleetDashboard,setRideOnFleetVehicleState,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,transitionRentalLifecycle,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,markOverdueRentals,settleFleetSecurityDeposit};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getFleetBookingOperations,getRideOnFleetDashboard,setRideOnFleetVehicleState,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,transitionRentalLifecycle,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,markOverdueRentals,getFleetBookingLifecycle,listFleetDamageCases,updateFleetDamageCase,settleFleetSecurityDeposit};
 }
 +params.length);}
     const orderBy=sortValue==='price_asc'?'v.daily_rate_paise asc':sortValue==='price_desc'?'v.daily_rate_paise desc':'v.name asc';
