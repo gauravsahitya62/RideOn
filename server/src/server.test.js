@@ -107,6 +107,50 @@ test('vehicle list preserves existing aliases and search contract', async () => 
   assert.equal(creta.price, creta.pricePerDay);
 });
 
+test('legacy JWT rejects wrong issuer, audience, and environment', async () => {
+  const baseToken = jwt.sign({sub:crypto.randomUUID(),role:'customer',authEnvironment:'test'}, 'development-only-secret', {expiresIn:3600,issuer:'rideon-api',audience:'rideon-mobile'});
+  const wrongIssuer = jwt.sign({sub:crypto.randomUUID(),role:'customer',authEnvironment:'test'}, 'development-only-secret', {expiresIn:3600,issuer:'other-api',audience:'rideon-mobile'});
+  const wrongAudience = jwt.sign({sub:crypto.randomUUID(),role:'customer',authEnvironment:'test'}, 'development-only-secret', {expiresIn:3600,issuer:'rideon-api',audience:'other-client'});
+  const wrongEnvironment = jwt.sign({sub:crypto.randomUUID(),role:'customer',authEnvironment:'production'}, 'development-only-secret', {expiresIn:3600,issuer:'rideon-api',audience:'rideon-mobile'});
+  const valid = await request('/api/v1/bookings', {headers:{authorization:'Bearer '+baseToken}});
+  assert.equal(valid.status,200);
+  for (const token of [wrongIssuer,wrongAudience,wrongEnvironment]) {
+    const response = await request('/api/v1/bookings', {headers:{authorization:'Bearer '+token}});
+    assert.equal(response.status,401);
+    assert.equal((await response.json()).error.code,'INVALID_TOKEN');
+  }
+});
+
+test('vehicle image validation rejects MIME-spoofed payloads before storage', async () => {
+  const vendor = await register('+911234568001','Upload Validation Vendor');
+  await repository.ensureVendorForCustomer(vendor.customer.id);
+  const token = vendorTokenFor(vendor.customer.id);
+  const response = await jsonRequest('/api/v1/vendor/vehicle-images','POST',{
+    contentType:'image/png',
+    base64:Buffer.from('not an image').toString('base64'),
+  },token);
+  assert.equal(response.status,400);
+  assert.equal((await response.json()).error.code,'IMAGE_INVALID');
+});
+
+test('ordinary booking responses do not expose exact GPS coordinates', async () => {
+  const customer = await register('+911234568002','GPS Privacy Customer');
+  const login = await legacyLogin('+911234568002');
+  const response = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',
+    startAt:'2042-01-10T10:00:00.000Z',
+    endAt:'2042-01-11T10:00:00.000Z',
+    delivery:true,
+    address:'12 GPS Privacy Road, Jaipur',
+    deliveryLatitude:26.9124,
+    deliveryLongitude:75.7873,
+  },login.accessToken,{'Idempotency-Key':'gps-privacy-1'});
+  assert.equal(response.status,201);
+  const payload=await response.json();
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLatitude'),false);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLongitude'),false);
+});
+
 test('protected booking routes reject anonymous callers', async () => {
   const response = await request('/api/v1/bookings');
   const payload = await response.json();
