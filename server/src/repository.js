@@ -746,8 +746,20 @@ export function createRepository({ databaseUrl, fleet }) {
       if(conflict.rows.length)throw Object.assign(new Error('One or more selected vehicles became unavailable.'),{code:'MULTI_VEHICLE_UNAVAILABLE',vehicleIds:conflict.rows.map(x=>String(x.vehicle_id))});
       const lat=delivery&&deliveryLatitude!=null&&deliveryLatitude!==''?Number(deliveryLatitude):null,lon=delivery&&deliveryLongitude!=null&&deliveryLongitude!==''?Number(deliveryLongitude):null;
       if(delivery&&((lat==null)!==(lon==null)||lat!=null&&(!Number.isFinite(lat)||lat<-90||lat>90)||lon!=null&&(!Number.isFinite(lon)||lon<-180||lon>180)))throw Object.assign(new Error('A valid delivery location is required.'),{code:'INVALID_DELIVERY_LOCATION'});
-      const quoteRows=locked.rows.map(row=>{const vehicle=mapManagedVehicle(row);const rental=vehicle.dailyRate*days,deliveryFee=delivery?199:0,platformFee=Math.round(rental*0.05),securityDeposit=vehicle.securityDeposit;return {vehicle,rental,deliveryFee,platformFee,securityDeposit,total:rental+deliveryFee+platformFee+securityDeposit};});
-      const parts={rental:quoteRows.reduce((a,x)=>a+x.rental,0),deliveryFee:quoteRows.reduce((a,x)=>a+x.deliveryFee,0),platformFee:quoteRows.reduce((a,x)=>a+x.platformFee,0),securityDeposit:quoteRows.reduce((a,x)=>a+x.securityDeposit,0)};const total=parts.rental+parts.deliveryFee+parts.platformFee+parts.securityDeposit;
+      const quoteRows=locked.rows.map(row=>{
+        const vehicle=mapManagedVehicle(row);
+        const priced=pricingService.calculateVehicle({vehicle,startAt:startDate.toISOString(),endAt:endDate.toISOString(),delivery:Boolean(delivery)});
+        return {vehicle,rental:priced.rentalSubtotal,deliveryFee:priced.deliveryFee,platformFee:priced.platformFee,tax:priced.tax,discount:priced.discount,securityDeposit:priced.securityDeposit,total:priced.totalPayable};
+      });
+      const parts={
+        rental:quoteRows.reduce((a,x)=>a+x.rental,0),
+        deliveryFee:quoteRows.reduce((a,x)=>a+x.deliveryFee,0),
+        platformFee:quoteRows.reduce((a,x)=>a+x.platformFee,0),
+        tax:quoteRows.reduce((a,x)=>a+x.tax,0),
+        discount:quoteRows.reduce((a,x)=>a+x.discount,0),
+        securityDeposit:quoteRows.reduce((a,x)=>a+x.securityDeposit,0)
+      };
+      const total=parts.rental+parts.deliveryFee+parts.platformFee+parts.tax-parts.discount+parts.securityDeposit;
       const orderResult=await client.query(`insert into fleet_orders(fleet_owner,customer_id,start_at,end_at,delivery_required,delivery_address,rental_total_paise,delivery_fee_paise,platform_fee_paise,security_deposit_paise,total_paise,payment_status,status,idempotency_key,quote_expires_at) values('rideon',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'unpaid','requested',$11,$12) returning id`,[customerId,startDate.toISOString(),endDate.toISOString(),Boolean(delivery),String(address||'').trim().slice(0,300),Math.round(parts.rental*100),Math.round(parts.deliveryFee*100),Math.round(parts.platformFee*100),Math.round(parts.securityDeposit*100),Math.round(total*100),normalizedKey,new Date(Date.now()+5*60*1000)]);
       const orderId=String(orderResult.rows[0].id),created=[];
       for(const item of quoteRows){
