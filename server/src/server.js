@@ -751,6 +751,14 @@ app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (re
   }
 });
 
+app.get('/api/v1/bookings/:id/inspection',supabaseRequireAuth,requireCustomer,async(req,res)=>{
+  try{
+    const inspection=await repository.getCustomerRentalInspection({bookingId:req.params.id,customerId:req.user.id});
+    if(!inspection)return res.status(404).json({error:{code:'INSPECTION_NOT_FOUND',message:'Inspection details are not available for this booking.'}});
+    res.json({inspection});
+  }catch(error){res.status(503).json({error:{code:'INSPECTION_UNAVAILABLE',message:'Inspection details are temporarily unavailable.'}});}
+});
+
 app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async (req,res)=>{
   try{
     if(!repository.getFleetOrder) return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
