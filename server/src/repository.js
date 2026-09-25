@@ -675,11 +675,11 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function loadFleetOrderTx(client,orderId){
-    const {rows}=await client.query(`select fo.*,v.business_name from fleet_orders fo join vendors v on v.id=fo.vendor_id where fo.id=$1 for update`,[orderId]);
+    const {rows}=await client.query('select * from fleet_orders where id=$1 for update',[orderId]);
     if(!rows[0])return null;
     const itemRows=await client.query(`select b.*,ve.name as v_name,ve.type as v_type,ve.make,ve.model,ve.image_urls,ve.description,ve.delivery_available from fleet_order_items i join bookings b on b.id=i.booking_id join vehicles ve on ve.id=i.vehicle_id where i.fleet_order_id=$1 order by i.id`,[orderId]);
     const items=itemRows.rows.map(r=>mapBooking({...r,vehicle:{id:String(r.vehicle_id),name:r.v_name,type:String(r.v_type),make:r.make,model:r.model,imageUrls:r.image_urls||[],description:r.description||'',deliveryAvailable:r.delivery_available!==false}}));
-    return {id:String(rows[0].id),customerId:String(rows[0].customer_id),vendorId:String(rows[0].vendor_id),vendorName:rows[0].business_name,startAt:iso(rows[0].start_at),endAt:iso(rows[0].end_at),delivery:Boolean(rows[0].delivery_required),address:rows[0].delivery_address,rentalSubtotal:Number(rows[0].rental_total_paise)/100,deliveryFee:Number(rows[0].delivery_fee_paise)/100,platformFee:Number(rows[0].platform_fee_paise)/100,securityDeposit:Number(rows[0].security_deposit_paise)/100,total:Number(rows[0].total_paise)/100,paymentStatus:rows[0].payment_status,status:rows[0].status,idempotencyKey:rows[0].idempotency_key||null,quoteExpiresAt:iso(rows[0].quote_expires_at),items};
+    return {id:String(rows[0].id),customerId:String(rows[0].customer_id),fleetOwner:'rideon',startAt:iso(rows[0].start_at),endAt:iso(rows[0].end_at),delivery:Boolean(rows[0].delivery_required),address:rows[0].delivery_address,rentalSubtotal:Number(rows[0].rental_total_paise)/100,deliveryFee:Number(rows[0].delivery_fee_paise)/100,platformFee:Number(rows[0].platform_fee_paise)/100,securityDeposit:Number(rows[0].security_deposit_paise)/100,total:Number(rows[0].total_paise)/100,paymentStatus:rows[0].payment_status,status:rows[0].status,idempotencyKey:rows[0].idempotency_key||null,quoteExpiresAt:iso(rows[0].quote_expires_at),items};
   }
   async function getFleetOrder(fleetOrderId, customerId) {
     if(!useDatabase){
