@@ -56,6 +56,13 @@ export function createRepository({ databaseUrl, fleet }) {
         currency:'INR'
       },
       status:row.status,
+      lifecycleState:row.lifecycle_state || (row.status==='in_progress' ? 'ACTIVE_RENTAL' : row.status==='completed' ? 'COMPLETED' : row.status==='confirmed' ? 'CONFIRMED' : undefined),
+      returnRequestedAt:iso(row.return_requested_at),
+      returnLocation:row.return_location || undefined,
+      returnNotes:row.return_notes || undefined,
+      returnReceivedAt:iso(row.return_received_at),
+      overdueAt:iso(row.overdue_at),
+      pickupConfirmedAt:iso(row.pickup_confirmed_at),
       paymentStatus:row.payment_status,
       paymentId:row.payment_id || undefined,
       paymentProviderReference:row.payment_provider_reference || undefined,
