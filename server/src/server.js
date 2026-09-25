@@ -691,7 +691,12 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
     if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
     if(order.paymentStatus==='paid')return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This fleet booking is already paid.'}});
     if(new Date(order.quoteExpiresAt)<=new Date())return res.status(409).json({error:{code:'QUOTE_EXPIRED',message:'This fleet quote has expired. Please recheck availability.'}});
-    const amountPaise=Math.round(Number(order.total)*100);
+    const fresh=await repository.recalculateFleetOrderPricing(order.id,req.user.id);
+    if(fresh.code==='QUOTE_STALE')return res.status(409).json({error:{code:'QUOTE_STALE',message:'Vehicle pricing or availability changed. Please regenerate the fleet quote.'}});
+    if(fresh.code==='VEHICLE_UNAVAILABLE')return res.status(409).json({error:{code:'VEHICLE_UNAVAILABLE',message:'One or more vehicles are no longer available.'}});
+    const amountPaise=fresh.totalPaise;
+    const requestedAmountPaise=req.body?.amountPaise==null?amountPaise:Number(req.body.amountPaise);
+    if(!Number.isInteger(requestedAmountPaise)||requestedAmountPaise!==amountPaise)return res.status(409).json({error:{code:'PAYMENT_AMOUNT_MISMATCH',message:'The payment amount does not match the current RideOn price.'}});
     const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise});
     const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
     res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:paymentRequest.paymentUrl,amount:result.payment.amountPaise,currency:'INR'},order});
@@ -1534,7 +1539,7 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
 });
 
 app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
-  const parsed=z.object({ bookingId:z.string().uuid(), idempotencyKey:z.string().trim().min(8).max(128).optional() }).safeParse(req.body);
+  const parsed=z.object({ bookingId:z.string().uuid(), amountPaise:z.number().int().min(0).optional(), idempotencyKey:z.string().trim().min(8).max(128).optional() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'bookingId is required.',details:parsed.error.flatten()}});
   const booking=await repository.getBooking(parsed.data.bookingId, req.user.id);
   if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
@@ -1542,7 +1547,14 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
   if(booking.paymentStatus==='paid') return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This booking is already paid.'}});
   try {
     return await repository.withPaymentLock(booking.id, async () => {
-      const amountPaise=Math.round(Number(booking.pricing.total)*100);
+      const authoritative=await repository.getAuthoritativeBookingPrice(booking.id,req.user.id);
+      if(!authoritative) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+      const storedTotalPaise=Math.round(Number(booking.pricing.total)*100);
+      const currentTotalPaise=Math.round(Number(authoritative.totalPayable)*100);
+      if(storedTotalPaise!==currentTotalPaise) return res.status(409).json({error:{code:'QUOTE_STALE',message:'Vehicle pricing has changed. Please refresh your quote before payment.'}});
+      const requestedAmountPaise=req.body?.amountPaise==null?currentTotalPaise:Number(req.body.amountPaise);
+      if(!Number.isInteger(requestedAmountPaise)||requestedAmountPaise!==currentTotalPaise) return res.status(409).json({error:{code:'PAYMENT_AMOUNT_MISMATCH',message:'The payment amount does not match the current RideOn price.'}});
+      const amountPaise=currentTotalPaise;
       const existing=await repository.findPaymentByBooking(booking.id);
       if(existing && ['unpaid','pending'].includes(existing.status)) {
         return res.json({payment:{
