@@ -1646,25 +1646,22 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function checkVehicleAvailability(vehicleId,startAt,endAt) {
-    const start = new Date(startAt);
-    const end = new Date(endAt);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
-      const e = new Error('invalid booking window');
-      e.code = 'INVALID_BOOKING_WINDOW';
-      throw e;
-    }
+    const start = new Date(startAt), end = new Date(endAt);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) throw Object.assign(new Error('invalid booking window'),{code:'INVALID_BOOKING_WINDOW'});
     if (!useDatabase) {
-      const vehicle = memory.vehicles.get(vehicleId) || fleet.find(v => v.id === vehicleId);
-      if (!vehicle) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-      if (vehicle.active === false) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
-      const overlap = [...memory.bookings.values()].some(b => b.vehicleId===vehicleId && ['requested','confirmed','in_progress'].includes(b.status) && start < new Date(b.endAt) && end > new Date(b.startAt));
-      return { vehicleId:String(vehicleId), exists:true, active:true, available:!overlap };
+      const vehicle=memory.vehicles.get(String(vehicleId))||fleet.find(v=>String(v.id)===String(vehicleId));
+      if(!vehicle)return {vehicleId:String(vehicleId),exists:false,active:false,available:false};
+      const state=String(vehicle.operationalState||'AVAILABLE').toUpperCase();
+      if(vehicle.active===false||!['AVAILABLE','RESERVED'].includes(state))return {vehicleId:String(vehicleId),exists:true,active:vehicle.active!==false,available:false,operationalState:state};
+      const overlap=[...memory.bookings.values()].some(b=>String(b.vehicleId)===String(vehicleId)&&['requested','confirmed','in_progress'].includes(b.status)&&start<new Date(b.endAt)&&end>new Date(b.startAt));
+      return {vehicleId:String(vehicleId),exists:true,active:true,available:!overlap,operationalState:state};
     }
-    const vehicleResult = await pool.query('select id,active from vehicles where id=$1',[vehicleId]);
-    if (!vehicleResult.rows[0]) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-    if (!vehicleResult.rows[0].active) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
-    const bookingResult = await pool.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",[vehicleId,startAt,endAt]);
-    return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0 };
+    const vehicleResult=await pool.query("select id,active,operational_state,maintenance_required from vehicles where id=$1 and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter')",[vehicleId]);
+    if(!vehicleResult.rows[0])return {vehicleId:String(vehicleId),exists:false,active:false,available:false};
+    const v=vehicleResult.rows[0],state=String(v.operational_state||'AVAILABLE').toUpperCase();
+    if(!v.active||v.maintenance_required||!['AVAILABLE','RESERVED'].includes(state))return {vehicleId:String(vehicleId),exists:true,active:Boolean(v.active),available:false,operationalState:state};
+    const bookingResult=await pool.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",[vehicleId,startAt,endAt]);
+    return {vehicleId:String(vehicleId),exists:true,active:true,available:bookingResult.rowCount===0,operationalState:state};
   }
 
   async function createBooking(input) {
