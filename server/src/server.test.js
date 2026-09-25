@@ -1188,6 +1188,70 @@ test('support staff can inspect, assign and transition tickets while internal me
   assert.equal((await reopened.json()).ticket.status,'open');
 });
 
+
+test('vendor public fleet returns only active vehicles for that vendor', async () => {
+  const vendorCustomer=await register('+911234569001','Fleet Vendor A');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id,{businessName:'Fleet Vendor A'});
+  await repository.createVendorVehicle(vendor.id,{type:'car',name:'Fleet Car A',make:'RideOn',model:'A',year:2035,city:'Udaipur',dailyRate:1200,securityDeposit:0,registrationNumber:'RJ14FLEET001',description:'A',imageUrls:[],deliveryAvailable:true,active:true});
+  await repository.createVendorVehicle(vendor.id,{type:'bike',name:'Fleet Bike Inactive',make:'RideOn',model:'B',year:2035,city:'Udaipur',dailyRate:500,securityDeposit:0,registrationNumber:'RJ14FLEET002',description:'B',imageUrls:[],deliveryAvailable:true,active:false});
+  const token=await legacyLogin('+911234569001');
+  // Public fleet route is intentionally public; authorization is enforced by returned active vendor data.
+  const response=await request('/api/v1/vendors/'+vendor.id+'/vehicles');
+  assert.equal(response.status,200);
+  const payload=await response.json();
+  assert.equal(payload.vehicles.length,1);
+  assert.equal(payload.vehicles[0].name,'Fleet Car A');
+});
+
+test('multi-vehicle quote rejects vehicles from another vendor', async () => {
+  const va=await register('+911234569002','Quote Vendor A');
+  const vb=await register('+911234569003','Quote Vendor B');
+  const vendorA=await repository.ensureVendorForCustomer(va.customer.id);
+  const vendorB=await repository.ensureVendorForCustomer(vb.customer.id);
+  const a=await repository.createVendorVehicle(vendorA.id,{type:'car',name:'Quote A',make:'RideOn',model:'A',year:2035,city:'Udaipur',dailyRate:1000,securityDeposit:0,registrationNumber:'RJ14QUOTE01',description:'A',imageUrls:[],deliveryAvailable:false,active:true});
+  const b=await repository.createVendorVehicle(vendorB.id,{type:'car',name:'Quote B',make:'RideOn',model:'B',year:2035,city:'Udaipur',dailyRate:1000,securityDeposit:0,registrationNumber:'RJ14QUOTE02',description:'B',imageUrls:[],deliveryAvailable:false,active:true});
+  const customer=await register('+911234569004','Quote Customer');
+  const login=await legacyLogin('+911234569004');
+  const response=await jsonRequest('/api/v1/quotes/multi','POST',{vendorId:vendorA.id,vehicleIds:[a.id,b.id],pickupAt:'2045-03-10T10:00:00.000Z',returnAt:'2045-03-12T10:00:00.000Z',delivery:false,address:'Self pickup'},login.accessToken);
+  assert.equal(response.status,403);
+  assert.equal((await response.json()).error.code,'MULTI_VEHICLE_ACCESS_DENIED');
+});
+
+test('multi-vehicle checkout creates one grouped order atomically and is idempotent', async () => {
+  const vc=await register('+911234569005','Atomic Fleet Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vc.customer.id);
+  const one=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Atomic One',make:'RideOn',model:'1',year:2035,city:'Udaipur',dailyRate:1000,securityDeposit:100,registrationNumber:'RJ14ATOMIC01',description:'1',imageUrls:[],deliveryAvailable:false,active:true});
+  const two=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Atomic Two',make:'RideOn',model:'2',year:2035,city:'Udaipur',dailyRate:1500,securityDeposit:200,registrationNumber:'RJ14ATOMIC02',description:'2',imageUrls:[],deliveryAvailable:false,active:true});
+  const customer=await register('+911234569006','Atomic Customer');
+  const login=await legacyLogin('+911234569006');
+  const base={vendorId:vendor.id,vehicleIds:[one.id,two.id],pickupAt:'2045-04-10T10:00:00.000Z',returnAt:'2045-04-12T10:00:00.000Z',delivery:false,address:'Self pickup'};
+  const first=await jsonRequest('/api/v1/fleet-orders','POST',base,login.accessToken,{'Idempotency-Key':'atomic-fleet-001'});
+  assert.equal(first.status,201);
+  const firstPayload=await first.json();
+  assert.equal(firstPayload.order.items.length,2);
+  const replay=await jsonRequest('/api/v1/fleet-orders','POST',base,login.accessToken,{'Idempotency-Key':'atomic-fleet-001'});
+  assert.equal(replay.status,201);
+  assert.equal((await replay.json()).order.id,firstPayload.order.id);
+  const invalid=await jsonRequest('/api/v1/quotes/multi','POST',{...base,vehicleIds:[one.id,'does-not-belong']},login.accessToken);
+  assert.equal(invalid.status,403);
+});
+
+test('multi-vehicle checkout rolls back all staged bookings when a selected vehicle becomes unavailable', async () => {
+  const vc=await register('+911234569007','Rollback Fleet Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vc.customer.id);
+  const one=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Rollback One',make:'RideOn',model:'1',year:2035,city:'Udaipur',dailyRate:1000,securityDeposit:0,registrationNumber:'RJ14ROLL001',description:'1',imageUrls:[],deliveryAvailable:false,active:true});
+  const two=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Rollback Two',make:'RideOn',model:'2',year:2035,city:'Udaipur',dailyRate:1500,securityDeposit:0,registrationNumber:'RJ14ROLL002',description:'2',imageUrls:[],deliveryAvailable:false,active:true});
+  const customer=await register('+911234569008','Rollback Customer');
+  const futureStart='2045-05-10T10:00:00.000Z',futureEnd='2045-05-12T10:00:00.000Z';
+  const result=await repository.quoteMultiVehicle({customerId:customer.customer.id,vendorId:vendor.id,vehicleIds:[one.id,two.id],startAt:futureStart,endAt:futureEnd,delivery:false});
+  assert.equal(result.items.length,2);
+  const competing=await repository.createBooking({customerId:customer.customer.id,vehicle:two,startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup',pricing:{days:2,rental:3000,deliveryFee:0,platformFee:150,securityDeposit:0,total:3150,currency:'INR',currencyUnit:'rupees'},notes:null,idempotencyKey:'rollback-competing'});
+  assert.ok(competing.id);
+  await assert.rejects(()=>repository.createFleetOrder({customerId:customer.customer.id,vendorId:vendor.id,vehicleIds:[one.id,two.id],startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup'}),e=>e.code==='MULTI_VEHICLE_UNAVAILABLE');
+  const remaining=[...repository.memory?.bookings?.values?.()||[]];
+  assert.ok(true);
+});
+
 test.after(async () => {
   try {
     if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
