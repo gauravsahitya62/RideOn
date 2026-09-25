@@ -117,7 +117,7 @@ export const rideOnApi = {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString();
     return request(`/api/v1/vendors/map${query ? `?${query}` : ''}`);
   },
-  getRouteEta: (vendorId, latitude, longitude) => request(`/api/v1/routing/eta?vendorId=${encode(vendorId)}&latitude=${encode(latitude)}&longitude=${encode(longitude)}`),
+  getRouteEta: (vehicleId, latitude, longitude) => request(`/api/v1/routing/eta?vehicleId=${encode(vehicleId)}&latitude=${encode(latitude)}&longitude=${encode(longitude)}`),
   geocodeAddress: (address, city) => {
     const query = new URLSearchParams({ address: String(address || ''), ...(city ? { city: String(city) } : {}) }).toString();
     return request(`/api/v1/geocoding/search?${query}`);
@@ -126,10 +126,10 @@ export const rideOnApi = {
   updateVendorServiceLocation: (payload) => request('/api/v1/vendor/service-location', { method:'PATCH', body:JSON.stringify(payload) }),
   updateBookingRoute: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/route`, { method:'POST', body: JSON.stringify({}) }),
   getTracking: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/tracking`),
-  startDelivery: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/start`, { method:'POST', body:JSON.stringify({}) }),
-  updateDeliveryLocation: (bookingId,payload) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/location`, { method:'POST', body:JSON.stringify(payload) }),
-  completeDelivery: (bookingId,payload={}) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/complete`, { method:'POST', body:JSON.stringify(payload) }),
-  abortDelivery: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/abort`, { method:'POST', body:JSON.stringify({}) }),
+  startDelivery: (bookingId) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/delivery/start`, { method:'POST', body:JSON.stringify({}) }),
+  updateDeliveryLocation: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/delivery/location`, { method:'POST', body:JSON.stringify(payload) }),
+  completeDelivery: (bookingId,payload={}) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/delivery/complete`, { method:'POST', body:JSON.stringify(payload) }),
+  abortDelivery: (bookingId) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/delivery/abort`, { method:'POST', body:JSON.stringify({}) }),
   createTrackingSocket: (bookingId, handlers = {}) => {
     if (!accessToken) throw new Error('RideOn session expired. Please sign in again.');
     const wsBase = API_URL.replace(/^http/i, 'ws');
