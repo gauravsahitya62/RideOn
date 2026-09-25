@@ -1585,6 +1585,10 @@ export function createRepository({ databaseUrl, fleet }) {
       const paymentRecord = event.providerOrderId
         ? [...memory.payments.values()].find(p => p.providerOrderId === String(event.providerOrderId))
         : memory.payments.get(String(resolvedBookingId));
+      if (event.status === 'paid' && String(booking.status) === 'requested') {
+        booking.status = 'confirmed';
+        booking.lifecycleState = 'CONFIRMED';
+      }
       if (event.status==='paid') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='held'; }
       if (event.status==='refund_pending') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='refund_pending'; }
       if (event.status==='refunded') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) { deposit.status='refunded'; deposit.refundProviderReference=event.providerReference; } }
@@ -1639,13 +1643,20 @@ export function createRepository({ databaseUrl, fleet }) {
       await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[resolvedBookingId,event.status,event.providerReference]);
       await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
       if(fleetOrder){
-        await client.query('update fleet_orders set payment_status=$2,updated_at=now() where id=$1',[fleetOrder.id,event.status]);
-        await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where fleet_order_id=$1',[fleetOrder.id,event.status,event.providerReference]);
+        await client.query('update fleet_orders set payment_status=$2,status=case when $2='paid' and status='requested' then 'confirmed' else status end,updated_at=now() where id=$1',[fleetOrder.id,event.status]);
+        await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,status=case when $2='paid' and status='requested' then 'confirmed' else status end,lifecycle_state=case when $2='paid' and status='requested' then 'CONFIRMED' else lifecycle_state end,updated_at=now() where fleet_order_id=$1',[fleetOrder.id,event.status,event.providerReference]);
         if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('pending','held')",[fleetOrder.id]);
         if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','refund_pending')",[fleetOrder.id]);
         if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','refund_pending','release_pending')",[fleetOrder.id,event.providerReference]);
       }else{
-        if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
+        if(event.status==='paid') {
+          const fleetVehicle=await client.query("select coalesce(fleet_vehicle_class,'') as fleet_vehicle_class,coalesce(operational_state,'AVAILABLE') as operational_state,coalesce(maintenance_required,false) as maintenance_required,owner_id from vehicles where id=(select vehicle_id from bookings where id=$1)",[resolvedBookingId]);
+          const ownFleet=String(fleetVehicle.rows[0]?.fleet_vehicle_class||'') in ['bike','scooter'] || (!fleetVehicle.rows[0]?.owner_id && String(fleetVehicle.rows[0]?.operational_state||'AVAILABLE')!=='INACTIVE');
+          if(ownFleet) {
+            await client.query("update bookings set status=case when status='requested' then 'confirmed' else status end,lifecycle_state=case when status='requested' then 'CONFIRMED' else lifecycle_state end,updated_at=now() where id=$1",[resolvedBookingId]);
+          }
+          await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
+        }
         if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[resolvedBookingId]);
         if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id=$1 and status in ('held','refund_pending','release_pending')",[resolvedBookingId,event.providerReference]);
       }
