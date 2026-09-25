@@ -455,51 +455,89 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function createVehicleReservation({vehicleIds,customerId,startAt,endAt,expiresAt,idempotencyKey=null}={}) {
     const ids=[...new Set((vehicleIds||[]).map(v=>String(v).trim()).filter(Boolean))];
+    if(!ids.length||ids.length>10)throw Object.assign(new Error('Select between 1 and 10 vehicles.'),{code:'INVALID_RESERVATION'});
+    const key=idempotencyKey?String(idempotencyKey).trim():null;
+    if(ids.length>1&&!key)throw Object.assign(new Error('An Idempotency-Key is required for multi-vehicle reservations.'),{code:'INVALID_IDEMPOTENCY_KEY'});
     const parsed=pricingService.parseWindow(startAt,endAt);
     const expiry=expiresAt?new Date(expiresAt):new Date(pricingService.reservationExpiry());
     if(Number.isNaN(expiry.getTime())||expiry<=new Date())throw Object.assign(new Error('Reservation expiry is invalid.'),{code:'INVALID_RESERVATION'});
+    const now=new Date();
     if(!useDatabase){
-      for(const [id,res] of memory.vehicleReservations){
-        if(new Date(res.expiresAt)<=new Date()&&res.status==='active')res.status='expired';
-        if(res.status==='active'&&ids.includes(res.vehicleId)&&new Date(res.startAt)<parsed.end&&new Date(res.endAt)>parsed.start)throw Object.assign(new Error('Vehicle is temporarily reserved by another checkout.'),{code:'VEHICLE_UNAVAILABLE'});
+      for(const r of memory.vehicleReservations.values()){
+        if(r.status==='active'&&new Date(r.expiresAt)<=now)r.status='expired';
       }
-      const reservation={id:crypto.randomUUID(),vehicleIds:ids,customerId:String(customerId),startAt:parsed.start.toISOString(),endAt:parsed.end.toISOString(),expiresAt:expiry.toISOString(),status:'active',idempotencyKey};
-      memory.vehicleReservations.set(reservation.id,reservation);
-      return reservation;
+      if(key){
+        const replay=[...memory.vehicleReservations.values()].filter(r=>String(r.customerId)===String(customerId)&&r.idempotencyKey===key);
+        if(replay.length)return {...replay[0],vehicleIds:replay.map(r=>String(r.vehicleId)),id:replay[0].groupId||replay[0].id};
+      }
+      for(const id of ids){
+        const vehicle=[...memory.vehicles.values(),...fleet].find(v=>String(v.id)===id&&v.ownerId==null&&v.active!==false&&String(v.type||'').toLowerCase()!=='car'&&['bike','scooter'].includes(String(v.fleetVehicleClass||v.vehicleClass||'bike').toLowerCase()));
+        if(!vehicle)throw Object.assign(new Error('One or more vehicles are unavailable.'),{code:'VEHICLE_UNAVAILABLE'});
+        const state=String(vehicle.operationalState||'AVAILABLE').toUpperCase();
+        if(state!=='AVAILABLE'||vehicle.maintenanceRequired===true||vehicle.pricingActive===false)throw Object.assign(new Error('One or more vehicles are unavailable.'),{code:'VEHICLE_UNAVAILABLE'});
+        const conflict=[...memory.vehicleReservations.values()].some(r=>String(r.vehicleId)===id&&r.status==='active'&&new Date(r.expiresAt)>now&&new Date(r.startAt)<parsed.end&&new Date(r.endAt)>parsed.start);
+        const bookingConflict=[...memory.bookings.values()].some(b=>String(b.vehicleId)===id&&['requested','confirmed','in_progress'].includes(String(b.status))&&new Date(b.startAt)<parsed.end&&new Date(b.endAt)>parsed.start);
+        if(conflict||bookingConflict)throw Object.assign(new Error('Vehicle is temporarily unavailable.'),{code:'VEHICLE_UNAVAILABLE'});
+      }
+      const groupId=crypto.randomUUID();
+      for(const id of ids){
+        const reservation={id:crypto.randomUUID(),groupId,vehicleId:id,customerId:String(customerId),startAt:parsed.start.toISOString(),endAt:parsed.end.toISOString(),expiresAt:expiry.toISOString(),status:'active',idempotencyKey:key};
+        memory.vehicleReservations.set(reservation.id,reservation);
+      }
+      const first=[...memory.vehicleReservations.values()].find(r=>r.groupId===groupId);
+      return {id:first.id,groupId,vehicleIds:ids,customerId:String(customerId),startAt:parsed.start.toISOString(),endAt:parsed.end.toISOString(),expiresAt:expiry.toISOString(),status:'active',idempotencyKey:key};
     }
     const client=await pool.connect();
     try{
       await client.query('begin');
-      if(idempotencyKey){
-        const existing=await client.query("select * from rideon_vehicle_reservations where customer_id=$1 and idempotency_key=$2 for update",[customerId,idempotencyKey]);
-        if(existing.rows[0]){await client.query('commit');return existing.rows[0];}
+      if(key){
+        const existing=await client.query("select * from rideon_vehicle_reservations where customer_id=$1 and idempotency_key=$2 order by created_at for update",[customerId,key]);
+        if(existing.rows.length){
+          await client.query('commit');
+          return {id:String(existing.rows[0].id),groupId:existing.rows[0].reservation_group_id?String(existing.rows[0].reservation_group_id):String(existing.rows[0].id),vehicleIds:existing.rows.map(r=>String(r.vehicle_id)),customerId:String(customerId),startAt:iso(existing.rows[0].start_at),endAt:iso(existing.rows[0].end_at),expiresAt:iso(existing.rows[0].expires_at),status:existing.rows.every(r=>r.status==='active')?'active':existing.rows[0].status,idempotencyKey:key};
+        }
       }
       const locked=await client.query("select id from vehicles where id::text=any($1::text[]) and owner_id is null and active=true and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE')='AVAILABLE' and coalesce(maintenance_required,false)=false and coalesce(rideon_pricing_active,true)=true for update",[ids]);
       if(locked.rows.length!==ids.length)throw Object.assign(new Error('One or more vehicles are unavailable.'),{code:'VEHICLE_UNAVAILABLE'});
       await client.query("update rideon_vehicle_reservations set status='expired',updated_at=now() where status='active' and expires_at<=now()");
       const conflicts=await client.query(`select 1 from rideon_vehicle_reservations where vehicle_id::text=any($1::text[]) and status='active' and start_at<$3 and end_at>$2 and expires_at>now() limit 1`,[ids,parsed.start.toISOString(),parsed.end.toISOString()]);
       if(conflicts.rows[0])throw Object.assign(new Error('Vehicle is temporarily reserved by another checkout.'),{code:'VEHICLE_UNAVAILABLE'});
-      const rows=[];
+      const bookingConflict=await client.query(`select 1 from bookings where vehicle_id::text=any($1::text[]) and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1`,[ids,parsed.start.toISOString(),parsed.end.toISOString()]);
+      if(bookingConflict.rows[0])throw Object.assign(new Error('Vehicle is already booked for those dates.'),{code:'VEHICLE_UNAVAILABLE'});
+      const groupId=crypto.randomUUID(),rows=[];
       for(const id of ids){
-        const q=await client.query(`insert into rideon_vehicle_reservations(vehicle_id,customer_id,start_at,end_at,status,expires_at,idempotency_key) values($1,$2,$3,$4,'active',$5,$6) returning *`,[id,customerId,parsed.start.toISOString(),parsed.end.toISOString(),expiry.toISOString(),idempotencyKey]);
+        const q=await client.query(`insert into rideon_vehicle_reservations(vehicle_id,customer_id,start_at,end_at,status,expires_at,idempotency_key,reservation_group_id) values($1,$2,$3,$4,'active',$5,$6,$7) returning *`,[id,customerId,parsed.start.toISOString(),parsed.end.toISOString(),expiry.toISOString(),key,groupId]);
         rows.push(q.rows[0]);
       }
       await client.query('commit');
-      return {id:String(rows[0].id),vehicleIds:ids,customerId:String(customerId),startAt:parsed.start.toISOString(),endAt:parsed.end.toISOString(),expiresAt:expiry.toISOString(),status:'active',idempotencyKey};
+      return {id:String(rows[0].id),groupId,vehicleIds:ids,customerId:String(customerId),startAt:parsed.start.toISOString(),endAt:parsed.end.toISOString(),expiresAt:expiry.toISOString(),status:'active',idempotencyKey:key};
     }catch(error){try{await client.query('rollback')}catch{}throw error;}finally{client.release();}
   }
 
   async function releaseVehicleReservation(reservationId,{customerId=null,status='released'}={}) {
     if(!['released','expired','converted'].includes(status))throw Object.assign(new Error('Invalid reservation state.'),{code:'INVALID_RESERVATION'});
     if(!useDatabase){
-      const r=memory.vehicleReservations.get(String(reservationId));
-      if(!r||customerId&&String(r.customerId)!==String(customerId))return null;
-      r.status=status;r.updatedAt=new Date().toISOString();return r;
+      const first=memory.vehicleReservations.get(String(reservationId));
+      if(!first||customerId&&String(first.customerId)!==String(customerId))return null;
+      const group=first.groupId||first.id;
+      let representative=null;
+      for(const r of memory.vehicleReservations.values()){
+        if((r.groupId||r.id)===group&&String(r.customerId)===String(first.customerId)&&r.status==='active'){r.status=status;r.updatedAt=new Date().toISOString();representative=representative||r;}
+      }
+      return representative?{...representative,groupId:group,vehicleIds:[...memory.vehicleReservations.values()].filter(r=>(r.groupId||r.id)===group).map(r=>String(r.vehicleId))}:null;
     }
-    const q=await pool.query("update rideon_vehicle_reservations set status=$3,updated_at=now() where id=$1 and ($2::uuid is null or customer_id=$2) and status='active' returning *",[reservationId,customerId,status]);
+    const first=await pool.query("select id,customer_id,idempotency_key,reservation_group_id from rideon_vehicle_reservations where id=$1",[reservationId]);
+    if(!first.rows[0]||customerId&&String(first.rows[0].customer_id)!==String(customerId))return null;
+    const row=first.rows[0];
+    const predicate=row.reservation_group_id
+      ? ["reservation_group_id=$1", [row.reservation_group_id]]
+      : row.idempotency_key
+        ? ["customer_id=$1 and idempotency_key=$2", [row.customer_id,row.idempotency_key]]
+        : ["id=$1", [row.id]];
+    const values=row.reservation_group_id?[row.reservation_group_id]:row.idempotency_key?[row.customer_id,row.idempotency_key]:[row.id];
+    const q=await pool.query(`update rideon_vehicle_reservations set status=$${values.length+1},updated_at=now() where ${predicate[0]} and status='active' returning *`,[...values,status]);
     return q.rows[0]||null;
   }
-
   async function recalculateFleetOrderPricing(orderId, customerId) {
     if(!useDatabase){
       const order=memory.fleetOrders?.get(String(orderId));
@@ -626,6 +664,7 @@ export function createRepository({ databaseUrl, fleet }) {
         memory.bookings.set(String(b.id),b);
         if(Number(b.pricing.securityDeposit||0)>0)memory.securityDeposits.set(String(b.id),{bookingId:String(b.id),customerId:String(customerId),originalAmount:Number(b.pricing.securityDeposit),refundableAmount:Number(b.pricing.securityDeposit),approvedDeduction:0,status:'pending'});
       }
+      for(const b of stagedBookings){if(normalizedKey){for(const r of memory.vehicleReservations.values())if(String(r.customerId)===String(customerId)&&r.idempotencyKey===normalizedKey&&String(r.vehicleId)===String(b.vehicleId)&&r.status==='active'){r.status='converted';r.bookingId=b.id;}}}
       memory.fleetOrders.set(String(order.id),order);
       if(normalizedKey)memory.fleetOrderIdempotency.set(String(customerId)+':'+normalizedKey,order);
       return order;
@@ -669,6 +708,7 @@ export function createRepository({ databaseUrl, fleet }) {
         if(item.securityDeposit>0)await client.query(`insert into security_deposits(booking_id,customer_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$3,'pending') on conflict(booking_id) do nothing`,[booking.id,customerId,Math.round(item.securityDeposit*100)]);
         await client.query(`insert into booking_status_events(booking_id,next_status,actor_type,actor_id) values($1,'requested','customer',$2)`,[booking.id,customerId]);
       }
+      await client.query("update rideon_vehicle_reservations set status='converted',booking_id=(select b.id from bookings b where b.fleet_order_id=$2 and b.vehicle_id=rideon_vehicle_reservations.vehicle_id limit 1),updated_at=now() where customer_id=$1 and idempotency_key=$3 and status='active' and vehicle_id in (select vehicle_id from bookings where fleet_order_id=$2)",[customerId,orderId,normalizedKey]);
       await client.query(`insert into fleet_order_items(fleet_order_id,booking_id,vehicle_id,line_rental_total_paise,line_delivery_fee_paise,line_platform_fee_paise,line_security_deposit_paise,line_total_paise) select $1,id,vehicle_id,rental_total_paise,delivery_fee_paise,platform_fee_paise,security_deposit_paise,total_paise from bookings where fleet_order_id=$1`,[orderId]);
       await client.query('commit');
       return {id:orderId,customerId:String(customerId),fleetOwner:'rideon',startAt:startDate.toISOString(),endAt:endDate.toISOString(),delivery:Boolean(delivery),address:String(address||'').trim(),items:created,rentalSubtotal:parts.rental,deliveryFee:parts.deliveryFee,platformFee:parts.platformFee,securityDeposit:parts.securityDeposit,total,paymentStatus:'unpaid',status:'requested',quoteExpiresAt:new Date(Date.now()+5*60*1000).toISOString()};
@@ -1466,6 +1506,7 @@ export function createRepository({ databaseUrl, fleet }) {
         const reservationOverlap=await client.query("select 1 from rideon_vehicle_reservations where vehicle_id=$1 and status='active' and expires_at>now() and start_at<$3 and end_at>$2 limit 1",[input.vehicle.id,input.startAt,input.endAt]).catch(()=>({rows:[]}));
         if(reservationOverlap.rows[0]){const x=new Error('vehicle temporarily reserved');x.code='VEHICLE_UNAVAILABLE';throw x;}
         const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,vendor_service_latitude,vendor_service_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,tax_paise,discount_paise,security_deposit_paise,total_paise,status,payment_status,delivery_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,\'requested\',\'unpaid\',\'scheduled\',$17) returning *',[input.customerId,row.id,row.owner_id||null,input.startAt,input.endAt,input.delivery,input.address,deliveryLatitude,deliveryLongitude,serviceLocation?.service_latitude==null?null:Number(serviceLocation.service_latitude),serviceLocation?.service_longitude==null?null:Number(serviceLocation.service_longitude),Math.round(authoritativePricing.deliveryFee*100),Math.round(authoritativePricing.rentalSubtotal*100),Math.round(authoritativePricing.platformFee*100),Math.round(authoritativePricing.securityDeposit*100),Math.round(authoritativePricing.totalPayable*100),input.notes||null]);
+        if(input.idempotencyKey) await client.query("update rideon_vehicle_reservations set status='converted',booking_id=$2,updated_at=now() where customer_id=$1 and idempotency_key=$3 and status='active' and vehicle_id=$4",[input.customerId,rows[0].id,input.idempotencyKey,row.id]);
         if(input.idempotencyKey) await client.query('insert into booking_idempotency_keys (customer_id,idempotency_key,booking_id) values ($1,$2,$3)',[input.customerId,input.idempotencyKey,rows[0].id]);
         if(authoritativePricing.securityDeposit>0) await client.query("insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$4,$4,'pending') on conflict(booking_id) do nothing",[rows[0].id,input.customerId,row.owner_id||null,Math.round(authoritativePricing.securityDeposit*100)]);
         await client.query("insert into booking_status_events (booking_id,next_status,actor_type,actor_id) values ($1,'requested','customer',$2)",[rows[0].id,input.customerId]);
@@ -1492,7 +1533,9 @@ export function createRepository({ databaseUrl, fleet }) {
     const vendor=vehicle.vendorServiceLocation||null; const id=crypto.randomUUID();
     const booking={id,customerId:input.customerId,vehicleId:vehicle.id,vendorId:vehicle.ownerId||vehicle.vendorId||null,vehicle,startAt:input.startAt,endAt:input.endAt,delivery:input.delivery,address:input.address,deliveryLatitude,deliveryLongitude,vendorServiceLatitude:vendor?.latitude??null,vendorServiceLongitude:vendor?.longitude??null,routeDistanceMeters:null,routeDurationSeconds:null,routeProvider:null,notes:input.notes,pricing:{days:authoritativePricing.days,rental:authoritativePricing.rentalSubtotal,deliveryFee:authoritativePricing.deliveryFee,platformFee:authoritativePricing.platformFee,tax:authoritativePricing.tax,discount:authoritativePricing.discount,securityDeposit:authoritativePricing.securityDeposit,total:authoritativePricing.totalPayable,totalPayable:authoritativePricing.totalPayable,refundableSecurityDeposit:authoritativePricing.refundableSecurityDeposit,payableExcludingDeposit:authoritativePricing.payableExcludingDeposit,currency:'INR',currencyUnit:'rupees'},status:'requested',paymentStatus:'unpaid',createdAt:new Date().toISOString()};
     if(authoritativePricing.securityDeposit>0)memory.securityDeposits.set(id,{bookingId:id,customerId:input.customerId,vendorId:vehicle.ownerId||null,originalAmount:authoritativePricing.securityDeposit,refundableAmount:authoritativePricing.securityDeposit,approvedDeduction:0,status:'pending'});
-    memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
+    memory.bookings.set(id,booking);
+    if(key){for(const r of memory.vehicleReservations.values())if(String(r.customerId)===String(input.customerId)&&r.idempotencyKey===input.idempotencyKey&&String(r.vehicleId)===String(vehicle.id)&&r.status==='active'){r.status='converted';r.bookingId=id;}}
+    if(key)memory.idempotency.set(key,booking);return booking;
   }
 
 
