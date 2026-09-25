@@ -625,6 +625,27 @@ app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (re
   }
 });
 
+app.post('/api/v1/reservations', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({vehicleIds:z.array(z.string().trim().min(1).max(64)).min(1).max(10),startAt:z.string().datetime(),endAt:z.string().datetime()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid reservation details.',details:parsed.error.flatten()}});
+  const key=req.get('Idempotency-Key')?.trim()||null;
+  try{
+    const reservation=await repository.createFleetReservation({vehicleIds:parsed.data.vehicleIds,customerId:req.user.id,startAt:parsed.data.startAt,endAt:parsed.data.endAt,idempotencyKey:key});
+    res.status(201).json({reservation});
+  }catch(error){
+    const status=error?.code==='INVALID_BOOKING_WINDOW'||error?.code==='INVALID_RESERVATION'?400:error?.code==='VEHICLE_UNAVAILABLE'?409:503;
+    res.status(status).json({error:{code:error?.code||'RESERVATION_FAILED',message:error?.message||'Vehicle reservation could not be created.'}});
+  }
+});
+
+app.post('/api/v1/reservations/:id/release', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    const reservation=await repository.releaseVehicleReservation(req.params.id,{customerId:req.user.id,status:'released'});
+    if(!reservation)return res.status(404).json({error:{code:'RESERVATION_NOT_FOUND',message:'Reservation not found.'}});
+    res.json({reservation});
+  }catch(error){res.status(409).json({error:{code:error?.code||'RESERVATION_RELEASE_FAILED',message:error?.message||'Reservation could not be released.'}});}
+});
+
 app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async (req,res)=>{
   try{
     if(!repository.getFleetOrder) return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
