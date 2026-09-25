@@ -1355,14 +1355,24 @@ export function createRepository({ databaseUrl, fleet }) {
       const resolvedBookingId = String(payment.booking_id);
       if (event.bookingId && String(event.bookingId) !== resolvedBookingId) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
       if (event.providerOrderId && String(payment.provider_order_id) !== String(event.providerOrderId)) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
-      const bookingResult = await client.query('select id,payment_status,total_paise from bookings where id=$1 for update',[resolvedBookingId]);
+      const bookingResult = await client.query('select id,payment_status,total_paise,fleet_order_id,status from bookings where id=$1 for update',[resolvedBookingId]);
       if (!bookingResult.rows[0]) {
         await client.query('rollback');
         return { applied:false, duplicate:false, invalid:true };
       }
       const booking = bookingResult.rows[0];
-      if (event.status==='paid' && !['requested','confirmed'].includes(String(booking.status))) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
-      if (event.currency !== 'INR' || Number(event.amountPaise) !== Number(booking.total_paise) || Number(event.amountPaise) !== Number(payment.amount_paise) || !event.providerReference || !canTransition(booking.payment_status, event.status)) {
+      let fleetOrder = null;
+      if (booking.fleet_order_id) {
+        const fleetResult = await client.query('select id,payment_status,total_paise,status from fleet_orders where id=$1 for update',[booking.fleet_order_id]);
+        fleetOrder = fleetResult.rows[0] || null;
+        if (!fleetOrder) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
+      }
+      const expectedTotalPaise = fleetOrder ? Number(fleetOrder.total_paise) : Number(booking.total_paise);
+      const currentPaymentStatus = fleetOrder ? String(fleetOrder.payment_status) : String(booking.payment_status);
+      if (event.status==='paid' && (fleetOrder ? fleetOrder.status !== 'requested' : !['requested','confirmed'].includes(String(booking.status)))) {
+        await client.query('rollback'); return { applied:false, duplicate:false, invalid:true };
+      }
+      if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedTotalPaise || Number(event.amountPaise) !== Number(payment.amount_paise) || !event.providerReference || !canTransition(currentPaymentStatus, event.status)) {
         await client.query('rollback');
         return { applied:false, duplicate:false, invalid:true };
       }
@@ -1373,9 +1383,17 @@ export function createRepository({ databaseUrl, fleet }) {
       }
       await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[resolvedBookingId,event.status,event.providerReference]);
       await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
-      if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
-      if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[resolvedBookingId]);
-      if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id=$1 and status in ('held','refund_pending','release_pending')",[resolvedBookingId,event.providerReference]);
+      if(fleetOrder){
+        await client.query('update fleet_orders set payment_status=$2,updated_at=now() where id=$1',[fleetOrder.id,event.status]);
+        await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where fleet_order_id=$1',[fleetOrder.id,event.status,event.providerReference]);
+        if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('pending','held')",[fleetOrder.id]);
+        if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','refund_pending')",[fleetOrder.id]);
+        if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','refund_pending','release_pending')",[fleetOrder.id,event.providerReference]);
+      }else{
+        if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
+        if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[resolvedBookingId]);
+        if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id=$1 and status in ('held','refund_pending','release_pending')",[resolvedBookingId,event.providerReference]);
+      }
       await client.query('commit');
       return { applied:true, duplicate:false };
     } catch(e) {
