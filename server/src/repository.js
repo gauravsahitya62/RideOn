@@ -125,13 +125,13 @@ export function createRepository({ databaseUrl, fleet }) {
     // individual vehicles can be listed.
     if (!useDatabase) {
       return [...new Set([...fleet, ...memory.vehicles.values()]
-        .filter(v => v.active !== false)
+        .filter(v => v.ownerId == null && v.active !== false && String(v.type || '').toLowerCase() !== 'car' && ['bike','scooter'].includes(String(v.fleetVehicleClass || v.vehicleClass || 'bike').toLowerCase()))
         .map(v => String(v.city || '').trim())
         .filter(Boolean))]
         .sort((a,b)=>a.localeCompare(b));
     }
     const { rows } = await pool.query(
-      "select distinct trim(city) as city from vehicles where active=true and trim(city) <> '' order by trim(city) asc"
+      "select distinct trim(city) as city from vehicles where owner_id is null and active=true and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and trim(city) <> '' order by trim(city) asc"
     );
     return rows.map(row => row.city).filter(Boolean);
   }
