@@ -567,7 +567,6 @@ app.get('/api/v1/vendors/:vendorId/vehicles', async (req,res)=>{
 
 app.post('/api/v1/quotes/multi', supabaseRequireAuth, requireCustomer, async (req,res)=>{
   const parsed=z.object({
-    vendorId:z.string().uuid(),
     vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
     pickupAt:z.string().datetime(),
     returnAt:z.string().datetime(),
@@ -578,7 +577,7 @@ app.post('/api/v1/quotes/multi', supabaseRequireAuth, requireCustomer, async (re
   }).safeParse(req.body||{});
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid fleet booking details.',details:parsed.error.flatten()}});
   try{
-    const quote=await repository.quoteMultiVehicle({customerId:req.user.id,vendorId:parsed.data.vendorId,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude});
+    const quote=await repository.quoteMultiVehicle({customerId:req.user.id,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude});
     res.json({quote});
   }catch(error){
     const map={INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404};
@@ -588,7 +587,6 @@ app.post('/api/v1/quotes/multi', supabaseRequireAuth, requireCustomer, async (re
 
 app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req,res)=>{
   const parsed=z.object({
-    vendorId:z.string().uuid(),
     vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
     pickupAt:z.string().datetime(),
     returnAt:z.string().datetime(),
@@ -601,7 +599,7 @@ app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (re
   const idempotencyKey=req.get('Idempotency-Key')?.trim()||null;
   if(idempotencyKey&&idempotencyKey.length>128)return res.status(400).json({error:{code:'INVALID_IDEMPOTENCY_KEY'}});
   try{
-    const order=await repository.createFleetOrder({customerId:req.user.id,vendorId:parsed.data.vendorId,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
+    const order=await repository.createFleetOrder({customerId:req.user.id,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
     res.status(201).json({order,data:order});
   }catch(error){
     const map={INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404,VEHICLE_NOT_FOUND:404};
@@ -617,25 +615,6 @@ app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async 
     res.json({order});
   }catch(error){res.status(503).json({error:{code:'FLEET_ORDER_UNAVAILABLE',message:'Fleet booking is temporarily unavailable. Please retry.'}});}
 });
-
-app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res)=>{
-  const parsed=z.object({idempotencyKey:z.string().trim().min(8).max(128).optional()}).safeParse(req.body||{});
-  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid payment request.'}});
-  try{
-    const order=await repository.getFleetOrder(req.params.id,req.user.id);
-    if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
-    if(order.paymentStatus==='paid')return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This fleet booking is already paid.'}});
-    if(new Date(order.quoteExpiresAt)<=new Date())return res.status(409).json({error:{code:'QUOTE_EXPIRED',message:'This fleet quote has expired. Please recheck availability.'}});
-    const amountPaise=Math.round(Number(order.total)*100);
-    const paymentRequest=await payments.createCustomerPayment({orderId:`rideon_fleet_${order.id}`,amountPaise});
-    const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
-    res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:paymentRequest.paymentUrl,amount:result.payment.amountPaise},order});
-  }catch(error){
-    const map={FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,UPI_PROVIDER_INTEGRATION_REQUIRED:503};
-    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'?'Verified UPI payment integration is not enabled for the configured provider yet.':'We could not start fleet checkout right now. Please retry.'}});
-  }
-});
-
 
 app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustomer, async (req,res)=>{
   const parsed=z.object({idempotencyKey:z.string().trim().min(8).max(128).optional()}).safeParse(req.body||{});
