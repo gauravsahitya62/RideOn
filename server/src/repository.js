@@ -175,6 +175,8 @@ export function createRepository({ databaseUrl, fleet }) {
     color: row.color || '',
     fleetVehicleClass: row.fleet_vehicle_class || '',
     pickupLocation: row.pickup_location || null,
+    pickupLatitude: row.pickup_latitude == null ? null : Number(row.pickup_latitude),
+    pickupLongitude: row.pickup_longitude == null ? null : Number(row.pickup_longitude),
     serviceArea: row.service_area || {},
     operationalState: row.operational_state || 'AVAILABLE',
     maintenanceRequired: Boolean(row.maintenance_required),
@@ -1564,7 +1566,7 @@ export function createRepository({ databaseUrl, fleet }) {
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
+  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:row.vendor_id?String(row.vendor_id):null,status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(actorId, bookingId, { actorRole='vendor' } = {}) {
     const now=new Date();
@@ -1574,6 +1576,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const b=memory.bookings.get(String(bookingId));
       if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       if(actorRole==='vendor' && String(b.vendorId||'')!==String(actorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(opsActor && String(b.vendorId||'')!==''){const e=new Error('RideOn operations delivery is only available for RideOn-owned bookings.');e.code='OWN_FLEET_REQUIRED';throw e;}
       if(b.status!=='confirmed' || !['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP'].includes(String(b.lifecycleState||'CONFIRMED'))){const e=new Error('Delivery can only start for a confirmed booking.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
       if(!b.delivery||b.deliveryLatitude==null||b.deliveryLongitude==null){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
       if(!['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
@@ -1586,8 +1589,9 @@ export function createRepository({ databaseUrl, fleet }) {
       await client.query('begin');
       const actorClause=actorRole==='vendor'?'and v.owner_id=$2':'';
       const args=actorRole==='vendor'?[bookingId,actorId]:[bookingId];
-      const {rows}=await client.query(`select b.id,b.status,b.lifecycle_state,b.payment_status,b.delivery_required,b.delivery_address,b.delivery_latitude,b.delivery_longitude,v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 ${actorClause} for update`,args);
+      const {rows}=await client.query(`select b.id,b.status,b.lifecycle_state,b.payment_status,b.delivery_required,b.delivery_address,b.delivery_latitude,b.delivery_longitude,v.owner_id,v.type,v.fleet_vehicle_class from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 ${actorClause} for update`,args);
       const b=rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(opsActor && (b.owner_id!=null || String(b.type||'').toLowerCase()==='car' || !['bike','scooter'].includes(String(b.fleet_vehicle_class||'bike').toLowerCase()))){const e=new Error('RideOn operations delivery is only available for RideOn-owned bookings.');e.code='OWN_FLEET_REQUIRED';throw e;}
       if(b.status!=='confirmed' || !['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP'].includes(String(b.lifecycle_state||'CONFIRMED'))){const e=new Error('Delivery can only start for a confirmed booking.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
       if(!b.delivery_required||b.delivery_latitude==null||b.delivery_longitude==null||!String(b.delivery_address||'').trim()){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
       if(!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
@@ -1605,7 +1609,7 @@ export function createRepository({ databaseUrl, fleet }) {
     if(accuracy!=null&&(!Number.isFinite(accuracy)||accuracy<0||accuracy>10000)){const e=new Error('Invalid GPS accuracy.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
     if(Number.isNaN(when.getTime())||when.getTime()>Date.now()+120000){const e=new Error('Invalid location timestamp.');e.code='INVALID_DELIVERY_TIMESTAMP';throw e;}
     if(!useDatabase){
-      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&(x.vendorId && String(x.vendorId)===String(actorId)) || (x.staffUserId && String(x.staffUserId)===String(actorId))&&x.status==='active');
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&((x.vendorId&&String(x.vendorId)===String(actorId))||(x.staffUserId&&String(x.staffUserId)===String(actorId)))&&x.status==='active');
       if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       if(new Date(session.expiresAt)<=new Date()){session.status='expired';session.endedAt=new Date().toISOString();const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
       if(session.lastLocationAt&&when.getTime()<new Date(session.lastLocationAt).getTime()-5000){const e=new Error('Location update is older than the last accepted update.');e.code='STALE_LOCATION_UPDATE';throw e;}
