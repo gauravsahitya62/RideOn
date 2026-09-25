@@ -1344,11 +1344,73 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function settleFleetSecurityDeposit({bookingId,actorUserId,deductionPaise=0,reason='',evidenceReference='',refundProviderReference=''}={}) {
-    const actor=await findCustomerById(actorUserId);if(!['admin','support'].includes(actor?.role)){const e=new Error('Fleet operations access is required.');e.code='FORBIDDEN';throw e;}
+    const actor=await findCustomerById(actorUserId);
+    if(!['admin','support'].includes(actor?.role)) throw Object.assign(new Error('Fleet operations access is required.'),{code:'FORBIDDEN'});
     const deduction=Math.max(0,Math.round(Number(deductionPaise)||0));
-    if(!useDatabase){const b=memory.bookings.get(String(bookingId));if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycleState||'')))throw Object.assign(new Error('Deposit can only be settled after inspection.'),{code:'DEPOSIT_SETTLEMENT_NOT_ALLOWED'});const d=memory.securityDeposits.get(String(bookingId));const original=Math.round(Number(d?.originalAmount??b.pricing?.securityDeposit??0)*100);const currentStatus=String(d?.status||'pending');if(['refunded','deducted'].includes(currentStatus))throw Object.assign(new Error('Deposit has already been settled.'),{code:'DEPOSIT_ALREADY_SETTLED'});if(deduction>original)throw Object.assign(new Error('Deposit deduction exceeds the collected deposit.'),{code:'DEPOSIT_DEDUCTION_INVALID'});if(deduction>0&&(!String(reason).trim()||!String(evidenceReference).trim()))throw Object.assign(new Error('Reason and evidence are required for a deduction.'),{code:'DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'});if(d){d.approvedDeduction=deduction/100;d.refundableAmount=(original-deduction)/100;d.status=deduction>0?'deducted':'refunded';d.refundProviderReference=String(refundProviderReference||'').trim()||undefined;}b.lifecycleState='COMPLETED';return {booking:b,deposit:{status:d?.status||'refunded',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:original-deduction}};}
-    const client=await pool.connect();try{await client.query('begin');const q=await client.query(`select b.id,b.customer_id,b.vehicle_id,b.lifecycle_state,b.security_deposit_paise,sd.status as deposit_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise from bookings b left join security_deposits sd on sd.booking_id=b.id where b.id=$1 for update`,[bookingId]);const b=q.rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycle_state))){const e=new Error('Deposit can only be settled after inspection.');e.code='DEPOSIT_SETTLEMENT_NOT_ALLOWED';throw e;}const original=Number(b.original_amount_paise??b.security_deposit_paise??0);if(['refunded','deducted'].includes(String(b.deposit_status))){const e=new Error('Deposit has already been settled.');e.code='DEPOSIT_ALREADY_SETTLED';throw e;}if(deduction>original){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}if(deduction>0&&(!String(reason).trim()||!String(evidenceReference).trim())){const e=new Error('Reason and evidence are required for a deduction.');e.code='DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED';throw e;}const refundable=original-deduction;if(!b.deposit_status){await client.query(`insert into security_deposits(booking_id,customer_id,original_amount_paise,refundable_amount_paise,approved_deduction_paise,status,deduction_reason,evidence_reference,refunded_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8,case when $6='refunded' then now() else null end,now())`,[bookingId,b.customer_id,original,refundable,deduction,deduction>0?'deducted':'refunded',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null]);}else{await client.query(`update security_deposits set refundable_amount_paise=$2,approved_deduction_paise=$3,status=$4,deduction_reason=$5,evidence_reference=$6,inspected_at=coalesce(inspected_at,now()),inspected_by=$7,refunded_at=case when $4='refunded' then now() else refunded_at end,updated_at=now() where booking_id=$1 and status not in ('refunded','deducted')`,[bookingId,refundable,deduction,deduction>0?'deducted':'refunded',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null,actorUserId]);}await client.query("update bookings set lifecycle_state='COMPLETED',updated_at=now() where id=$1",[bookingId]);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,next_state,details) values($1,$2,$3,$4,\'COMPLETED\',$5)',[b.vehicle_id,bookingId,actorUserId,deduction>0?'deposit_deduction':'deposit_release',JSON.stringify({deductionPaise:deduction,refundablePaise:refundable})]);await client.query('commit');return {booking:await getBooking(bookingId),deposit:{status:deduction>0?'deducted':'refunded',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable}};}catch(e){try{await client.query('rollback')}catch{}finally{client.release();}throw e;}
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId)); if(!b) throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycleState||''))) throw Object.assign(new Error('Deposit can only be settled after inspection.'),{code:'DEPOSIT_SETTLEMENT_NOT_ALLOWED'});
+      const d=memory.securityDeposits.get(String(bookingId)); const original=Math.round(Number(d?.originalAmount??b.pricing?.securityDeposit??0)*100);
+      if(['refunded','deducted'].includes(String(d?.status||''))) throw Object.assign(new Error('Deposit has already been settled.'),{code:'DEPOSIT_ALREADY_SETTLED'});
+      if(deduction>original) throw Object.assign(new Error('Deposit deduction exceeds the collected deposit.'),{code:'DEPOSIT_DEDUCTION_INVALID'});
+      if(deduction>0&&(!String(reason).trim()||!String(evidenceReference).trim())) throw Object.assign(new Error('Reason and evidence are required for a deduction.'),{code:'DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'});
+      if(b.lifecycleState==='DAMAGE_REVIEW_REQUIRED'){
+        const cases=[...(memory.damageCases?.values()||[])].filter(x=>String(x.bookingId)===String(bookingId));
+        const approved=cases.find(x=>['approved','resolved'].includes(x.status));
+        if(deduction>0&&(!approved||Number(approved.approvedDeductionPaise||0)!==deduction)) throw Object.assign(new Error('A damage deduction must be approved in the damage review before settlement.'),{code:'DEPOSIT_DAMAGE_AUTHORIZATION_REQUIRED'});
+      }
+      const refundable=original-deduction;
+      if(refundable>0) throw Object.assign(new Error('A verified deposit release provider transaction is required before the refundable deposit can be completed.'),{code:'DEPOSIT_PROVIDER_REFERENCE_REQUIRED'});
+      if(d){d.approvedDeduction=deduction/100;d.refundableAmount=refundable/100;d.status=deduction>0?'deducted':'refunded';d.refundProviderReference=String(refundProviderReference||'').trim()||undefined;}
+      b.lifecycleState='COMPLETED'; b.status='completed'; b.updatedAt=new Date().toISOString();
+      return {booking:b,deposit:{status:d?.status||'refunded',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable}};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query(`select b.id,b.customer_id,b.vehicle_id,b.lifecycle_state,b.fleet_order_id,b.security_deposit_paise,
+          sd.status as deposit_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise,
+          sd.settlement_idempotency_key,sd.settlement_provider_reference
+        from bookings b left join security_deposits sd on sd.booking_id=b.id where b.id=$1 for update`,[bookingId]);
+      const b=q.rows[0]; if(!b) throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycle_state))) throw Object.assign(new Error('Deposit can only be settled after inspection.'),{code:'DEPOSIT_SETTLEMENT_NOT_ALLOWED'});
+      const original=Number(b.original_amount_paise??b.security_deposit_paise??0), currentStatus=String(b.deposit_status||'pending');
+      if(['refunded','deducted'].includes(currentStatus)) throw Object.assign(new Error('Deposit has already been settled.'),{code:'DEPOSIT_ALREADY_SETTLED'});
+      if(deduction>original) throw Object.assign(new Error('Deposit deduction exceeds the collected deposit.'),{code:'DEPOSIT_DEDUCTION_INVALID'});
+      if(deduction>0&&(!String(reason).trim()||!String(evidenceReference).trim())) throw Object.assign(new Error('Reason and evidence are required for a deduction.'),{code:'DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'});
+      if(b.lifecycle_state==='DAMAGE_REVIEW_REQUIRED'){
+        const dc=await client.query("select id,status,approved_deduction_paise from fleet_damage_cases where booking_id=$1 order by created_at desc limit 1 for update",[bookingId]);
+        const latest=dc.rows[0];
+        if(deduction>0&&(!latest||!['approved','resolved'].includes(String(latest.status))||Number(latest.approved_deduction_paise||0)!==deduction)) throw Object.assign(new Error('A damage deduction must be approved in the damage review before settlement.'),{code:'DEPOSIT_DAMAGE_AUTHORIZATION_REQUIRED'});
+      }
+      const refundable=original-deduction;
+      const depositProviderReference=String(b.settlement_provider_reference||refundProviderReference||'').trim();
+      const settlementKey=String(b.settlement_idempotency_key||`deposit:${bookingId}:${deduction}`).slice(0,128);
+      if(refundable>0){
+        const payment=await (async()=>{
+          const p=await client.query(`select p.id,p.provider,p.provider_order_id,p.provider_payment_id,p.provider_reference,p.amount_paise,p.status
+            from payments p where (p.id::text=(select coalesce((select settlement_provider_reference from security_deposits where booking_id=$1),'')::text) 
+              or p.provider_payment_id=coalesce((select settlement_provider_reference from security_deposits where booking_id=$1),'')
+              or p.provider_reference=coalesce((select settlement_provider_reference from security_deposits where booking_id=$1),''))
+            order by p.created_at desc limit 1`,[bookingId]);
+          return p.rows[0]||null;
+        })();
+        if(!payment) throw Object.assign(new Error('A verified deposit payment transaction is required before a refundable deposit can be released.'),{code:'DEPOSIT_PROVIDER_REFERENCE_REQUIRED'});
+        if(Number(payment.amount_paise)<refundable) throw Object.assign(new Error('The verified deposit transaction is smaller than the refundable amount.'),{code:'DEPOSIT_PROVIDER_AMOUNT_INVALID'});
+        await client.query('update security_deposits set settlement_idempotency_key=$2,settlement_attempted_at=now(),updated_at=now() where booking_id=$1',[bookingId,settlementKey]);
+        await client.query('rollback');
+        return {status:'provider_action_required',booking:await getBooking(bookingId),deposit:{status:'release_pending',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable,paymentId:String(payment.id),providerOrderId:payment.provider_order_id||null,idempotencyKey:settlementKey},providerAction:{type:'refund',paymentId:String(payment.id),provider:payment.provider,providerOrderId:payment.provider_order_id||null,amountPaise:refundable,idempotencyKey:settlementKey}};
+      }
+      const now=new Date().toISOString();
+      if(b.deposit_status){await client.query(`update security_deposits set refundable_amount_paise=0,approved_deduction_paise=$2,status='deducted',deduction_reason=$3,evidence_reference=$4,inspected_at=coalesce(inspected_at,now()),inspected_by=$5,settlement_idempotency_key=$6,settlement_provider_reference=$7,updated_at=now() where booking_id=$1 and status not in ('refunded','deducted')`,[bookingId,deduction,String(reason||'').trim()||null,String(evidenceReference||'').trim()||null,actorUserId,settlementKey,depositProviderReference||null]);}
+      else if(deduction>0) await client.query(`insert into security_deposits(booking_id,customer_id,original_amount_paise,refundable_amount_paise,approved_deduction_paise,status,deduction_reason,evidence_reference,inspected_at,inspected_by,settlement_idempotency_key,settlement_provider_reference) values($1,$2,$3,0,$4,'deducted',$5,$6,now(),$7,$8,$9)`,[bookingId,b.customer_id,original,deduction,String(reason||'').trim(),String(evidenceReference||'').trim(),actorUserId,settlementKey,depositProviderReference||null]);
+      await client.query("update bookings set lifecycle_state='COMPLETED',status='completed',updated_at=now() where id=$1",[bookingId]);
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,next_state,details) values($1,$2,$3,\'deposit_deduction\',\'COMPLETED\',$4)',[b.vehicle_id,bookingId,actorUserId,JSON.stringify({deductionPaise:deduction,refundablePaise:0,providerAction:false,authorized:true})]);
+      await client.query('commit'); return {booking:await getBooking(bookingId),deposit:{status:'deducted',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:0}};
+    }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
+
+
 
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
