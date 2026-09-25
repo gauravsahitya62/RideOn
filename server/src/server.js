@@ -494,6 +494,25 @@ app.post('/api/v1/fleet-ops/rentals/overdue/check',supabaseRequireAuth,requireFl
     res.json({bookings:bookings.map(publicBooking),count:bookings.length});
   }catch(error){res.status(503).json({error:{code:'OVERDUE_CHECK_FAILED',message:'Overdue rentals could not be checked.'}});}
 });
+app.get('/api/v1/fleet-ops/dashboard',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{
+  try{res.json({dashboard:await repository.getRideOnFleetDashboard()});}
+  catch(error){res.status(503).json({error:{code:error?.code||'FLEET_DASHBOARD_UNAVAILABLE',message:'Fleet operations dashboard is temporarily unavailable.'}});}
+});
+app.get('/api/v1/fleet-ops/damage-cases',supabaseRequireAuth,requireFleetOps,async(req,res)=>{
+  try{const cases=await repository.listFleetDamageCases({status:req.query.status,bookingId:req.query.bookingId,limit:req.query.limit,offset:req.query.offset});res.json({cases});}
+  catch(error){res.status(error?.code==='INVALID_DAMAGE_STATUS'?400:503).json({error:{code:error?.code||'DAMAGE_CASES_UNAVAILABLE',message:error?.message||'Damage reviews are temporarily unavailable.'}});}
+});
+app.patch('/api/v1/fleet-ops/damage-cases/:id',supabaseRequireAuth,requireFleetOps,async(req,res)=>{
+  const p=z.object({status:z.enum(['reported','under_review','approved','disputed','resolved','rejected']),approvedDeductionPaise:z.number().int().min(0).default(0),note:z.string().max(2000).optional().default('')}).safeParse(req.body||{});
+  if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid damage review details.',details:p.error.flatten()}});
+  try{
+    const damageCase=await repository.updateFleetDamageCase({caseId:req.params.id,actorUserId:req.user.id,...p.data});
+    res.json({damageCase});
+  }catch(error){
+    const status=['INVALID_DAMAGE_STATUS','DAMAGE_DEDUCTION_REQUIRED','DAMAGE_DEDUCTION_INVALID'].includes(error?.code)?400:error?.code==='FORBIDDEN'?403:error?.code==='DAMAGE_CASE_NOT_FOUND'?404:409;
+    res.status(status).json({error:{code:error?.code||'DAMAGE_REVIEW_FAILED',message:error?.message||'Damage review could not be updated.'}});
+  }
+});
 app.get('/api/v1/fleet-ops/bookings',supabaseRequireAuth,requireFleetOps,async(req,res)=>{
   try{const bookings=await repository.getFleetBookingOperations({limit:req.query.limit});res.json({bookings:bookings.map(publicBooking),data:bookings.map(publicBooking)});}catch(error){res.status(503).json({error:{code:'FLEET_OPERATIONS_UNAVAILABLE',message:'Rental operations are temporarily unavailable.'}});}
 });
