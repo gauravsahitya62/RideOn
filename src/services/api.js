@@ -133,7 +133,7 @@ export const rideOnApi = {
   createTrackingSocket: (bookingId, handlers = {}) => {
     if (!accessToken) throw new Error('RideOn session expired. Please sign in again.');
     const wsBase = API_URL.replace(/^http/i, 'ws');
-    const socket = new WebSocket(`${wsBase}/ws/tracking/${encode(bookingId)}`, [`rideon-auth.${accessToken}`]);
+    const socket = new WebSocket(`${wsBase}/ws/tracking/${encode(bookingId)}`, [`rideon-auth.${accessToken}`, 'rideon-tracking']);
     if (handlers.onOpen) socket.onopen = handlers.onOpen;
     if (handlers.onMessage) socket.onmessage = handlers.onMessage;
     if (handlers.onClose) socket.onclose = handlers.onClose;
