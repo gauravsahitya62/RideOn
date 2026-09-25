@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS rideon_vehicle_reservations (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (end_at > start_at),
-  UNIQUE (customer_id,idempotency_key)
+  UNIQUE (customer_id,idempotency_key),
+  UNIQUE (vehicle_id,idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS rideon_vehicle_reservations_lookup_idx
   ON rideon_vehicle_reservations(vehicle_id,start_at,end_at,status,expires_at);
