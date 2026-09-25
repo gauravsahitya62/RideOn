@@ -750,10 +750,47 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function getRideOnFleetDashboard() {
-    if(!useDatabase){const rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car');const count=s=>rows.filter(v=>String(v.operationalState||'AVAILABLE').toUpperCase()===s).length;return {totalFleet:rows.length,available:count('AVAILABLE'),reserved:count('RESERVED'),rented:count('RENTED'),maintenance:count('MAINTENANCE'),inactive:count('INACTIVE')};}
-    const r=await pool.query("select count(*)::int total, count(*) filter(where operational_state='AVAILABLE')::int available, count(*) filter(where operational_state='RESERVED')::int reserved, count(*) filter(where operational_state='RENTED')::int rented, count(*) filter(where operational_state='MAINTENANCE')::int maintenance, count(*) filter(where operational_state='INACTIVE' or active=false)::int inactive from vehicles where type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter')");
-    const x=r.rows[0]||{};return {totalFleet:Number(x.total||0),available:Number(x.available||0),reserved:Number(x.reserved||0),rented:Number(x.rented||0),maintenance:Number(x.maintenance||0),inactive:Number(x.inactive||0)};
+    if(!useDatabase){
+      const rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car');
+      const count=s=>rows.filter(v=>String(v.operationalState||'AVAILABLE').toUpperCase()===s).length;
+      const bookings=[...memory.bookings.values()];
+      return {totalFleet:rows.length,available:count('AVAILABLE'),reserved:count('RESERVED'),rented:count('RENTED'),maintenance:count('MAINTENANCE'),inactive:count('INACTIVE'),
+        todaysPickups:bookings.filter(b=>new Date(b.startAt).toDateString()===new Date().toDateString()&&!['COMPLETED','CANCELLED'].includes(String(b.lifecycleState||'').toUpperCase())).length,
+        todaysDeliveries:bookings.filter(b=>Boolean(b.delivery)&&new Date(b.startAt).toDateString()===new Date().toDateString()&&['DELIVERY_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP','CONFIRMED'].includes(String(b.lifecycleState||'').toUpperCase())).length,
+        activeRentals:bookings.filter(b=>['ACTIVE_RENTAL','OVERDUE','RETURN_REQUESTED'].includes(String(b.lifecycleState||'').toUpperCase())).length,
+        expectedReturnsToday:bookings.filter(b=>new Date(b.endAt).toDateString()===new Date().toDateString()&&!['COMPLETED','CANCELLED'].includes(String(b.lifecycleState||'').toUpperCase())).length,
+        overdueRentals:bookings.filter(b=>String(b.lifecycleState||'').toUpperCase()==='OVERDUE').length,
+        awaitingInspection:bookings.filter(b=>['RETURNED','INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycleState||'').toUpperCase())).length,
+        damageReviews:[...(memory.damageCases?.values()||[])].filter(d=>['reported','under_review','approved','disputed'].includes(String(d.status))).length,
+        depositsAwaitingSettlement:bookings.filter(b=>['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycleState||'').toUpperCase())).length
+      };
+    }
+    const r=await pool.query(`select
+      count(v.*)::int total,
+      count(*) filter(where v.operational_state='AVAILABLE')::int available,
+      count(*) filter(where v.operational_state='RESERVED')::int reserved,
+      count(*) filter(where v.operational_state='RENTED')::int rented,
+      count(*) filter(where v.operational_state='MAINTENANCE')::int maintenance,
+      count(*) filter(where v.operational_state='INACTIVE' or v.active=false)::int inactive
+      from vehicles v where v.type::text<>'car' and coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter')`);
+    const x=r.rows[0]||{};
+    const metrics=await pool.query(`select
+      count(*) filter(where lifecycle_state in ('DELIVERY_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP','CONFIRMED') and date(start_at)=current_date)::int todays_pickups,
+      count(*) filter(where delivery_required and lifecycle_state in ('CONFIRMED','DELIVERY_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP') and date(start_at)=current_date)::int todays_deliveries,
+      count(*) filter(where lifecycle_state in ('ACTIVE_RENTAL','OVERDUE','RETURN_REQUESTED'))::int active_rentals,
+      count(*) filter(where date(end_at)=current_date and lifecycle_state not in ('COMPLETED','CANCELLED'))::int expected_returns_today,
+      count(*) filter(where lifecycle_state='OVERDUE')::int overdue_rentals,
+      count(*) filter(where lifecycle_state in ('RETURNED','INSPECTION','DAMAGE_REVIEW_REQUIRED'))::int awaiting_inspection,
+      (select count(*) from fleet_damage_cases where status in ('reported','under_review','approved','disputed'))::int damage_reviews,
+      count(*) filter(where lifecycle_state in ('INSPECTION','DAMAGE_REVIEW_REQUIRED'))::int deposits_awaiting_settlement
+      from bookings`);
+    const m=metrics.rows[0]||{};
+    return {totalFleet:Number(x.total||0),available:Number(x.available||0),reserved:Number(x.reserved||0),rented:Number(x.rented||0),maintenance:Number(x.maintenance||0),inactive:Number(x.inactive||0),
+      todaysPickups:Number(m.todays_pickups||0),todaysDeliveries:Number(m.todays_deliveries||0),activeRentals:Number(m.active_rentals||0),
+      expectedReturnsToday:Number(m.expected_returns_today||0),overdueRentals:Number(m.overdue_rentals||0),awaitingInspection:Number(m.awaiting_inspection||0),
+      damageReviews:Number(m.damage_reviews||0),depositsAwaitingSettlement:Number(m.deposits_awaiting_settlement||0)};
   }
+
 
   async function createRideOnFleetVehicle(input,actorUserId) {
     const data=validateFleetVehicleInput(input); const id=crypto.randomUUID();
