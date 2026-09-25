@@ -1628,6 +1628,27 @@ export function createRepository({ databaseUrl, fleet }) {
     return listReviews({scope:'user',id:userId,limit,offset});
   }
 
+async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(10,Number(limit)||10)),safeOffset=Math.max(0,Number(offset)||0);
+    if(!useDatabase){
+      const booking=await getVendorBooking(vendorId,bookingId);
+      if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const rows=[...memory.reviews.values()]
+        .filter(x=>String(x.bookingId)===String(bookingId)&&x.reviewType==='customer_to_vendor')
+        .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return {summary:reviewSummary(rows),reviews:rows.slice(safeOffset,safeOffset+safeLimit)};
+    }
+    const booking=await getVendorBooking(vendorId,bookingId);
+    if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+    const params=[bookingId];
+    const filter="r.booking_id=$1 and r.review_type='customer_to_vendor'";
+    const summaryRows=await pool.query('select r.rating,count(*)::int as count from reviews r where '+filter+' group by r.rating order by r.rating',params);
+    const counts={1:0,2:0,3:0,4:0,5:0};let total=0,weighted=0;
+    for(const row of summaryRows.rows){const rating=Number(row.rating),count=Number(row.count);if(counts[rating]!==undefined){counts[rating]=count;total+=count;weighted+=rating*count;}}
+    const recent=await pool.query(reviewSelect+' where '+filter+' order by r.created_at desc limit $2 offset $3',[bookingId,safeLimit,safeOffset]);
+    return {summary:{averageRating:total?Number((weighted/total).toFixed(2)):0,totalReviewCount:total,ratingDistribution:counts},reviews:recent.rows.map(mapReview)};
+  }
+
   const SUPPORT_CATEGORIES = new Set(['Payment','Refund','Security Deposit','Booking','Vehicle','Delivery','Pickup/Return','Damage','Cancellation','Account','Technical Issue','Other']);
   const SUPPORT_PRIORITIES = new Set(['low','normal','high','urgent']);
   const SUPPORT_STATUSES = new Set(['open','in_progress','waiting_for_user','resolved','closed']);
