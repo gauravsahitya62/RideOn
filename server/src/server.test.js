@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { createPaymentService } from './payments.js';
+import { createAuth } from './auth.js';
 
 process.env.NODE_ENV = 'test';
 
@@ -63,6 +64,9 @@ const jsonRequest = (path, method, payload, token, extraHeaders = {}) => request
   },
   body: JSON.stringify(payload),
 });
+
+const testAuth = createAuth({ jwtSecret:'development-only-secret', authEnvironment:'test', accessTokenTtlSeconds:3600, bcryptRounds:4 });
+const vendorTokenFor = (customerId) => testAuth.sign({sub:customerId,role:'vendor'});
 
 async function legacyLogin(phone) {
   const response = await jsonRequest('/api/v1/auth/login', 'POST', {
@@ -481,7 +485,7 @@ test('vendor rejection requires a reason and cannot be accepted after rejection'
   const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2040-01-10T10:00:00.000Z',endAt:'2040-01-11T10:00:00.000Z',delivery:false,address:'1 Reject Road, Jaipur'},login.accessToken,{ 'Idempotency-Key':'reject-test-930'});
   assert.equal(created.status,201);
   const booking=(await created.json()).booking;
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   const noReason=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'rejected'},vendorToken);
   assert.equal(noReason.status,400);
   assert.equal((await noReason.json()).error.code,'REJECTION_REASON_REQUIRED');
@@ -500,7 +504,7 @@ test('security deposit inspection requires completed rental and protects deducti
   const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Deposit Car',make:'Test',model:'D',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:500,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJ14DEP932',description:'',imageUrls:[],deliveryAvailable:true,active:true});
   const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2040-02-10T10:00:00.000Z',endAt:'2040-02-11T10:00:00.000Z',delivery:false,address:'2 Deposit Road, Jaipur'},login.accessToken,{ 'Idempotency-Key':'deposit-test-932'});
   const booking=(await created.json()).booking;
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   const beforeReturn=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:0},vendorToken);
   assert.equal(beforeReturn.status,409);
   await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'confirmed');
@@ -592,8 +596,8 @@ test('vendor booking lifecycle is isolated and customer-visible', async () => {
   await repository.createOrGetPaymentOrder({bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR',providerOrder:{id:'test-vendor-lifecycle-'+bookingId,amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR'}});
   await repository.applyPaymentEvent({eventId:'paid-vendor-lifecycle-'+bookingId,bookingId,paymentId:undefined,providerReference:'paid-vendor-lifecycle-ref-'+bookingId,providerOrderId:'test-vendor-lifecycle-'+bookingId,amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR',status:'paid'});
 
-  const vendorAToken = jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
-  const vendorBToken = jwt.sign({sub:otherVendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorAToken = vendorTokenFor(vendorCustomer.customer.id);
+  const vendorBToken = vendorTokenFor(otherVendorCustomer.customer.id);
 
   const ownList = await request('/api/v1/vendor/bookings',{headers:{authorization:'Bearer '+vendorAToken}});
   assert.equal(ownList.status,200);
@@ -646,7 +650,7 @@ test('active delivery tracking is vendor-authorized and stops on delivery comple
   const booking=(await bookingResponse.json()).booking;
   const payment=await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'tracking-order-'+booking.bookingId,amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
   await repository.applyPaymentEvent({eventId:'tracking-paid-'+booking.bookingId,bookingId:booking.bookingId,paymentId:payment.id,providerReference:'tracking-ref-'+booking.bookingId,providerOrderId:'tracking-order-'+booking.bookingId,amountPaise:payment.amountPaise,currency:'INR',status:'paid'});
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   assert.equal((await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'confirmed'},vendorToken)).status,200);
   const otherTrack=await request('/api/v1/bookings/'+booking.bookingId+'/tracking',{headers:{authorization:'Bearer '+otherLogin.accessToken}});
   assert.equal(otherTrack.status,404);
@@ -741,7 +745,7 @@ test('vendor service location is vendor-only and persists', async () => {
   const vendorCustomer=await register('+911234567940','Maps Vendor');
   const login=await legacyLogin('+911234567940');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
-  const token=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const token=vendorTokenFor(vendorCustomer.customer.id);
   const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'RideOn Service Point',serviceCity:'Jaipur'},token);
   assert.equal(saved.status,200);
   const savedPayload=await saved.json();
@@ -759,7 +763,7 @@ test('vendor service location is vendor-only and persists', async () => {
 test('marketplace vendor map groups active vehicles by service location', async () => {
   const vendorCustomer=await register('+911234567941','Map Vendor Two');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
-  const token=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const token=vendorTokenFor(vendorCustomer.customer.id);
   const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'Service Point Two',serviceCity:'Jaipur'},token);
   assert.equal(saved.status,200);
   await repository.createVendorVehicle(vendor.id,{type:'car',name:'Map Car A',make:'Test',model:'A',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJMAP941A',description:'',imageUrls:[],deliveryAvailable:true,active:true});
@@ -777,7 +781,7 @@ test('route preview returns a friendly configuration error when routing is not c
   const login=await legacyLogin('+911234567942');
   const vendorCustomer=await register('+911234567943','Route Vendor');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'Route Service Point',serviceCity:'Jaipur'},vendorToken);
   assert.equal(saved.status,200);
   const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Route Car',make:'Test',model:'R',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJROUTE942',description:'',imageUrls:[],deliveryAvailable:true,active:true});
@@ -910,7 +914,7 @@ test('reviews enforce completed booking ownership, duplicate prevention, and ser
   const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2042-01-10T10:00:00.000Z',endAt:'2042-01-11T10:00:00.000Z',delivery:false,address:'1 Reviews Road, Jaipur'},customerLogin.accessToken,{'Idempotency-Key':'reviews-booking-941'});
   assert.equal(created.status,201);
   const booking=(await created.json()).booking;
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
 
   const beforeComplete=await jsonRequest('/api/v1/bookings/'+booking.bookingId+'/reviews/customer','POST',{rating:5,comment:'Too early'},customerLogin.accessToken);
   assert.equal(beforeComplete.status,409);
