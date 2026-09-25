@@ -7,3 +7,5 @@ ALTER TABLE security_deposits
 CREATE UNIQUE INDEX IF NOT EXISTS security_deposits_settlement_key_idx
   ON security_deposits(settlement_idempotency_key)
   WHERE settlement_idempotency_key IS NOT NULL;
+
+ALTER TABLE security_deposits ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ;
