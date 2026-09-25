@@ -283,7 +283,7 @@ export function createRepository({ databaseUrl, fleet }) {
   async function getVehicle(id) {
     if (!useDatabase) return [...fleet, ...memory.vehicles.values()].find((v) => v.id === id && v.active !== false) || null;
     const { rows } = await pool.query(
-      'select id, owner_id, type, name, make, model, year, city, daily_rate_paise, security_deposit_paise, active, transmission, fuel, seats, description, image_urls, delivery_available from vehicles where id = $1 and active = true',
+      "select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,active,transmission,fuel,seats,description,image_urls,delivery_available,variant,color,pickup_location,pickup_latitude,pickup_longitude,service_area,fleet_vehicle_class,operational_state,maintenance_required,current_odometer,current_fuel_battery from vehicles where id=$1 and active=true and type::text<>'car'",
       [id]
     );
     if (!rows[0]) return null;
