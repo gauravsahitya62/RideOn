@@ -637,6 +637,33 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
 });
 
 
+app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({idempotencyKey:z.string().trim().min(8).max(128).optional()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid payment request.'}});
+  try{
+    const order=await repository.getFleetOrder(req.params.id,req.user.id);
+    if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
+    if(order.paymentStatus==='paid')return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This fleet booking is already paid.'}});
+    if(new Date(order.quoteExpiresAt)<=new Date())return res.status(409).json({error:{code:'QUOTE_EXPIRED',message:'This fleet quote has expired. Please recheck availability.'}});
+    const amountPaise=Math.round(Number(order.total)*100);
+    const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise});
+    const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
+    res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:paymentRequest.paymentUrl,amount:result.payment.amountPaise,currency:'INR'},order});
+  }catch(error){
+    const map={FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,UPI_PROVIDER_INTEGRATION_REQUIRED:503};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'?'Verified UPI payment integration is not enabled for the configured provider yet.':'We could not start fleet checkout right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    const limit=Math.min(50,Math.max(1,Number(req.query.limit)||20));
+    const offset=Math.max(0,Number(req.query.offset)||0);
+    const orders=await repository.listCustomerFleetOrders(req.user.id,{limit,offset});
+    res.json({orders,data:orders,pagination:{limit,offset,count:orders.length}});
+  }catch(error){res.status(503).json({error:{code:'FLEET_ORDERS_UNAVAILABLE',message:'Fleet bookings are temporarily unavailable. Please retry.'}});}
+});
+
 app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
   const customer = await repository.findCustomerById(req.user.id);
   if (!customer) return res.status(404).json({ error:{ code:'USER_NOT_FOUND' } });
