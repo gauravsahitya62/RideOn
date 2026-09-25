@@ -515,6 +515,50 @@ export function createRepository({ databaseUrl, fleet }) {
     }));
   }
 
+  async function listRideOnFleet({q='',type='',brand='',model='',city='',minPrice=null,maxPrice=null,sort='recommended',limit=50,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
+    const normalize=String;
+    const query=String(q||'').trim().toLowerCase();
+    const typeFilter=String(type||'').trim().toLowerCase();
+    const brandFilter=String(brand||'').trim().toLowerCase();
+    const modelFilter=String(model||'').trim().toLowerCase();
+    const cityFilter=String(city||'').trim().toLowerCase();
+    const min= minPrice==null||minPrice==='' ? null : Number(minPrice);
+    const max= maxPrice==null||maxPrice==='' ? null : Number(maxPrice);
+    const sortValue=normalize(sort||'recommended').toLowerCase();
+    if(!useDatabase){
+      let rows=[...memory.vehicles.values()].filter(v=>v.active!==false);
+      rows=rows.filter(v=>{
+        const text=[v.name,v.make,v.model,v.city].filter(Boolean).join(' ').toLowerCase();
+        const price=Number(v.pricePerDay??v.dailyRate??0);
+        return (!query||text.includes(query))&&(!typeFilter||String(v.type||'').toLowerCase()===typeFilter)&&(!brandFilter||String(v.make||'').toLowerCase()===brandFilter)&&(!modelFilter||String(v.model||'').toLowerCase()===modelFilter)&&(!cityFilter||String(v.city||'').toLowerCase()===cityFilter)&&(min==null||price>=min)&&(max==null||price<=max);
+      });
+      if(sortValue==='price_asc')rows.sort((a,b)=>Number(a.pricePerDay??a.dailyRate)-Number(b.pricePerDay??b.dailyRate));else if(sortValue==='price_desc')rows.sort((a,b)=>Number(b.pricePerDay??b.dailyRate)-Number(a.pricePerDay??a.dailyRate));else rows.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+      return rows.slice(safeOffset,safeOffset+safeLimit);
+    }
+    const params=[];const where=['v.active=true'];
+    if(query){params.push('%'+query+'%');where.push('lower(coalesce(v.name,\'\')||\' \‘\'||coalesce(v.make,\'\')||\' \‘\'||coalesce(v.model,\'\')) like $'+params.length);}
+    if(typeFilter){params.push(typeFilter);where.push('lower(v.type::text)=$'+params.length);}
+    if(brandFilter){params.push(brandFilter);where.push('lower(coalesce(v.make,\'\'))=$'+params.length);}
+    if(modelFilter){params.push(modelFilter);where.push('lower(coalesce(v.model,\'\'))=$'+params.length);}
+    if(cityFilter){params.push(cityFilter);where.push('lower(v.city)=$'+params.length);}
+    if(min!=null&&Number.isFinite(min)){params.push(Math.round(min*100));where.push('v.daily_rate_paise>=$'+params.length);}
+    if(max!=null&&Number.isFinite(max)){params.push(Math.round(max*100));where.push('v.daily_rate_paise<=$'+params.length);}
+    const orderBy=sortValue==='price_asc'?'v.daily_rate_paise asc':sortValue==='price_desc'?'v.daily_rate_paise desc':'v.name asc';
+    params.push(safeLimit,safeOffset);
+    const {rows}=await pool.query('select v.id,v.owner_id,v.type,v.name,v.make,v.model,v.year,v.city,v.daily_rate_paise,v.security_deposit_paise,v.transmission,v.fuel,v.seats,v.description,v.image_urls,v.delivery_available,v.active,v.created_at,v.updated_at from vehicles v where '+where.join(' and ')+' order by '+orderBy+' nulls last limit $'+(params.length-1)+' offset $'+params.length,params);
+    return rows.map(mapManagedVehicle);
+  }
+
+  async function getRideOnFleetVehicle(vehicleId) {
+    if(!useDatabase){
+      const v=[...memory.vehicles.values()].find(x=>String(x.id)===String(vehicleId)&&x.active!==false);
+      return v||null;
+    }
+    const {rows}=await pool.query('select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where id=$1 and active=true',[vehicleId]);
+    return rows[0]?mapManagedVehicle(rows[0]):null;
+  }
+
   async function getPublicVendorProfile(vendorId) {
     if (!useDatabase) {
       const vendor = [...memory.vendors.values()].find(v => String(v.id) === String(vendorId) && v.status === 'active');
