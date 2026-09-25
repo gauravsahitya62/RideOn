@@ -60,11 +60,12 @@ app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMI
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const supportRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const paymentRateLimit = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: true, legacyHeaders: false });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
   phone: z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
-  vehicleId: z.string().min(1),
+  vehicleId: z.string().trim().min(1).max(64),
   startAt: z.string().datetime(),
   endAt: z.string().datetime(),
   delivery: z.boolean().default(true),
@@ -437,7 +438,7 @@ app.get('/health', async (_req, res) => {
 app.get('/api/v1/geocoding/search', supabaseRequireAuth, requireCustomer, async (req,res) => {
   const address=String(req.query.address||'').trim();
   const city=String(req.query.city||'').trim();
-  if(address.length<4) return res.status(400).json({error:{code:'GEOCODE_INVALID_QUERY',message:'Enter a delivery address or landmark.'}});
+  if(address.length<4 || address.length>300 || city.length>100) return res.status(400).json({error:{code:'GEOCODE_INVALID_QUERY',message:'Enter a delivery address or landmark.'}});
   try {
     const result=await geocodeAddress(address,city);
     res.json({location:result.location,formattedAddress:result.formattedAddress,provider:result.provider,cached:Boolean(result.cached)});
@@ -502,7 +503,9 @@ app.get('/api/v1/routing/eta', supabaseRequireAuth, requireCustomer, async (req,
 
 app.get('/api/v1/vendors/map', async (req, res) => {
   try {
-    const city = req.query.city?.toString().trim() || undefined;
+    const cityValue = req.query.city?.toString().trim() || undefined;
+    if (cityValue && cityValue.length > 100) return res.status(400).json({error:{code:'INVALID_CITY',message:'City value is too long.'}});
+    const city = cityValue;
     const vendors = await repository.listMarketplaceVendors({ city });
     res.json({ data: vendors, vendors, meta:{ count:vendors.length } });
   } catch (error) {
@@ -525,6 +528,8 @@ app.get('/api/v1/vehicles', async (req, res) => {
   try {
     const type = req.query.type?.toString().toLowerCase();
     const city = req.query.city?.toString().trim();
+    const queryText = req.query.q?.toString() || '';
+    if ((city && city.length > 100) || queryText.length > 100) return res.status(400).json({error:{code:'INVALID_VEHICLE_QUERY',message:'Search filters are too long.'}});
     const q = req.query.q?.toString().trim();
     const vehicles = await repository.listVehicles({ type, city, q });
     const data = vehicles.map(mobileVehicle);
@@ -1037,9 +1042,7 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
       return res.status(response.status === 429 ? 429 : 502).json({
         error:{
           code:'OTP_REQUEST_FAILED',
-          message: providerError?.msg || providerError?.message || providerError?.error_description || 'Unable to send the RideOn verification email right now.',
-          providerCode: providerError?.error_code || providerError?.error || undefined,
-          providerStatus: response.status,
+          message:'Unable to send the RideOn verification email right now.'
         }
       });
     }
@@ -1291,7 +1294,7 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
   }
 });
 
-app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, async (req,res) => {
+app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
   const parsed=z.object({ bookingId:z.string().uuid(), idempotencyKey:z.string().trim().min(8).max(128).optional() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'bookingId is required.',details:parsed.error.flatten()}});
   const booking=await repository.getBooking(parsed.data.bookingId, req.user.id);
@@ -1343,7 +1346,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
   }
 });
 
-app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, async (req,res) => {
+app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
   const parsed=z.object({ bookingId:z.string().uuid() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid bookingId.'}});
   let payment=await repository.findPaymentById(req.params.id, req.user.id);
