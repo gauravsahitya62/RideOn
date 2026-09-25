@@ -5,7 +5,6 @@
 CREATE TABLE IF NOT EXISTS fleet_orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-  vendor_id UUID NOT NULL REFERENCES vendors(id) ON DELETE RESTRICT,
   start_at TIMESTAMPTZ NOT NULL,
   end_at TIMESTAMPTZ NOT NULL,
   delivery_required BOOLEAN NOT NULL DEFAULT true,
@@ -27,9 +26,6 @@ CREATE TABLE IF NOT EXISTS fleet_orders (
 
 CREATE INDEX IF NOT EXISTS fleet_orders_customer_created_idx
   ON fleet_orders(customer_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS fleet_orders_vendor_created_idx
-  ON fleet_orders(vendor_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS fleet_order_items (
   id BIGSERIAL PRIMARY KEY,
