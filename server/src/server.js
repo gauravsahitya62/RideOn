@@ -1015,9 +1015,28 @@ app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async
 
 const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false});
 
-app.post('/api/v1/fleet-ops/bookings/:id/delivery/start',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const booking=await repository.getRentalBookingForCustomer(req.params.id,req.body?.customerId);if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});const session=await repository.startDelivery(null,req.params.id);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});}});
-app.post('/api/v1/fleet-ops/bookings/:id/delivery/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});try{const session=await repository.updateDeliveryLocation(null,req.params.id,p.data);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_LOCATION_FAILED',message:error?.message||'Delivery location could not be updated.'}});}});
-app.post('/api/v1/fleet-ops/bookings/:id/delivery/complete',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{try{const result=await repository.completeDelivery(null,req.params.id,req.body||{});res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:error?.message||'Delivery could not be completed.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/start',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{
+  try{
+    const session=await repository.startDelivery(req.user.id,req.params.id,{actorRole:'delivery_staff'});
+    await repository.createNotification({customerId:(await repository.getFleetBookingLifecycle(req.params.id))?.customerId||null,bookingId:req.params.id,eventType:'delivery_started',title:'Delivery Started',message:'Your RideOn vehicle is on the way.',payload:{trackingActive:true}}).catch(()=>null);
+    res.json({tracking:{session,status:'in_delivery',active:true}});
+  }catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:error?.code==='DELIVERY_STAFF_NOT_ASSIGNED'?403:409).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});}
+});
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{
+  const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});
+  if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});
+  try{const session=await repository.updateDeliveryLocation(req.user.id,req.params.id,p.data);res.json({tracking:{session,status:'in_delivery',active:true}});}
+  catch(error){const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,STALE_LOCATION_UPDATE:409,INVALID_DELIVERY_LOCATION:400,INVALID_DELIVERY_TIMESTAMP:400,DELIVERY_STAFF_NOT_ASSIGNED:403};res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_LOCATION_FAILED',message:error?.message||'Delivery location could not be updated.'}});}
+});
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/complete',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{
+  try{
+    const result=await repository.completeDelivery(req.user.id,req.params.id,req.body||{});
+    const lifecycle=await repository.getFleetBookingLifecycle(req.params.id);
+    if(lifecycle?.customerId) await repository.createNotification({customerId:lifecycle.customerId,bookingId:req.params.id,eventType:'delivery_ready',title:'Vehicle Ready for Handover',message:'Your RideOn vehicle has arrived. RideOn Operations will complete the handover.',payload:{trackingActive:false}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
+  }catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:error?.code==='DELIVERY_STAFF_NOT_ASSIGNED'?403:409).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:error?.message||'Delivery could not be completed.'}});}
+});
+
 app.post('/api/v1/vendor/bookings/:id/delivery/start', supabaseRequireAuth, requireVendor, async (req,res)=>{
   try{
     const session=await repository.startDelivery(req.vendor.id,req.params.id);
