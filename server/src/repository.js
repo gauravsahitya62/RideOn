@@ -1750,9 +1750,7 @@ const RENTAL_LIFECYCLE = new Set(['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGN
       const lifecycle=String(b.lifecycleState||b.lifecycle_state||'CONFIRMED').toUpperCase();
       if(!['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED'].includes(lifecycle)) throw Object.assign(new Error('Delivery can only start from an assigned/confirmed booking.'),{code:'DELIVERY_START_NOT_ALLOWED'});
       if(actorRole==='delivery_staff' && String(b.assignedStaffUserId||b.assigned_staff_user_id||'')!==String(actorId)) throw Object.assign(new Error('This delivery job is not assigned to this staff member.'),{code:'DELIVERY_STAFF_NOT_ASSIGNED'});
-      const lifecycle=String(b.lifecycle_state||'CONFIRMED');
-      if(!['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED'].includes(lifecycle)){const e=new Error('Delivery can only start from an assigned/confirmed booking.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
-      if(actorRole==='delivery_staff' && String(b.assigned_staff_user_id||'')!==String(actorId)){const e=new Error('This delivery job is not assigned to this staff member.');e.code='DELIVERY_STAFF_NOT_ASSIGNED';throw e;}
+      if(b.status!=='confirmed') throw Object.assign(new Error('Delivery can only start after the booking is confirmed.'),{code:'DELIVERY_START_NOT_ALLOWED'});
       if(b.status!=='confirmed'){const e=new Error('Delivery can only start after the booking is confirmed.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
       if(!b.delivery||b.deliveryLatitude==null||b.deliveryLongitude==null){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
       if(!['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
@@ -1770,7 +1768,7 @@ const RENTAL_LIFECYCLE = new Set(['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGN
       if(!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
       const active=await client.query("select id from tracking_sessions where booking_id=$1 and status='active' for update",[bookingId]);if(active.rows[0]){const e=new Error('Delivery tracking is already active.');e.code='DELIVERY_ALREADY_ACTIVE';throw e;}
       const {rows:created}=await client.query("insert into tracking_sessions(booking_id,vendor_id,staff_user_id,status,expires_at) values($1,$2,$3,'active',$4) returning *",[bookingId,actorRole==='vendor'?actorId:null,actorRole!=='vendor'?actorId:null,expiresAt]);
-      const nextLifecycle=lifecycle==='PICKUP_ASSIGNED'?'DELIVERY_STARTED':'DELIVERY_STARTED';
+      const nextLifecycle='DELIVERY_STARTED';
       await client.query("update bookings set delivery_status='in_delivery',delivery_started_at=now(),lifecycle_state=$2,updated_at=now() where id=$1",[bookingId,nextLifecycle]);
       await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,$3,$4,'delivery_started')",[bookingId,b.status,actorRole==='vendor'?'vendor':'ops',actorId]);
       await client.query('commit');return mapTrackingSession(created[0]);
