@@ -56,6 +56,7 @@ export default function VehicleDetailScreen({
   onRetryQuote,
   onEditDates,
   onEditLocation,
+  onWriteReview,
 }) {
   const [activeImage, setActiveImage] = useState(0);
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
@@ -135,7 +136,6 @@ export default function VehicleDetailScreen({
         {features.length > 0 && <View style={styles.section}><Text style={styles.sectionTitle}>Features</Text><View style={styles.features}>{features.map((feature, index) => <View key={`${feature}-${index}`} style={styles.feature}><Text style={styles.featureDot}>•</Text><Text style={styles.featureText}>{feature}</Text></View>)}</View></View>}
 
         <ReviewsSection vehicleId={vehicle.id} title="Vehicle reviews" onWriteReview={onWriteReview}/>
-        {vehicle.vendorId ? <ReviewsSection vendorId={vehicle.vendorId} title={vehicle.vendorName ? vehicle.vendorName+' · reviews' : 'Vendor reviews'} compact onWriteReview={onWriteReview}/> : null}
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Pickup & delivery</Text>

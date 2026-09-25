@@ -117,7 +117,7 @@ export const rideOnApi = {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString();
     return request(`/api/v1/vendors/map${query ? `?${query}` : ''}`);
   },
-  getRouteEta: (vendorId, latitude, longitude) => request(`/api/v1/routing/eta?vendorId=${encode(vendorId)}&latitude=${encode(latitude)}&longitude=${encode(longitude)}`),
+  getRouteEta: (vehicleId, latitude, longitude) => request(`/api/v1/routing/eta?vehicleId=${encode(vehicleId)}&latitude=${encode(latitude)}&longitude=${encode(longitude)}`),
   geocodeAddress: (address, city) => {
     const query = new URLSearchParams({ address: String(address || ''), ...(city ? { city: String(city) } : {}) }).toString();
     return request(`/api/v1/geocoding/search?${query}`);
@@ -126,10 +126,10 @@ export const rideOnApi = {
   updateVendorServiceLocation: (payload) => request('/api/v1/vendor/service-location', { method:'PATCH', body:JSON.stringify(payload) }),
   updateBookingRoute: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/route`, { method:'POST', body: JSON.stringify({}) }),
   getTracking: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/tracking`),
-  startDelivery: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/start`, { method:'POST', body:JSON.stringify({}) }),
-  updateDeliveryLocation: (bookingId,payload) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/location`, { method:'POST', body:JSON.stringify(payload) }),
-  completeDelivery: (bookingId,payload={}) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/complete`, { method:'POST', body:JSON.stringify(payload) }),
-  abortDelivery: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/delivery/abort`, { method:'POST', body:JSON.stringify({}) }),
+  startDelivery: (bookingId) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/delivery/start`, { method:'POST', body:JSON.stringify({}) }),
+  updateDeliveryLocation: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/delivery/location`, { method:'POST', body:JSON.stringify(payload) }),
+  completeDelivery: (bookingId,payload={}) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/delivery/complete`, { method:'POST', body:JSON.stringify(payload) }),
+  abortDelivery: (bookingId) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/delivery/abort`, { method:'POST', body:JSON.stringify({}) }),
   createTrackingSocket: (bookingId, handlers = {}) => {
     if (!accessToken) throw new Error('RideOn session expired. Please sign in again.');
     const wsBase = API_URL.replace(/^http/i, 'ws');
@@ -146,6 +146,9 @@ export const rideOnApi = {
     return request(`/api/v1/vendors/${encode(vendorId)}/vehicles${query?`?${query}`:''}`);
   },
   quoteMultiVehicle: (payload) => request('/api/v1/quotes/multi', { method:'POST', body:JSON.stringify(payload) }),
+  pricingPreview: (payload) => request('/api/v1/pricing/preview', { method:'POST', body:JSON.stringify(payload) }),
+  createVehicleReservation: (payload,idempotencyKey) => request('/api/v1/reservations', { method:'POST', headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined, body:JSON.stringify(payload) }),
+  releaseVehicleReservation: (reservationId) => request(`/api/v1/reservations/${encode(reservationId)}/release`, { method:'POST', body:JSON.stringify({}) }),
   createFleetOrder: (payload,idempotencyKey) => request('/api/v1/fleet-orders', { method:'POST', headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined, body:JSON.stringify(payload) }),
   getFleetOrder: (id) => request(`/api/v1/fleet-orders/${encode(id)}`),
   listFleetOrders: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/fleet-orders${query?`?${query}`:''}`); },
@@ -154,8 +157,15 @@ export const rideOnApi = {
   createFleetOpsHandover: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/handover`, { method:'POST', body:JSON.stringify(payload) }),
   createFleetOpsReturn: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/return`, { method:'POST', body:JSON.stringify(payload) }),
   createFleetOpsInspection: (vehicleId,payload) => request(`/api/v1/fleet-ops/vehicles/${encode(vehicleId)}/inspection`, { method:'POST', body:JSON.stringify(payload) }),
-  settleFleetDeposit: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/deposit-settlement`, { method:'POST', body:JSON.stringify(payload) }),
+  settleFleetDeposit: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/deposit/settle`, { method:'POST', body:JSON.stringify(payload) }),
   getFleetOpsDashboard: () => request('/api/v1/fleet-ops/dashboard'),
+  getFleetOpsBookings: () => request('/api/v1/fleet-ops/bookings'),
+  listFleetOpsVehicles: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/fleet-ops/vehicles${query?`?${query}`:''}`); },
+  updateFleetOpsVehicle: (vehicleId,payload) => request(`/api/v1/fleet-ops/vehicles/${encode(vehicleId)}`, { method:'PATCH', body:JSON.stringify(payload) }),
+  getFleetOpsPricingHistory: (vehicleId,params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/fleet-ops/vehicles/${encode(vehicleId)}/pricing-history${query?`?${query}`:''}`); },
+  listFleetDamageCases: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/fleet-ops/damage-cases${query?`?${query}`:''}`); },
+  updateFleetDamageCase: (caseId,payload) => request(`/api/v1/fleet-ops/damage-cases/${encode(caseId)}`, { method:'PATCH', body:JSON.stringify(payload) }),
+  confirmFleetDepositSettlement: (settlementId,payload) => request(`/api/v1/fleet-ops/deposit-settlements/${encode(settlementId)}/confirm`, { method:'POST', body:JSON.stringify(payload) }),
   createFleetOrderPayment: (id,idempotencyKey) => request(`/api/v1/fleet-orders/${encode(id)}/payment`, { method:'POST', headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined, body:JSON.stringify({idempotencyKey}) }),
   listVendorFleetOrders: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/vendor/fleet-orders${query?`?${query}`:''}`); },
   getVendorFleetOrder: (id) => request(`/api/v1/vendor/fleet-orders/${encode(id)}`),
