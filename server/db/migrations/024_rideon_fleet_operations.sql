@@ -112,3 +112,65 @@ CREATE INDEX IF NOT EXISTS fleet_operation_audit_booking_idx ON fleet_operation_
 
 -- New RideOn fleet bookings must never depend on vendor ownership.
 UPDATE fleet_orders SET fleet_owner='rideon' WHERE fleet_owner IS NULL;
+
+CREATE TABLE IF NOT EXISTS rental_handovers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE RESTRICT,
+  vehicle_id VARCHAR(64) NOT NULL REFERENCES vehicles(id) ON DELETE RESTRICT,
+  customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  staff_user_id UUID NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  handover_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  odometer INTEGER,
+  fuel_battery NUMERIC(5,2),
+  vehicle_condition TEXT,
+  existing_damage TEXT,
+  notes TEXT,
+  evidence_photos TEXT[] NOT NULL DEFAULT '{}',
+  customer_confirmed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS rental_handovers_vehicle_idx ON rental_handovers(vehicle_id,handover_at DESC);
+
+CREATE TABLE IF NOT EXISTS rental_returns (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE RESTRICT,
+  vehicle_id VARCHAR(64) NOT NULL REFERENCES vehicles(id) ON DELETE RESTRICT,
+  customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  staff_user_id UUID NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  requested_at TIMESTAMPTZ,
+  returned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  return_location TEXT,
+  odometer INTEGER,
+  fuel_battery NUMERIC(5,2),
+  returned_condition TEXT,
+  damage_notes TEXT,
+  evidence_photos TEXT[] NOT NULL DEFAULT '{}',
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS rental_returns_vehicle_idx ON rental_returns(vehicle_id,returned_at DESC);
+
+CREATE TABLE IF NOT EXISTS fleet_damage_cases (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL REFERENCES bookings(id) ON DELETE RESTRICT,
+  vehicle_id VARCHAR(64) NOT NULL REFERENCES vehicles(id) ON DELETE RESTRICT,
+  customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE RESTRICT,
+  inspection_id UUID REFERENCES vehicle_inspections(id) ON DELETE SET NULL,
+  description TEXT NOT NULL,
+  evidence_photos TEXT[] NOT NULL DEFAULT '{}',
+  estimated_amount_paise BIGINT NOT NULL DEFAULT 0 CHECK (estimated_amount_paise >= 0),
+  status VARCHAR(24) NOT NULL DEFAULT 'reported' CHECK (status IN ('reported','under_review','approved','disputed','resolved','rejected')),
+  approved_deduction_paise BIGINT NOT NULL DEFAULT 0 CHECK (approved_deduction_paise >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS fleet_damage_cases_booking_idx ON fleet_damage_cases(booking_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS fleet_damage_cases_status_idx ON fleet_damage_cases(status,updated_at DESC);
+
+ALTER TABLE bookings
+  ADD COLUMN IF NOT EXISTS overdue_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS return_requested_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS return_location TEXT,
+  ADD COLUMN IF NOT EXISTS return_notes TEXT,
+  ADD COLUMN IF NOT EXISTS lifecycle_state VARCHAR(32) NOT NULL DEFAULT 'CONFIRMED';
+CREATE INDEX IF NOT EXISTS bookings_lifecycle_state_idx ON bookings(lifecycle_state,scheduled_fulfillment_at,end_at);
