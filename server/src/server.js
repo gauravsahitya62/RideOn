@@ -1080,7 +1080,7 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
     const supa=await verifySupabaseAccessToken(token);
     console.log('[RideOnAuth][TOKEN_VERIFY_RESULT]', JSON.stringify({requestId:req.requestId, valid:Boolean(supa?.id), hasEmail:Boolean(supa?.email)}));
     if(!supa?.id||!supa?.email) return res.status(401).json({error:{code:'INVALID_TOKEN',message:'Session is invalid or expired.'}});
-    console.log('[RideOnAuth][IDENTITY_LINK_START]', JSON.stringify({requestId:req.requestId, accountType:parsed.data.accountType, email: supa.email}));
+    console.log('[RideOnAuth][IDENTITY_LINK_START]', JSON.stringify({requestId:req.requestId, accountType:parsed.data.accountType}));
     const customer=await repository.createOrLinkCustomerFromSupabase({
       supabaseUserId:supa.id,email:supa.email,fullName:parsed.data.fullName,phone:parsed.data.phone,role:parsed.data.accountType,
     });
