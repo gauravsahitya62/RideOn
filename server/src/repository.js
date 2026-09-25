@@ -1239,7 +1239,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
-    if (!['customer','vendor','support','admin'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
+    if (!['customer','vendor','support','admin','delivery_staff'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
 
     const placeholderPhone = () => 'supa-' + crypto.createHash('sha256').update(String(supabaseUserId)).digest('hex').slice(0,11);
 
@@ -1752,7 +1752,7 @@ export function createRepository({ databaseUrl, fleet }) {
       }else{
         if(event.status==='paid') {
           const fleetVehicle=await client.query("select coalesce(fleet_vehicle_class,'') as fleet_vehicle_class,coalesce(operational_state,'AVAILABLE') as operational_state,coalesce(maintenance_required,false) as maintenance_required,owner_id from vehicles where id=(select vehicle_id from bookings where id=$1)",[resolvedBookingId]);
-          const ownFleet=String(fleetVehicle.rows[0]?.fleet_vehicle_class||'') in ['bike','scooter'] || (!fleetVehicle.rows[0]?.owner_id && String(fleetVehicle.rows[0]?.operational_state||'AVAILABLE')!=='INACTIVE');
+          const ownFleet=['bike','scooter'].includes(String(fleetVehicle.rows[0]?.fleet_vehicle_class||'')) || (!fleetVehicle.rows[0]?.owner_id && String(fleetVehicle.rows[0]?.operational_state||'AVAILABLE')!=='INACTIVE');
           if(ownFleet) {
             await client.query("update bookings set status=case when status='requested' then 'confirmed' else status end,lifecycle_state=case when status='requested' then 'CONFIRMED' else lifecycle_state end,updated_at=now() where id=$1",[resolvedBookingId]);
           }
