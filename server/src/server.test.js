@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { createPaymentService } from './payments.js';
 import { createAuth } from './auth.js';
+import { createPricingService } from './pricing.js';
 
 process.env.NODE_ENV = 'test';
 
@@ -1248,6 +1249,166 @@ test('multi-vehicle checkout rolls back all staged bookings when a selected vehi
   const competing=await repository.createBooking({customerId:customer.customer.id,vehicle:two,startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup',pricing:{days:2,rental:3000,deliveryFee:0,platformFee:150,securityDeposit:0,total:3150,currency:'INR',currencyUnit:'rupees'},notes:null,idempotencyKey:'rollback-competing'});
   assert.ok(competing.id);
   await assert.rejects(()=>repository.createFleetOrder({customerId:customer.customer.id,vendorId:vendor.id,vehicleIds:[one.id,two.id],startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup'}),e=>e.code==='MULTI_VEHICLE_UNAVAILABLE');
+});
+
+
+
+test('pricing engine calculates daily rental, fixed delivery, service fee, and refundable deposit', () => {
+  const pricing = createPricingService({
+    RENTAL_MIN_DAYS:'1',
+    RENTAL_MAX_DAYS:'30',
+    RIDEON_DELIVERY_FEE:'200',
+    RIDEON_PLATFORM_FEE_PERCENT:'5',
+    RIDEON_TAX_PERCENT:'0',
+  });
+  const quote = pricing.calculateVehicle({
+    vehicle:{id:'p-1',name:'Activa 6G',pricePerDay:500,securityDeposit:3000},
+    startAt:'2050-01-10T10:00:00.000Z',
+    endAt:'2050-01-13T10:00:00.000Z',
+    delivery:true,
+  });
+  assert.equal(quote.days,3);
+  assert.equal(quote.rentalSubtotal,1500);
+  assert.equal(quote.deliveryFee,200);
+  assert.equal(quote.platformFee,75);
+  assert.equal(quote.tax,0);
+  assert.equal(quote.discount,0);
+  assert.equal(quote.securityDeposit,3000);
+  assert.equal(quote.totalPayable,4775);
+  assert.equal(quote.refundableSecurityDeposit,3000);
+  assert.equal(quote.payableExcludingDeposit,1775);
+});
+
+test('pricing engine rejects unsupported hourly assumptions instead of inventing a rule', () => {
+  const pricing=createPricingService();
+  assert.throws(
+    () => pricing.calculateVehicle({
+      vehicle:{id:'p-2',name:'Access 125',pricePerDay:550,securityDeposit:0},
+      startAt:'2050-01-10T10:00:00.000Z',
+      endAt:'2050-01-10T18:00:00.000Z',
+      delivery:false,
+    }),
+    error => error.code==='INVALID_BOOKING_WINDOW'
+  );
+});
+
+test('multi-vehicle pricing uses the same pricing engine for every line', () => {
+  const pricing=createPricingService({RIDEON_DELIVERY_FEE:'200',RIDEON_PLATFORM_FEE_PERCENT:'5'});
+  const quote=pricing.calculateMultiVehicle({
+    vehicles:[
+      {id:'a',name:'Activa',pricePerDay:500,securityDeposit:1000},
+      {id:'b',name:'Access',pricePerDay:550,securityDeposit:1000},
+      {id:'c',name:'Pulsar',pricePerDay:700,securityDeposit:1000},
+    ],
+    startAt:'2050-02-01T10:00:00.000Z',
+    endAt:'2050-02-04T10:00:00.000Z',
+    delivery:true,
+  });
+  assert.deepEqual(quote.items.map(x=>x.rentalSubtotal),[1500,1650,2100]);
+  assert.equal(quote.rentalSubtotal,5250);
+  assert.equal(quote.deliveryFee,600);
+  assert.equal(quote.securityDeposit,3000);
+  assert.equal(quote.totalPayable,6112.5);
+});
+
+test('pricing values are not customer-supplied by createBooking', async () => {
+  const customer=await register('+911234570101','Pricing Tamper Customer');
+  const vehicle=await repository.createRideOnFleetVehicle({
+    name:'Pricing Tamper Scooter',
+    make:'RideOn',
+    model:'PT-1',
+    type:'bike',
+    fleetVehicleClass:'scooter',
+    city:'Udaipur',
+    dailyRate:800,
+    securityDeposit:2500,
+    deliveryAvailable:true,
+    active:true,
+  },customer.customer.id);
+  const booking=await repository.createBooking({
+    customerId:customer.customer.id,
+    vehicle,
+    startAt:'2051-03-10T10:00:00.000Z',
+    endAt:'2051-03-12T10:00:00.000Z',
+    delivery:true,
+    address:'17 Pricing Road, Udaipur',
+    notes:null,
+    deliveryLatitude:24.5854,
+    deliveryLongitude:73.7125,
+    pricing:{
+      days:2,rental:1,deliveryFee:0,platformFee:0,tax:0,discount:0,securityDeposit:0,total:1
+    },
+    idempotencyKey:'pricing-tamper-101',
+  });
+  assert.equal(booking.pricing.rental,1600);
+  assert.equal(booking.pricing.securityDeposit,2500);
+  assert.equal(booking.pricing.deliveryFee,199);
+  assert.equal(booking.pricing.platformFee,80);
+  assert.equal(booking.pricing.total,4379);
+});
+
+test('historical booking pricing remains a snapshot after future vehicle price changes', async () => {
+  const customer=await register('+911234570102','Pricing Snapshot Customer');
+  const vehicle=await repository.createRideOnFleetVehicle({
+    name:'Snapshot Bike',
+    make:'RideOn',
+    model:'S-1',
+    type:'bike',
+    fleetVehicleClass:'bike',
+    city:'Udaipur',
+    dailyRate:1000,
+    securityDeposit:2000,
+    deliveryAvailable:false,
+    active:true,
+  },customer.customer.id);
+  const booking=await repository.createBooking({
+    customerId:customer.customer.id,
+    vehicle,
+    startAt:'2051-04-10T10:00:00.000Z',
+    endAt:'2051-04-12T10:00:00.000Z',
+    delivery:false,
+    address:'18 Snapshot Road, Udaipur',
+    notes:null,
+    pricing:{total:1,securityDeposit:0},
+    idempotencyKey:'pricing-snapshot-102',
+  });
+  const before=booking.pricing;
+  await repository.updateRideOnFleetVehicle(vehicle.id,{dailyRate:1800,securityDeposit:3500},customer.customer.id);
+  const after=await repository.getBooking(booking.id,customer.customer.id);
+  assert.equal(after.pricing.rental,before.rental);
+  assert.equal(after.pricing.securityDeposit,before.securityDeposit);
+  assert.equal(after.pricing.total,before.total);
+});
+
+test('reservation blocks overlapping availability and expires safely in memory', async () => {
+  const customer=await register('+911234570103','Reservation Customer');
+  const vehicle=await repository.createRideOnFleetVehicle({
+    name:'Reservation Bike',
+    make:'RideOn',
+    model:'R-1',
+    type:'bike',
+    fleetVehicleClass:'bike',
+    city:'Udaipur',
+    dailyRate:700,
+    securityDeposit:1000,
+    deliveryAvailable:false,
+    active:true,
+  },customer.customer.id);
+  const first=await repository.createVehicleReservation({
+    vehicleIds:[vehicle.id],
+    customerId:customer.customer.id,
+    startAt:'2051-05-10T10:00:00.000Z',
+    endAt:'2051-05-12T10:00:00.000Z',
+    idempotencyKey:'reservation-103',
+    expiresAt:'2051-05-10T11:00:00.000Z',
+  });
+  assert.equal(first.status,'active');
+  const availability=await repository.checkVehicleAvailability(vehicle.id,'2051-05-10T12:00:00.000Z','2051-05-11T12:00:00.000Z');
+  assert.equal(availability.available,false);
+  const released=await repository.releaseVehicleReservation(first.id,{customerId:customer.customer.id});
+  assert.equal(released.status,'released');
+  const availableAfter=await repository.checkVehicleAvailability(vehicle.id,'2051-05-10T12:00:00.000Z','2051-05-11T12:00:00.000Z');
+  assert.equal(availableAfter.available,true);
 });
 
 test.after(async () => {
