@@ -1396,6 +1396,47 @@ export function createRepository({ databaseUrl, fleet }) {
     }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
+  async function finalizeFleetSecurityDeposit({bookingId,actorUserId,deductionPaise=0,reason='',evidenceReference='',providerReference='',idempotencyKey}={}) {
+    const actor=await findCustomerById(actorUserId);
+    if(!['admin','support'].includes(actor?.role)) throw Object.assign(new Error('Fleet operations access is required.'),{code:'FORBIDDEN'});
+    const deduction=Math.max(0,Math.round(Number(deductionPaise)||0));
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId)); if(!b) throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycleState||''))) throw Object.assign(new Error('Deposit can only be settled after inspection.'),{code:'DEPOSIT_SETTLEMENT_NOT_ALLOWED'});
+      const d=memory.securityDeposits.get(String(bookingId)); const original=Math.round(Number(d?.originalAmount??b.pricing?.securityDeposit??0)*100), refundable=original-deduction;
+      if(!providerReference && refundable>0) throw Object.assign(new Error('Provider release reference is required.'),{code:'DEPOSIT_PROVIDER_REFERENCE_REQUIRED'});
+      if(deduction>original) throw Object.assign(new Error('Deposit deduction exceeds the collected deposit.'),{code:'DEPOSIT_DEDUCTION_INVALID'});
+      if(deduction>0&&(!String(reason).trim()||!String(evidenceReference).trim())) throw Object.assign(new Error('Reason and evidence are required for a deduction.'),{code:'DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'});
+      if(d){d.approvedDeduction=deduction/100;d.refundableAmount=refundable/100;d.status=deduction>0?'deducted':'refunded';d.refundProviderReference=providerReference||undefined;}
+      b.lifecycleState='COMPLETED';b.status='completed';b.updatedAt=new Date().toISOString();
+      return {booking:b,deposit:{status:d?.status||'refunded',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable,providerReference:providerReference||null}};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query(`select b.id,b.customer_id,b.vehicle_id,b.lifecycle_state,b.fleet_order_id,b.security_deposit_paise,
+        sd.status as deposit_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise
+        from bookings b left join security_deposits sd on sd.booking_id=b.id where b.id=$1 for update`,[bookingId]);
+      const b=q.rows[0];if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycle_state)))throw Object.assign(new Error('Deposit can only be settled after inspection.'),{code:'DEPOSIT_SETTLEMENT_NOT_ALLOWED'});
+      const original=Number(b.original_amount_paise??b.security_deposit_paise??0),refundable=original-deduction;
+      if(deduction>original)throw Object.assign(new Error('Deposit deduction exceeds the collected deposit.'),{code:'DEPOSIT_DEDUCTION_INVALID'});
+      if(refundable>0&&!providerReference)throw Object.assign(new Error('Provider release reference is required.'),{code:'DEPOSIT_PROVIDER_REFERENCE_REQUIRED'});
+      const status=deduction>0?'deducted':'refunded';
+      await client.query(`update security_deposits set refundable_amount_paise=$2,approved_deduction_paise=$3,status=$4,deduction_reason=$5,evidence_reference=$6,inspected_at=coalesce(inspected_at,now()),inspected_by=$7,refund_provider_reference=$8,settlement_provider_reference=$8,settlement_idempotency_key=coalesce(settlement_idempotency_key,$9),updated_at=now(),refunded_at=case when $4='refunded' then now() else refunded_at end
+        where booking_id=$1 and status not in ('refunded','deducted')`,
+        [bookingId,refundable,deduction,String(status),String(reason||'').trim()||null,String(evidenceReference||'').trim()||null,actorUserId,providerReference||null,idempotencyKey||null]);
+      await client.query(`update bookings set lifecycle_state='COMPLETED',status='completed',updated_at=now() where id=$1`,[bookingId]);
+      if(b.fleet_order_id){
+        await client.query(`update fleet_orders fo set status='completed',updated_at=now()
+          where fo.id=$1 and not exists(select 1 from bookings bx where bx.fleet_order_id=fo.id and bx.lifecycle_state<>'COMPLETED')`,[b.fleet_order_id]);
+      }
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,next_state,details) values($1,$2,$3,$4,\'COMPLETED\',$5)',[b.vehicle_id,bookingId,actorUserId,deduction>0?'deposit_deduction':'deposit_release',JSON.stringify({deductionPaise:deduction,refundablePaise:refundable,providerReference:providerReference||null})]);
+      await client.query('commit');
+      return {booking:await getBooking(bookingId),deposit:{status,originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable,providerReference:providerReference||null}};
+    }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
+  }
+
   async function settleFleetSecurityDeposit({bookingId,actorUserId,deductionPaise=0,reason='',evidenceReference='',refundProviderReference=''}={}) {
     const actor=await findCustomerById(actorUserId);
     if(!['admin','support'].includes(actor?.role)) throw Object.assign(new Error('Fleet operations access is required.'),{code:'FORBIDDEN'});
@@ -4475,7 +4516,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getFleetBookingOperations,getRideOnFleetDashboard,setRideOnFleetVehicleState,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,transitionRentalLifecycle,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,markOverdueRentals,getFleetBookingLifecycle,getCustomerRentalInspection,listCustomerNotifications,createNotification,markNotificationRead,listFleetDamageCases,updateFleetDamageCase,settleFleetSecurityDeposit};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getFleetBookingOperations,getRideOnFleetDashboard,setRideOnFleetVehicleState,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,transitionRentalLifecycle,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,markOverdueRentals,getFleetBookingLifecycle,getCustomerRentalInspection,listCustomerNotifications,createNotification,markNotificationRead,listFleetDamageCases,updateFleetDamageCase,settleFleetSecurityDeposit,finalizeFleetSecurityDeposit};
 }
 +params.length);}
     const orderBy=sortValue==='price_asc'?'v.daily_rate_paise asc':sortValue==='price_desc'?'v.daily_rate_paise desc':'v.name asc';
