@@ -1,4 +1,5 @@
 name: RideOn API checks
+# QA: run memory and PostgreSQL paths for every API change.
 
 on:
   push:
