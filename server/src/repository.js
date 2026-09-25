@@ -878,10 +878,42 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();try{await client.query('begin');const q=await client.query('select b.id,b.customer_id,b.vehicle_id,b.lifecycle_state,v.operational_state from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and b.customer_id=$2 for update',[bookingId,customerId]);const b=q.rows[0];if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});if(!['ACTIVE_RENTAL','OVERDUE'].includes(String(b.lifecycle_state))||String(b.operational_state)!=='RENTED')throw Object.assign(new Error('Rental is not active.'),{code:'RETURN_NOT_ALLOWED'});await client.query("update bookings set lifecycle_state='RETURN_REQUESTED',return_requested_at=now(),return_location=$2,return_notes=$3,updated_at=now() where id=$1",[bookingId,returnLocation,notes]);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'return_requested\',$4,\'RETURN_REQUESTED\',$5)',[b.vehicle_id,bookingId,customerId,b.lifecycle_state,JSON.stringify({returnLocation,notes})]);await client.query('commit');return getBooking(bookingId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
-  async function recordRentalReturn({bookingId,staffUserId,returnLocation=null,odometer=null,fuelBattery=null,returnedCondition='',damageNotes='',notes='',evidencePhotos=[]}={}){
-    const staff=await findCustomerById(staffUserId);if(!['admin','support','delivery_staff'].includes(staff?.role))throw Object.assign(new Error('Operations staff access is required.'),{code:'FORBIDDEN'});
-    if(!useDatabase){const b=memory.bookings.get(String(bookingId));if(!b)return null;b.lifecycleState='INSPECTION';b.status='completed';b.vehicle.operationalState='INSPECTION';return b;}
-    const client=await pool.connect();try{await client.query('begin');const q=await client.query('select b.*,v.operational_state from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 for update',[bookingId]);const b=q.rows[0];if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});if(!['RETURN_REQUESTED','ACTIVE_RENTAL','OVERDUE'].includes(String(b.lifecycle_state))||String(b.operational_state)!=='RENTED')throw Object.assign(new Error('Vehicle is not currently in an active rental.'),{code:'RETURN_NOT_ALLOWED'});await client.query('insert into rental_returns(booking_id,vehicle_id,customer_id,staff_user_id,requested_at,returned_at,return_location,odometer,fuel_battery,returned_condition,damage_notes,notes,evidence_photos) values($1,$2,$3,$4,$5,now(),$6,$7,$8,$9,$10,$11,$12)',[bookingId,b.vehicle_id,b.customer_id,staffUserId,b.return_requested_at||null,returnLocation,odometer,fuelBattery,returnedCondition,damageNotes,notes,evidencePhotos]);await client.query("update vehicles set operational_state='INSPECTION',updated_at=now() where id=$1",[b.vehicle_id]);await client.query("update bookings set lifecycle_state='INSPECTION',status='completed',return_received_at=now(),updated_at=now() where id=$1",[bookingId]);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'return_received\',$4,\'INSPECTION\',$5)',[b.vehicle_id,bookingId,staffUserId,b.lifecycle_state,JSON.stringify({returnLocation,odometer,fuelBattery,damage:Boolean(String(damageNotes||'').trim())})]);await client.query('commit');return getBooking(bookingId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
+  async function recordRentalReturn({bookingId,staffUserId,returnLocation=null,odometer=null,fuelBattery=null,returnedCondition='',damageNotes='',notes='',evidencePhotos=[]}={}) {
+    const staff=await findCustomerById(staffUserId);
+    if(!['admin','support','delivery_staff'].includes(staff?.role)) throw Object.assign(new Error('Operations staff access is required.'),{code:'FORBIDDEN'});
+    const normalizedDamage=String(damageNotes||'').trim();
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId)); if(!b) throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      const lifecycle=String(b.lifecycleState||'CONFIRMED').toUpperCase();
+      if(!['RETURN_REQUESTED','ACTIVE_RENTAL','OVERDUE'].includes(lifecycle)||String((b.vehicle||memory.vehicles.get(String(b.vehicleId)))?.operationalState||'')!=='RENTED') throw Object.assign(new Error('Vehicle is not currently in an active rental.'),{code:'RETURN_NOT_ALLOWED'});
+      memory.returnRecords ??= new Map();
+      if(memory.returnRecords.has(String(bookingId))) throw Object.assign(new Error('Vehicle return has already been recorded.'),{code:'RETURN_ALREADY_RECORDED'});
+      const now=new Date().toISOString();
+      const row={bookingId:String(bookingId),vehicleId:String(b.vehicleId),customerId:String(b.customerId),staffUserId:String(staffUserId),requestedAt:b.returnRequestedAt||null,returnedAt:now,returnLocation,odometer,fuelBattery,returnedCondition:String(returnedCondition||''),damageNotes:normalizedDamage,notes:String(notes||''),evidencePhotos};
+      memory.returnRecords.set(String(bookingId),row);
+      b.lifecycleState='RETURNED'; b.status='in_progress'; b.returnReceivedAt=now; b.updatedAt=now;
+      const v=memory.vehicles.get(String(b.vehicleId))||b.vehicle; if(v){v.operationalState='INSPECTION';v.updatedAt=now;}
+      return b;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query('select b.*,v.operational_state from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 for update',[bookingId]);
+      const b=q.rows[0]; if(!b) throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      const lifecycle=String(b.lifecycle_state||'CONFIRMED');
+      if(!['RETURN_REQUESTED','ACTIVE_RENTAL','OVERDUE'].includes(lifecycle)||String(b.operational_state)!=='RENTED') throw Object.assign(new Error('Vehicle is not currently in an active rental.'),{code:'RETURN_NOT_ALLOWED'});
+      const existing=await client.query('select id from rental_returns where booking_id=$1 for update',[bookingId]);
+      if(existing.rows[0]) throw Object.assign(new Error('Vehicle return has already been recorded.'),{code:'RETURN_ALREADY_RECORDED'});
+      const returnedAt=new Date();
+      await client.query(`insert into rental_returns(booking_id,vehicle_id,customer_id,staff_user_id,requested_at,returned_at,return_location,odometer,fuel_battery,returned_condition,damage_notes,notes,evidence_photos)
+        values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [bookingId,b.vehicle_id,b.customer_id,staffUserId,b.return_requested_at||null,returnedAt.toISOString(),returnLocation,odometer,fuelBattery,String(returnedCondition||'').slice(0,2000),normalizedDamage,String(notes||'').slice(0,2000),evidencePhotos]);
+      await client.query("update vehicles set operational_state='INSPECTION',updated_at=now() where id=$1",[b.vehicle_id]);
+      await client.query("update bookings set lifecycle_state='RETURNED',status='in_progress',return_received_at=now(),updated_at=now() where id=$1",[bookingId]);
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'return_received\',$4,\'RETURNED\',$5)',
+        [b.vehicle_id,bookingId,staffUserId,lifecycle,JSON.stringify({returnLocation,odometer,fuelBattery,damage:Boolean(normalizedDamage),returnedAt:returnedAt.toISOString()})]);
+      await client.query('commit'); return getBooking(bookingId);
+    }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
   async function markOverdueRentals(now=new Date()) {
