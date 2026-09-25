@@ -359,42 +359,37 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function listRideOnFleet({q='',type='',brand='',model='',city='',minPrice=null,maxPrice=null,sort='recommended',limit=50,offset=0}={}) {
     const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
-    const query=String(q||'').trim().toLowerCase();
-    const typeFilter=String(type||'').trim().toLowerCase();
-    const brandFilter=String(brand||'').trim().toLowerCase();
-    const modelFilter=String(model||'').trim().toLowerCase();
-    const cityFilter=String(city||'').trim().toLowerCase();
-    const min=minPrice==null||minPrice===''?null:Number(minPrice);
-    const max=maxPrice==null||maxPrice===''?null:Number(maxPrice);
-    const sortValue=String(sort||'recommended').toLowerCase();
+    const query=String(q||'').trim().toLowerCase(),typeFilter=String(type||'').trim().toLowerCase(),brandFilter=String(brand||'').trim().toLowerCase(),modelFilter=String(model||'').trim().toLowerCase(),cityFilter=String(city||'').trim().toLowerCase();
+    const min=minPrice==null||minPrice===''?null:Number(minPrice),max=maxPrice==null||maxPrice===''?null:Number(maxPrice),sortValue=String(sort||'recommended').toLowerCase();
     const classFilter=typeFilter==='scooter'?'scooter':typeFilter==='bike'?'bike':'';
     if(!useDatabase){
-      let rows=[...memory.vehicles.values(),...fleet].filter(v=>v.active!==false);
-      rows=rows.filter(v=>{
-        const vehicleClass=String(v.fleetVehicleClass||v.vehicleClass||((/activa|access|scooty|scooter/i.test(String(v.name||'')+' '+String(v.model||'')))?'scooter':'bike')).toLowerCase();
-        const sourceType=String(v.type||'').toLowerCase();
-        const text=[v.name,v.make,v.model,v.variant,v.city].filter(Boolean).join(' ').toLowerCase();
-        const price=Number(v.pricePerDay??v.dailyRate??0);
-        return (!query||text.includes(query))&&(!classFilter||vehicleClass===classFilter)&&sourceType!=='car'&&(!brandFilter||String(v.make||'').toLowerCase()===brandFilter)&&(!modelFilter||String(v.model||'').toLowerCase()===modelFilter)&&(!cityFilter||String(v.city||'').toLowerCase()===cityFilter)&&(min==null||price>=min)&&(max==null||price<=max)&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&v.maintenanceRequired!==true;
-      });
+      let rows=[...memory.vehicles.values(),...fleet].filter(v=>v.ownerId==null&&v.active!==false&&String(v.type||'').toLowerCase()!=='car'&&['bike','scooter'].includes(String(v.fleetVehicleClass||v.vehicleClass||((/activa|access|scooty|scooter/i.test(String(v.name||'')+' '+String(v.model||'')))?'scooter':'bike')).toLowerCase())&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&v.maintenanceRequired!==true&&v.pricingActive!==false);
+      rows=rows.filter(v=>{const vehicleClass=String(v.fleetVehicleClass||v.vehicleClass||((/activa|access|scooty|scooter/i.test(String(v.name||'')+' '+String(v.model||'')))?'scooter':'bike')).toLowerCase(),text=[v.name,v.make,v.model,v.variant,v.city].filter(Boolean).join(' ').toLowerCase(),price=Number(v.pricePerDay??v.dailyRate??0);return(!query||text.includes(query))&&(!classFilter||vehicleClass===classFilter)&&(!brandFilter||String(v.make||'').toLowerCase()===brandFilter)&&(!modelFilter||String(v.model||'').toLowerCase()===modelFilter)&&(!cityFilter||String(v.city||'').toLowerCase()===cityFilter)&&(min==null||price>=min)&&(max==null||price<=max);});
       if(sortValue==='price_asc')rows.sort((a,b)=>Number(a.pricePerDay??a.dailyRate)-Number(b.pricePerDay??b.dailyRate));else if(sortValue==='price_desc')rows.sort((a,b)=>Number(b.pricePerDay??b.dailyRate)-Number(a.pricePerDay??a.dailyRate));else rows.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
-      return rows.slice(safeOffset,safeOffset+safeLimit);
+      return rows.slice(safeOffset,safeOffset+safeLimit).map(mapManagedVehicle);
     }
-    const params=[];const where=["v.active=true","v.owner_id is null","coalesce(v.type::text,'') <> 'car'","coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter')","coalesce(v.operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE')","coalesce(v.maintenance_required,false)=false","coalesce(v.rideon_pricing_active,true)=true"];
+    const params=[],where=["v.active=true","v.owner_id is null","coalesce(v.type::text,'') <> 'car'","coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter')","coalesce(v.operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE')","coalesce(v.maintenance_required,false)=false","coalesce(v.rideon_pricing_active,true)=true"];
     if(query){params.push('%'+query+'%');where.push("lower(coalesce(v.name,'') || ' ' || coalesce(v.make,'') || ' ' || coalesce(v.model,'') || ' ' || coalesce(v.variant,'')) like $"+params.length);}
     if(classFilter){params.push(classFilter);where.push("lower(coalesce(v.fleet_vehicle_class,'bike'))=$"+params.length);}
     if(brandFilter){params.push(brandFilter);where.push("lower(coalesce(v.make,''))=$"+params.length);}
     if(modelFilter){params.push(modelFilter);where.push("lower(coalesce(v.model,''))=$"+params.length);}
     if(cityFilter){params.push(cityFilter);where.push("lower(trim(coalesce(v.city,'')))=lower(trim($"+params.length+"))");}
-    if(min!=null&&Number.isFinite(min)){params.push(Math.round(min*100));where.push('v.daily_rate_paise>=
-    if(!useDatabase){
-      const v=[...memory.vehicles.values(),...fleet].find(x=>String(x.id)===String(vehicleId)&&x.ownerId==null&&x.active!==false&&x.pricingActive!==false&&String(x.type||'').toLowerCase()!=='car'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&x.maintenanceRequired!==true);
-      return v||null;
-    }
-    const {rows}=await pool.query("select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,variant,color,pickup_location,service_area,fleet_vehicle_class,operational_state,maintenance_required,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where id=$1 and owner_id is null and active=true and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE') and coalesce(maintenance_required,false)=false and coalesce(rideon_pricing_active,true)=true",[vehicleId]);
-    return rows[0]?mapManagedVehicle(rows[0]):null;
+    if(min!=null&&Number.isFinite(min)){params.push(Math.round(min*100));where.push('v.daily_rate_paise>=$'+params.length);}
+    if(max!=null&&Number.isFinite(max)){params.push(Math.round(max*100));where.push('v.daily_rate_paise<=$'+params.length);}
+    const orderBy=sortValue==='price_asc'?'v.daily_rate_paise asc':sortValue==='price_desc'?'v.daily_rate_paise desc':'v.name asc';
+    params.push(safeLimit,safeOffset);
+    const qResult=await pool.query(`select v.id,v.owner_id,v.type,v.name,v.make,v.model,v.year,v.city,v.daily_rate_paise,v.security_deposit_paise,v.transmission,v.fuel,v.seats,v.registration_number,v.description,v.image_urls,v.delivery_available,v.variant,v.color,v.pickup_location,v.pickup_latitude,v.pickup_longitude,v.service_area,v.fleet_vehicle_class,v.operational_state,v.maintenance_required,v.current_odometer,v.current_fuel_battery,v.active,v.rideon_pricing_active,v.created_at,v.updated_at from vehicles v where ${where.join(' and ')} order by ${orderBy} limit $${params.length-1} offset $${params.length}`,params);
+    return qResult.rows.map(mapManagedVehicle);
   }
 
+  async function getRideOnFleetVehicle(vehicleId) {
+    if(!useDatabase){
+      const v=[...memory.vehicles.values(),...fleet].find(x=>String(x.id)===String(vehicleId)&&x.ownerId==null&&x.active!==false&&x.pricingActive!==false&&String(x.type||'').toLowerCase()!=='car'&&['bike','scooter'].includes(String(x.fleetVehicleClass||x.vehicleClass||'bike').toLowerCase())&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&x.maintenanceRequired!==true);
+      return v?mapManagedVehicle(v):null;
+    }
+    const {rows}=await pool.query("select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,variant,color,pickup_location,pickup_latitude,pickup_longitude,service_area,fleet_vehicle_class,operational_state,maintenance_required,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where id=$1 and owner_id is null and active=true and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE') and coalesce(maintenance_required,false)=false and coalesce(rideon_pricing_active,true)=true",[vehicleId]);
+    return rows[0]?mapManagedVehicle(rows[0]):null;
+  }
   async function getPublicVendorProfile(vendorId) {
     if (!useDatabase) {
       const vendor = [...memory.vendors.values()].find(v => String(v.id) === String(vendorId) && v.status === 'active');
