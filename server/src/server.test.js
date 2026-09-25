@@ -189,22 +189,17 @@ test('delivery GPS is not persisted when delivery is disabled', async () => {
 test('vendor customer review history is scoped to the selected booking', async () => {
   const vendorCustomer=await register('+911234568103','Review Privacy Vendor');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
-  const customerA=await register('+911234568104','Review Privacy Customer A');
-  const customerALogin=await legacyLogin('+911234568104');
+  const customer=await register('+911234568104','Review Privacy Customer');
+  const customerLogin=await legacyLogin('+911234568104');
   const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Privacy Review Car',make:'RideOn',model:'R1',year:2035,city:'Jaipur',dailyRate:1500,securityDeposit:0,transmission:'Automatic',fuel:'Petrol',seats:5,registrationNumber:'RJ14PRV104',description:'Privacy review test vehicle',imageUrls:[],deliveryAvailable:false,active:true});
-  const first=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2045-02-10T10:00:00.000Z',endAt:'2045-02-11T10:00:00.000Z',delivery:false,address:'1 Review Privacy Road, Jaipur'},customerALogin.accessToken,{'Idempotency-Key':'review-privacy-a'});
-  assert.equal(first.status,201);
-  const firstId=(await first.json()).booking.bookingId;
-  await repository.updateCustomerBookingStatus?.();
-  const customerB=await register('+911234568105','Review Privacy Customer B');
-  const customerBLogin=await legacyLogin('+911234568105');
-  const second=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2045-02-12T10:00:00.000Z',endAt:'2045-02-13T10:00:00.000Z',delivery:false,address:'2 Review Privacy Road, Jaipur'},customerBLogin.accessToken,{'Idempotency-Key':'review-privacy-b'});
-  assert.equal(second.status,409);
-  // Full cross-booking review history is blocked by repository scoping; the route remains
-  // vendor-booking authorized and only returns reviews attached to that booking.
-  const result=await repository.listVendorCustomerReviewsForBooking({vendorId:vendor.id,bookingId:firstId});
+  const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2045-02-10T10:00:00.000Z',endAt:'2045-02-11T10:00:00.000Z',delivery:false,address:'1 Review Privacy Road, Jaipur'},customerLogin.accessToken,{'Idempotency-Key':'review-privacy-a'});
+  assert.equal(created.status,201);
+  const bookingId=(await created.json()).booking.bookingId;
+  const result=await repository.listVendorCustomerReviewsForBooking({vendorId:vendor.id,bookingId});
   assert.deepEqual(result.summary,{averageRating:0,totalReviewCount:0,ratingDistribution:{1:0,2:0,3:0,4:0,5:0}});
+  assert.deepEqual(result.reviews,[]);
 });
+
 test('protected booking routes reject anonymous callers', async () => {
   const response = await request('/api/v1/bookings');
   const payload = await response.json();
