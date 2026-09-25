@@ -630,9 +630,17 @@ app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, as
     const contentType=String(req.body?.contentType||'image/jpeg').toLowerCase();
     if(!base64) return res.status(400).json({error:{code:'IMAGE_REQUIRED',message:'Please select a vehicle image to upload.'}});
     if(!['image/jpeg','image/png','image/webp'].includes(contentType)) return res.status(400).json({error:{code:'IMAGE_TYPE_UNSUPPORTED',message:'Please upload a JPG, PNG, or WebP image.'}});
+    if(!/^[A-Za-z0-9+/\s]+={0,2}$/.test(base64) || base64.length > Math.ceil((8*1024*1024)/3)*4 + 16){
+      return res.status(400).json({error:{code:'IMAGE_INVALID',message:'The selected image could not be read. Please choose it again.'}});
+    }
     const imageBuffer=Buffer.from(base64,'base64');
     if(!imageBuffer.length) return res.status(400).json({error:{code:'IMAGE_INVALID',message:'The selected image could not be read. Please choose it again.'}});
     if(imageBuffer.length>8*1024*1024) return res.status(413).json({error:{code:'IMAGE_TOO_LARGE',message:'Vehicle images must be 8 MB or smaller.'}});
+    const hasJpegMagic=imageBuffer.length>=3&&imageBuffer[0]===0xFF&&imageBuffer[1]===0xD8&&imageBuffer[2]===0xFF;
+    const hasPngMagic=imageBuffer.length>=8&&imageBuffer.subarray(0,8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]));
+    const hasWebpMagic=imageBuffer.length>=12&&imageBuffer.subarray(0,4).toString('ascii')==='RIFF'&&imageBuffer.subarray(8,12).toString('ascii')==='WEBP';
+    const contentMatchesMagic=(contentType==='image/jpeg'&&hasJpegMagic)||(contentType==='image/png'&&hasPngMagic)||(contentType==='image/webp'&&hasWebpMagic);
+    if(!contentMatchesMagic) return res.status(400).json({error:{code:'IMAGE_INVALID',message:'The selected file is not a valid image of the declared type.'}});
     const extension=contentType==='image/png'?'png':contentType==='image/webp'?'webp':'jpg';
     const path=`vendors/${req.vendor.id}/${crypto.randomUUID()}.${extension}`;
     const response=await fetch(`${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`,{
