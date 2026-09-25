@@ -688,6 +688,22 @@ export function createRepository({ databaseUrl, fleet }) {
     return q.rows[0]||null;
   }
 
+  async function getAuthoritativeBookingPrice(bookingId, customerId=null) {
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId));
+      if(!b || (customerId && String(b.customerId)!==String(customerId))) return null;
+      return pricingService.calculateVehicle({vehicle:b.vehicle,startAt:b.startAt,endAt:b.endAt,delivery:Boolean(b.delivery)});
+    }
+    const q=await pool.query(`select b.*,v.id as v_id,v.name as v_name,v.type as v_type,v.daily_rate_paise,v.security_deposit_paise,v.active,v.operational_state,v.maintenance_required,v.delivery_available from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and ($2::uuid is null or b.customer_id=$2)`,[bookingId,customerId]);
+    const row=q.rows[0]; if(!row)return null;
+    if(!row.active||String(row.operational_state||'AVAILABLE')!=='AVAILABLE'||row.maintenance_required) {
+      // Existing booking may be in a rented/inspection state. Price remains immutable;
+      // only checkout creation requires current availability.
+    }
+    const vehicle={id:String(row.v_id),name:row.v_name,type:row.v_type,pricePerDay:Number(row.daily_rate_paise||0)/100,securityDeposit:Number(row.security_deposit_paise||0)/100};
+    return pricingService.calculateVehicle({vehicle,startAt:row.start_at,endAt:row.end_at,delivery:Boolean(row.delivery_required)});
+  }
+
   async function createFleetOrder({customerId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null,idempotencyKey=null}={}) {
     const normalizedKey=idempotencyKey?String(idempotencyKey).trim():null;
     if(!useDatabase){
