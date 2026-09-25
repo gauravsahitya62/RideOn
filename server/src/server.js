@@ -483,49 +483,33 @@ app.get('/api/v1/geocoding/search', supabaseRequireAuth, requireCustomer, async 
 
 app.get('/api/v1/routing/eta', supabaseRequireAuth, requireCustomer, async (req,res) => {
   const parsed=z.object({
-    vendorId:z.string().uuid(),
+    vehicleId:z.string().trim().min(1).max(64),
     latitude:z.coerce.number().min(-90).max(90),
     longitude:z.coerce.number().min(-180).max(180),
   }).safeParse(req.query);
-  if(!parsed.success) return res.status(400).json({error:{code:'ROUTE_INVALID_COORDINATES',message:'Please provide a valid delivery location.'}});
+  if(!parsed.success)return res.status(400).json({error:{code:'ROUTE_INVALID_COORDINATES',message:'Please provide a valid RideOn vehicle and delivery location.'}});
   try{
-    const vendors=await repository.listMarketplaceVendors({});
-    const vendor=vendors.find(item=>String(item.vendorId)===String(parsed.data.vendorId));
-    if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor service location is not available.'}});
+    const vehicle=await repository.getRideOnFleetVehicle(parsed.data.vehicleId);
+    if(!vehicle)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'RideOn vehicle not found or unavailable.'}});
+    if(vehicle.pickupLatitude==null||vehicle.pickupLongitude==null)return res.status(422).json({error:{code:'PICKUP_LOCATION_UNAVAILABLE',message:'Pickup location is not configured for this RideOn vehicle.'}});
     const route=await getDrivingRoute(
-      {latitude:vendor.latitude,longitude:vendor.longitude},
+      {latitude:Number(vehicle.pickupLatitude),longitude:Number(vehicle.pickupLongitude)},
       {latitude:parsed.data.latitude,longitude:parsed.data.longitude}
     );
-    res.json({
-      route:{
-        distanceMeters:route.distanceMeters,
-        durationSeconds:route.durationSeconds,
-        estimatedDeliveryMinutes:Math.max(1,Math.round(route.durationSeconds/60)),
-        provider:route.provider,
-        cached:Boolean(route.cached),
-      }
-    });
+    res.json({route:{
+      distanceMeters:route.distanceMeters,
+      durationSeconds:route.durationSeconds,
+      estimatedDeliveryMinutes:Math.max(1,Math.round(route.durationSeconds/60)),
+      provider:route.provider,
+      cached:Boolean(route.cached),
+    }});
   }catch(error){
-    const statusByCode={
-      ROUTE_INVALID_COORDINATES:400,
-      ROUTE_PROVIDER_NOT_CONFIGURED:503,
-      ROUTE_PROVIDER_UNAVAILABLE:503,
-      ROUTE_PROVIDER_TIMEOUT:504,
-      ROUTE_NOT_FOUND:422,
-    };
-    const status=statusByCode[error?.code]||503;
-    const messages={
-      ROUTE_PROVIDER_NOT_CONFIGURED:'Delivery routing is not configured yet.',
-      ROUTE_PROVIDER_UNAVAILABLE:'Delivery routing is temporarily unavailable. Please retry.',
-      ROUTE_PROVIDER_TIMEOUT:'Delivery routing took too long. Please retry.',
-      ROUTE_NOT_FOUND:'No driving route was found for those locations.',
-      ROUTE_INVALID_COORDINATES:'Please provide a valid delivery location.',
-    };
+    const statusByCode={ROUTE_INVALID_COORDINATES:400,PICKUP_LOCATION_UNAVAILABLE:422,ROUTE_PROVIDER_NOT_CONFIGURED:503,ROUTE_PROVIDER_UNAVAILABLE:503,ROUTE_PROVIDER_TIMEOUT:504,ROUTE_NOT_FOUND:422};
+    const messages={ROUTE_PROVIDER_NOT_CONFIGURED:'Delivery routing is not configured yet.',ROUTE_PROVIDER_UNAVAILABLE:'Delivery routing is temporarily unavailable. Please retry.',ROUTE_PROVIDER_TIMEOUT:'Delivery routing took too long. Please retry.',ROUTE_NOT_FOUND:'No driving route was found for those locations.',PICKUP_LOCATION_UNAVAILABLE:'Pickup location is not configured for this RideOn vehicle.',ROUTE_INVALID_COORDINATES:'Please provide a valid delivery location.'};
     console.error(JSON.stringify({level:'error',event:'routing_eta_failed',requestId:req.requestId,code:error?.code||'ROUTE_FAILED'}));
-    res.status(status).json({error:{code:error?.code||'ROUTE_FAILED',message:messages[error?.code]||'We could not estimate delivery time right now. Please retry.'}});
+    res.status(statusByCode[error?.code]||503).json({error:{code:error?.code||'ROUTE_FAILED',message:messages[error?.code]||'We could not estimate delivery time right now. Please retry.'}});
   }
 });
-
 app.get('/api/v1/vendors/map', async (req, res) => {
   try {
     const cityValue = req.query.city?.toString().trim() || undefined;
