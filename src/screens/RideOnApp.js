@@ -263,6 +263,7 @@ const loadFleet=async()=>{try{const result=await rideOnApi.listFleet({city:selec
    if(!quote?.total||Number(quote.total)<=0)return setBookingError('Refresh the server quote before payment.');
    setBookingBusy(true);
    let trip;
+   let bookingReservation=null;
    try{
      const availabilityResult=await rideOnApi.availability(selected.id,{startAt:bookingWindow.startAt,endAt:bookingWindow.endAt});
      setAvailability(availabilityResult);
@@ -270,8 +271,7 @@ const loadFleet=async()=>{try{const result=await rideOnApi.listFleet({city:selec
        setQuote(null);setBookingError('This vehicle is no longer available for the selected dates. Please choose different dates.');setScreen('booking');return;
      }
      const idempotencyKey=`rideon:${selected.id}:${bookingWindow.startAt}:${bookingWindow.endAt}:${mobile}`;
-     let reservation=null;
-     try{reservation=await rideOnApi.createVehicleReservation({vehicleIds:[String(selected.id)],startAt:bookingWindow.startAt,endAt:bookingWindow.endAt},idempotencyKey);}catch(reservationError){if(reservationError?.code==='VEHICLE_UNAVAILABLE'){setQuote(null);setBookingError('This vehicle was just reserved or booked by another customer. Please choose another vehicle or retry.');setScreen('booking');return;}throw reservationError;}
+     try{bookingReservation=await rideOnApi.createVehicleReservation({vehicleIds:[String(selected.id)],startAt:bookingWindow.startAt,endAt:bookingWindow.endAt},idempotencyKey);}catch(reservationError){if(reservationError?.code==='VEHICLE_UNAVAILABLE'){setQuote(null);setBookingError('This vehicle was just reserved or booked by another customer. Please choose another vehicle or retry.');setScreen('booking');return;}throw reservationError;}
      const result=await rideOnApi.createBooking({vehicleId:selected.id,customerName:name.trim(),phone:mobile,startAt:bookingWindow.startAt,endAt:bookingWindow.endAt,delivery,address:delivery?address.trim():'Self pickup',deliveryLatitude:delivery?deliveryLocation?.latitude:null,deliveryLongitude:delivery?deliveryLocation?.longitude:null},idempotencyKey);
      const booking=result?.booking||result?.data;
      if(!booking?.bookingId)throw new Error('Booking request was not acknowledged by the server.');
@@ -280,7 +280,7 @@ const loadFleet=async()=>{try{const result=await rideOnApi.listFleet({city:selec
      setTrips(old=>old.some(t=>String(t.id)===String(trip.id))?old:[trip,...old]);
      setSelectedBooking(trip);setQuote(booking.pricing||quote);
    }catch(error){
-     if(error?.reservationId){try{await rideOnApi.releaseVehicleReservation(error.reservationId);}catch{}}
+     if(bookingReservation?.id){try{await rideOnApi.releaseVehicleReservation(bookingReservation.id);}catch{}}
      if(error?.code==='VEHICLE_UNAVAILABLE'){setQuote(null);setBookingError('This vehicle is no longer available for the selected dates. Please choose different dates.');setScreen('booking');}
      else setBookingError(friendlyError(error, 'We could not create your booking request right now. Please try again.'));
      return;
