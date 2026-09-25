@@ -547,19 +547,29 @@ export function createRepository({ databaseUrl, fleet }) {
     if(!useDatabase){
       if(!memory.fleetOrders)memory.fleetOrders=new Map();
       if(!memory.fleetOrderIdempotency)memory.fleetOrderIdempotency=new Map();
-      if(normalizedKey){const existing=memory.fleetOrderIdempotency.get(`${customerId}:${normalizedKey}`);if(existing)return existing;}
+      if(normalizedKey){const existing=memory.fleetOrderIdempotency.get(String(customerId)+':'+normalizedKey);if(existing)return existing;}
       const quote=await quoteMultiVehicle({customerId,vendorId,vehicleIds,startAt,endAt,delivery,address,deliveryLatitude,deliveryLongitude});
-      const created=[];
-      try{
-        for(const item of quote.items){
-          const vehicle=[...memory.vehicles.values()].find(v=>String(v.id)===String(item.vehicleId));
-          if(!vehicle)throw Object.assign(new Error('Vehicle not found.'),{code:'VEHICLE_NOT_FOUND'});
-          const booking=await createBooking({customerId,vehicle,startAt:quote.startAt,endAt:quote.endAt,delivery,address:quote.address,deliveryLatitude:quote.deliveryLatitude,deliveryLongitude:quote.deliveryLongitude,pricing:{days:Math.ceil((new Date(quote.endAt)-new Date(quote.startAt))/86400000),rental:item.rental,deliveryFee:item.deliveryFee,platformFee:item.platformFee,securityDeposit:item.securityDeposit,total:item.total,currency:'INR',currencyUnit:'rupees'},notes:null,idempotencyKey:`fleet:${normalizedKey||crypto.randomUUID()}:${item.vehicleId}`});
-          created.push(booking);
-        }
-      }catch(error){for(const b of created){memory.bookings.delete(String(b.id));}throw error;}
-      const order={id:crypto.randomUUID(),customerId:String(customerId),vendorId:String(vendorId),startAt:quote.startAt,endAt:quote.endAt,delivery:quote.delivery,address:quote.address,items:created,rentalSubtotal:quote.rentalSubtotal,deliveryFee:quote.deliveryFee,platformFee:quote.platformFee,securityDeposit:quote.securityDeposit,total:quote.total,paymentStatus:'unpaid',status:'requested',idempotencyKey:normalizedKey,quoteExpiresAt:quote.quoteExpiresAt,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
-      memory.fleetOrders.set(order.id,order);if(normalizedKey)memory.fleetOrderIdempotency.set(`${customerId}:${normalizedKey}`,order);return order;
+      const stagedBookings=[];
+      const bookingIdempotencyKeys=[];
+      const now=new Date().toISOString();
+      for(const item of quote.items){
+        const vehicle=[...memory.vehicles.values()].find(v=>String(v.id)===String(item.vehicleId));
+        if(!vehicle)throw Object.assign(new Error('Vehicle not found.'),{code:'VEHICLE_NOT_FOUND'});
+        const overlap=[...memory.bookings.values()].some(b=>String(b.vehicleId)===String(item.vehicleId)&&['requested','confirmed','in_progress'].includes(b.status)&&new Date(quote.startAt)<new Date(b.endAt)&&new Date(quote.endAt)>new Date(b.startAt));
+        if(overlap)throw Object.assign(new Error('One or more selected vehicles became unavailable.'),{code:'MULTI_VEHICLE_UNAVAILABLE',vehicleIds:[String(item.vehicleId)]});
+        const bookingId=crypto.randomUUID();
+        const booking={id:bookingId,customerId:String(customerId),vehicleId:String(vehicle.id),vehicle,vendorId:String(vendorId),startAt:quote.startAt,endAt:quote.endAt,delivery:Boolean(delivery),address:quote.address,deliveryLatitude:quote.deliveryLatitude,deliveryLongitude:quote.deliveryLongitude,vendorServiceLatitude:vehicle.vendorServiceLocation?.latitude??null,vendorServiceLongitude:vehicle.vendorServiceLocation?.longitude??null,routeDistanceMeters:null,routeDurationSeconds:null,routeProvider:null,notes:null,pricing:{days:Math.ceil((new Date(quote.endAt)-new Date(quote.startAt))/86400000),rental:item.rental,deliveryFee:item.deliveryFee,platformFee:item.platformFee,securityDeposit:item.securityDeposit,total:item.total,currency:'INR'},status:'requested',paymentStatus:'unpaid',deliveryStatus:'scheduled',createdAt:now,updatedAt:now};
+        stagedBookings.push(booking);
+        bookingIdempotencyKeys.push(String(customerId)+':fleet:'+String(normalizedKey||bookingId)+':'+String(item.vehicleId));
+      }
+      const order={id:crypto.randomUUID(),customerId:String(customerId),vendorId:String(vendorId),vendorName:(quote.vendorName||null),startAt:quote.startAt,endAt:quote.endAt,delivery:quote.delivery,address:quote.address,items:stagedBookings,rentalSubtotal:quote.rentalSubtotal,deliveryFee:quote.deliveryFee,platformFee:quote.platformFee,securityDeposit:quote.securityDeposit,total:quote.total,paymentStatus:'unpaid',status:'requested',idempotencyKey:normalizedKey,quoteExpiresAt:quote.quoteExpiresAt,createdAt:now,updatedAt:now};
+      for(const b of stagedBookings){
+        memory.bookings.set(String(b.id),b);
+        if(Number(b.pricing.securityDeposit||0)>0)memory.securityDeposits.set(String(b.id),{bookingId:String(b.id),customerId:String(customerId),vendorId:String(vendorId),originalAmount:Number(b.pricing.securityDeposit),refundableAmount:Number(b.pricing.securityDeposit),approvedDeduction:0,status:'pending'});
+      }
+      memory.fleetOrders.set(String(order.id),order);
+      if(normalizedKey)memory.fleetOrderIdempotency.set(String(customerId)+':'+normalizedKey,order);
+      return order;
     }
     const client=await pool.connect();
     try{
@@ -587,7 +597,7 @@ export function createRepository({ databaseUrl, fleet }) {
         if(item.securityDeposit>0)await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$4,$4,'pending') on conflict(booking_id) do nothing`,[booking.id,customerId,vendorId,Math.round(item.securityDeposit*100)]);
         await client.query(`insert into booking_status_events(booking_id,next_status,actor_type,actor_id) values($1,'requested','customer',$2)`,[booking.id,customerId]);
       }
-      await client.query(`insert into fleet_order_items(fleet_order_id,booking_id,vehicle_id,line_rental_total_paise,line_delivery_fee_paise,line_platform_fee_paise,line_security_deposit_paise,line_total_paise) select $1,id,vehicle_id,rental_total_paise,delivery_fee_paise,platform_fee_paise,security_deposit_paise,total_paise from bookings where fleet_order_id=$1`,[orderId]);
+      await client.query(`insert into fleet_order_items(fleet_order_id,booking_id,vehicle_id,line_rental_total_paise,line_delivery_fee_paise,line_platform_fee_paise,line_security_deposit_paise,line_total_paise) select $1,id,vehicle_id,rental_total_paise,delivery_fee_paise,platform_fee_paise,security_deposit_paieS,total_paise from bookings where fleet_order_id=$1`,[orderId]);
       await client.query('commit');
       return {id:orderId,customerId:String(customerId),vendorId:String(vendorId),startAt:start.toISOString(),endAt:end.toISOString(),delivery:Boolean(delivery),address:String(address||'').trim(),items:created,rentalSubtotal:parts.rental,deliveryFee:parts.deliveryFee,platformFee:parts.platformFee,securityDeposit:parts.securityDeposit,total,paymentStatus:'unpaid',status:'requested',quoteExpiresAt:new Date(Date.now()+5*60*1000).toISOString()};
     }catch(error){try{await client.query('rollback')}catch{};if(error.code==='23P01')error.code='MULTI_VEHICLE_UNAVAILABLE';throw error;}finally{client.release();}
