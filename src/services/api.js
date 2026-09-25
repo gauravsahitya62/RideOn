@@ -155,6 +155,7 @@ export const rideOnApi = {
   createFleetOpsReturn: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/return`, { method:'POST', body:JSON.stringify(payload) }),
   createFleetOpsInspection: (vehicleId,payload) => request(`/api/v1/fleet-ops/vehicles/${encode(vehicleId)}/inspection`, { method:'POST', body:JSON.stringify(payload) }),
   settleFleetDeposit: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/deposit-settlement`, { method:'POST', body:JSON.stringify(payload) }),
+  getFleetOpsDashboard: () => request('/api/v1/fleet-ops/dashboard'),
   listFleetOpsBookings: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/fleet-ops/bookings${query?`?${query}`:''}`); },
   assignFleetOpsJob: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/assign`, { method:'POST', body:JSON.stringify(payload) }),
   readyFleetOpsPickup: (bookingId) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/ready`, { method:'POST' }),
