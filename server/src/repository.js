@@ -1352,7 +1352,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
-    if (!['customer','vendor','support','admin'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
+    if (!['customer','vendor','support','admin','delivery_staff'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
 
     const placeholderPhone = () => 'supa-' + crypto.createHash('sha256').update(String(supabaseUserId)).digest('hex').slice(0,11);
 
