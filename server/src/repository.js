@@ -821,16 +821,55 @@ export function createRepository({ databaseUrl, fleet }) {
     const q=await pool.query('select * from bookings where id=$1 and customer_id=$2',[bookingId,customerId]); if(!q.rows[0])return null; return mapBooking(q.rows[0]);
   }
 
-  async function prepareVehicleHandover({bookingId,staffUserId,customerConfirmed=false,odometer=null,fuelBattery=null,vehicleCondition='',existingDamage='',notes='',evidencePhotos=[]}={}){
-    const staff=await findCustomerById(staffUserId);if(!['admin','support','delivery_staff'].includes(staff?.role)){const e=new Error('Operations staff access is required.');e.code='FORBIDDEN';throw e;}
-    if(!useDatabase){const b=memory.bookings.get(String(bookingId));if(!b)return null;if(String(b.lifecycleState||'CONFIRMED')!=='CONFIRMED'&&!['READY_FOR_PICKUP','DELIVERY_STARTED'].includes(String(b.lifecycleState)))throw Object.assign(new Error('Booking is not ready for handover.'),{code:'HANDOVER_NOT_ALLOWED'});b.lifecycleState='HANDED_OVER';b.status='in_progress';b.vehicle.operationalState='RENTED';return b;}
-    const client=await pool.connect();try{await client.query('begin');const q=await client.query(`select b.*,v.name as v_name,v.type as v_type,v.operational_state,v.maintenance_required,v.active,v.fleet_vehicle_class,sd.status as deposit_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise
-      from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.id=$1 for update`,[bookingId]);const b=q.rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}if(b.status!=='confirmed'){const e=new Error('Booking must be confirmed before handover.');e.code='HANDOVER_NOT_ALLOWED';throw e;}if(!b.active||String(b.operational_state||'AVAILABLE').toUpperCase()!=='AVAILABLE'||b.maintenance_required){const e=new Error('Vehicle is not operationally available for handover.');e.code='HANDOVER_NOT_ALLOWED';throw e;}if(b.deposit_status&&Number(b.original_amount_paise)>0&&!['held','settlement_pending','settled'].includes(String(b.deposit_status))){const e=new Error('Security deposit is not held.');e.code='DEPOSIT_NOT_READY_FOR_HANDOVER';throw e;}if(!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))){const e=new Error('Payment is not confirmed.');e.code='PAYMENT_NOT_CONFIRMED';throw e;}if(!['CONFIRMED','READY_FOR_PICKUP','DELIVERY_STARTED','PICKUP_ASSIGNED','DELIVERY_ASSIGNED'].includes(String(b.lifecycle_state||'CONFIRMED'))){const e=new Error('Booking is not ready for handover.');e.code='HANDOVER_NOT_ALLOWED';throw e;}
-      const bookingDays=Math.ceil((new Date(b.end_at)-new Date(b.start_at))/86400000);if(bookingDays<1){const e=new Error('Invalid booking dates.');e.code='HANDOVER_NOT_ALLOWED';throw e;}
-      const ins=await client.query('select id from vehicle_inspections where booking_id=$1 and inspection_type=$2 and inspection_status=\'passed\' order by inspected_at desc limit 1',[bookingId,'pickup']);if(!ins.rows[0]){const e=new Error('Required pickup inspection is not complete.');e.code='HANDOVER_NOT_ALLOWED';throw e;}
-      if(customerConfirmed!==true){const e=new Error('Customer confirmation is required for handover.');e.code='CUSTOMER_HANDOVER_CONFIRMATION_REQUIRED';throw e;}
-      await client.query(`insert into rental_handovers(booking_id,vehicle_id,customer_id,staff_user_id,odometer,fuel_battery,vehicle_condition,existing_damage,notes,evidence_photos,customer_confirmed_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) on conflict(booking_id) do update set customer_confirmed_at=case when rental_handovers.customer_confirmed_at is null then now() else rental_handovers.customer_confirmed_at end,odometer=coalesce(excluded.odometer,rental_handovers.odometer),fuel_battery=coalesce(excluded.fuel_battery,rental_handovers.fuel_battery),vehicle_condition=coalesce(excluded.vehicle_condition,rental_handovers.vehicle_condition),existing_damage=coalesce(excluded.existing_damage,rental_handovers.existing_damage),notes=coalesce(excluded.notes,rental_handovers.notes),evidence_photos=case when array_length(excluded.evidence_photos,1)>0 then excluded.evidence_photos else rental_handovers.evidence_photos end`,[bookingId,b.vehicle_id,b.customer_id,staffUserId,odometer,fuelBattery,vehicleCondition,existingDamage,notes,evidencePhotos]);
-      await client.query("update vehicles set operational_state='RENTED',maintenance_required=false,updated_at=now() where id=$1",[b.vehicle_id]);await client.query("update bookings set lifecycle_state='ACTIVE_RENTAL',status='in_progress',pickup_confirmed_at=now(),updated_at=now() where id=$1",[bookingId]);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'handover_completed\',\'CONFIRMED\',\'ACTIVE_RENTAL\',$4)',[b.vehicle_id,bookingId,staffUserId,JSON.stringify({customerConfirmed,odometer,fuelBattery})]);await client.query('commit');return getBooking(bookingId);
+  async function prepareVehicleHandover({bookingId,staffUserId,customerConfirmed=false,customerId=null,vehicleId=null,odometer=null,fuelBattery=null,vehicleCondition='',existingDamage='',notes='',evidencePhotos=[]}={}) {
+    const staff=await findCustomerById(staffUserId);
+    if(!['admin','support','delivery_staff'].includes(staff?.role)) throw Object.assign(new Error('Operations staff access is required.'),{code:'FORBIDDEN'});
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId)); if(!b) throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      const state=String(b.lifecycleState||'CONFIRMED').toUpperCase();
+      if(!['CONFIRMED','READY_FOR_PICKUP','DELIVERY_STARTED','PICKUP_ASSIGNED','DELIVERY_ASSIGNED'].includes(state)) throw Object.assign(new Error('Booking is not ready for handover.'),{code:'HANDOVER_NOT_ALLOWED'});
+      if(customerId && String(b.customerId)!==String(customerId)) throw Object.assign(new Error('Customer does not match this booking.'),{code:'HANDOVER_CUSTOMER_MISMATCH'});
+      if(vehicleId && String(b.vehicleId)!==String(vehicleId)) throw Object.assign(new Error('Vehicle does not match this booking.'),{code:'HANDOVER_VEHICLE_MISMATCH'});
+      if(customerConfirmed!==true) throw Object.assign(new Error('Customer confirmation is required for handover.'),{code:'CUSTOMER_HANDOVER_CONFIRMATION_REQUIRED'});
+      if(String(b.paymentStatus||'').toLowerCase()!=='paid') throw Object.assign(new Error('Payment must be confirmed before handover.'),{code:'PAYMENT_NOT_CONFIRMED'});
+      const d=memory.securityDeposits.get(String(bookingId)); const deposit=Number(d?.originalAmount??b.pricing?.securityDeposit??0);
+      if(deposit>0 && !['held','settlement_pending','settled'].includes(String(d?.status||'pending'))) throw Object.assign(new Error('Security deposit is not held.'),{code:'DEPOSIT_NOT_READY_FOR_HANDOVER'});
+      const v=memory.vehicles.get(String(b.vehicleId))||b.vehicle;
+      if(v && (v.active===false || String(v.operationalState||'AVAILABLE')!=='AVAILABLE' || v.maintenanceRequired)) throw Object.assign(new Error('Vehicle is not operationally available for handover.'),{code:'HANDOVER_NOT_ALLOWED'});
+      const handover={bookingId:String(bookingId),vehicleId:String(b.vehicleId),customerId:String(b.customerId),staffUserId:String(staffUserId),handoverAt:new Date().toISOString(),odometer,fuelBattery,vehicleCondition:String(vehicleCondition||''),existingDamage:String(existingDamage||''),notes:String(notes||''),evidencePhotos};
+      memory.handoverRecords ??= new Map(); memory.handoverRecords.set(String(bookingId),handover);
+      b.lifecycleState='ACTIVE_RENTAL'; b.status='in_progress'; b.pickupConfirmedAt=handover.handoverAt;
+      if(v){v.operationalState='RENTED';v.updatedAt=handover.handoverAt;}
+      for(const s of memory.trackingSessions.values()) if(String(s.bookingId)===String(bookingId)&&s.status==='active'){s.status='completed';s.endedAt=handover.handoverAt;}
+      b.deliveryStatus='delivered'; b.deliveredAt=b.deliveredAt||handover.handoverAt; b.updatedAt=handover.handoverAt;
+      return b;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query(`select b.*,v.name as v_name,v.type as v_type,v.operational_state,v.maintenance_required,v.active,v.fleet_vehicle_class,
+        sd.status as deposit_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise
+        from bookings b join vehicles v on v.id=b.vehicle_id left join security_deposits sd on sd.booking_id=b.id where b.id=$1 for update`,[bookingId]);
+      const b=q.rows[0]; if(!b) throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      if(customerId && String(b.customer_id)!==String(customerId)) throw Object.assign(new Error('Customer does not match this booking.'),{code:'HANDOVER_CUSTOMER_MISMATCH'});
+      if(vehicleId && String(b.vehicle_id)!==String(vehicleId)) throw Object.assign(new Error('Vehicle does not match this booking.'),{code:'HANDOVER_VEHICLE_MISMATCH'});
+      if(b.status!=='confirmed') throw Object.assign(new Error('Booking must be confirmed before handover.'),{code:'HANDOVER_NOT_ALLOWED'});
+      const lifecycle=String(b.lifecycle_state||'CONFIRMED').toUpperCase();
+      if(!['CONFIRMED','READY_FOR_PICKUP','DELIVERY_STARTED','PICKUP_ASSIGNED','DELIVERY_ASSIGNED'].includes(lifecycle)) throw Object.assign(new Error('Booking is not ready for handover.'),{code:'HANDOVER_NOT_ALLOWED'});
+      if(!b.active||String(b.operational_state||'AVAILABLE').toUpperCase()!=='AVAILABLE'||b.maintenance_required) throw Object.assign(new Error('Vehicle is not operationally available for handover.'),{code:'HANDOVER_NOT_ALLOWED'});
+      if(!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))) throw Object.assign(new Error('Payment is not confirmed.'),{code:'PAYMENT_NOT_CONFIRMED'});
+      if(b.deposit_status&&Number(b.original_amount_paise)>0&&!['held','settlement_pending','settled'].includes(String(b.deposit_status))) throw Object.assign(new Error('Security deposit is not held.'),{code:'DEPOSIT_NOT_READY_FOR_HANDOVER'});
+      const dates=await client.query('select start_at,end_at from bookings where id=$1 and start_at<end_at',[bookingId]); if(!dates.rows[0]) throw Object.assign(new Error('Invalid booking dates.'),{code:'HANDOVER_NOT_ALLOWED'});
+      const ins=await client.query(`select id from vehicle_inspections where booking_id=$1 and inspection_type='pickup' and inspection_status='passed' order by inspected_at desc limit 1`,[bookingId]); if(!ins.rows[0]) throw Object.assign(new Error('Required pickup inspection is not complete.'),{code:'HANDOVER_NOT_ALLOWED'});
+      if(customerConfirmed!==true) throw Object.assign(new Error('Customer confirmation is required for handover.'),{code:'CUSTOMER_HANDOVER_CONFIRMATION_REQUIRED'});
+      const existing=await client.query('select id from rental_handovers where booking_id=$1 for update',[bookingId]); if(existing.rows[0]) throw Object.assign(new Error('Vehicle handover has already been recorded.'),{code:'HANDOVER_ALREADY_RECORDED'});
+      await client.query(`insert into rental_handovers(booking_id,vehicle_id,customer_id,staff_user_id,odometer,fuel_battery,vehicle_condition,existing_damage,notes,evidence_photos,customer_confirmed_at)
+        values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`,[bookingId,b.vehicle_id,b.customer_id,staffUserId,odometer,fuelBattery,String(vehicleCondition||'').slice(0,2000),String(existingDamage||'').slice(0,2000),String(notes||'').slice(0,2000),evidencePhotos]);
+      await client.query("update vehicles set operational_state='RENTED',maintenance_required=false,updated_at=now() where id=$1",[b.vehicle_id]);
+      await client.query("update bookings set lifecycle_state='ACTIVE_RENTAL',status='in_progress',pickup_confirmed_at=now(),delivery_status=case when delivery_required then 'delivered' else delivery_status end,delivered_at=case when delivery_required then coalesce(delivered_at,now()) else delivered_at end,updated_at=now() where id=$1",[bookingId]);
+      await client.query("update tracking_sessions set status='completed',ended_at=now() where booking_id=$1 and status='active'",[bookingId]);
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'handover_completed\',$4,\'ACTIVE_RENTAL\',$5)',[b.vehicle_id,bookingId,staffUserId,lifecycle,JSON.stringify({customerId:String(b.customer_id),vehicleId:String(b.vehicle_id),customerConfirmed,odometer,fuelBattery})]);
+      await client.query('commit'); return getBooking(bookingId);
     }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
