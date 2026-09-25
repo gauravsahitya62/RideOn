@@ -146,6 +146,9 @@ export const rideOnApi = {
     return request(`/api/v1/vendors/${encode(vendorId)}/vehicles${query?`?${query}`:''}`);
   },
   quoteMultiVehicle: (payload) => request('/api/v1/quotes/multi', { method:'POST', body:JSON.stringify(payload) }),
+  pricingPreview: (payload) => request('/api/v1/pricing/preview', { method:'POST', body:JSON.stringify(payload) }),
+  createVehicleReservation: (payload,idempotencyKey) => request('/api/v1/reservations', { method:'POST', headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined, body:JSON.stringify(payload) }),
+  releaseVehicleReservation: (reservationId) => request(`/api/v1/reservations/${encode(reservationId)}/release`, { method:'POST', body:JSON.stringify({}) }),
   createFleetOrder: (payload,idempotencyKey) => request('/api/v1/fleet-orders', { method:'POST', headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined, body:JSON.stringify(payload) }),
   getFleetOrder: (id) => request(`/api/v1/fleet-orders/${encode(id)}`),
   listFleetOrders: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/fleet-orders${query?`?${query}`:''}`); },
