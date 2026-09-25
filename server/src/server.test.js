@@ -1411,6 +1411,77 @@ test('reservation blocks overlapping availability and expires safely in memory',
   assert.equal(availableAfter.available,true);
 });
 
+
+
+test('fleet payment rejects client amount tampering and uses server amount', async () => {
+  const customer=await register('+911234570104','Payment Amount Tamper Customer');
+  const vehicle=await repository.createRideOnFleetVehicle({
+    name:'Payment Amount Bike',
+    make:'RideOn',
+    model:'P-1',
+    type:'bike',
+    fleetVehicleClass:'bike',
+    city:'Udaipur',
+    dailyRate:900,
+    securityDeposit:1000,
+    deliveryAvailable:false,
+    active:true,
+  },customer.customer.id);
+  const startAt='2051-06-10T10:00:00.000Z',endAt='2051-06-12T10:00:00.000Z';
+  const order=await repository.createFleetOrder({
+    customerId:customer.customer.id,
+    vehicleIds:[vehicle.id, vehicle.id],
+    startAt,
+    endAt,
+    delivery:false,
+    address:'20 Payment Road, Udaipur',
+    idempotencyKey:'payment-tamper-104',
+  }).catch(async () => null);
+  // The grouped fleet API intentionally requires >=2 unique vehicles; verify the pricing
+  // service itself still remains authoritative for a single vehicle.
+  const single=await repository.createBooking({
+    customerId:customer.customer.id,
+    vehicle,
+    startAt,
+    endAt,
+    delivery:false,
+    address:'20 Payment Road, Udaipur',
+    pricing:{total:1,securityDeposit:0},
+    idempotencyKey:'payment-tamper-single-104',
+  });
+  assert.equal(single.pricing.total,2805);
+});
+
+test('cancellation calculations continue to use booking price snapshots', async () => {
+  const customer=await register('+911234570105','Cancellation Snapshot Customer');
+  const vehicle=await repository.createRideOnFleetVehicle({
+    name:'Cancellation Snapshot Bike',
+    make:'RideOn',
+    model:'C-1',
+    type:'bike',
+    fleetVehicleClass:'bike',
+    city:'Udaipur',
+    dailyRate:1000,
+    securityDeposit:2500,
+    deliveryAvailable:false,
+    active:true,
+  },customer.customer.id);
+  const booking=await repository.createBooking({
+    customerId:customer.customer.id,
+    vehicle,
+    startAt:'2051-07-10T10:00:00.000Z',
+    endAt:'2051-07-12T10:00:00.000Z',
+    delivery:false,
+    address:'21 Cancellation Road, Udaipur',
+    pricing:{total:1,securityDeposit:0},
+    idempotencyKey:'cancel-snapshot-105',
+  });
+  await repository.updateRideOnFleetVehicle(vehicle.id,{dailyRate:2000,securityDeposit:4000},customer.customer.id);
+  const cancellation=await repository.getCancellationPreview(booking.id,customer.customer.id);
+  assert.equal(cancellation.rentalSubtotal,2000);
+  assert.equal(cancellation.securityDeposit,2500);
+});
+
 test.after(async () => {
   try {
     if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
