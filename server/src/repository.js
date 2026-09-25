@@ -1498,31 +1498,34 @@ export function createRepository({ databaseUrl, fleet }) {
       try {
         await client.query('begin');
         if(input.idempotencyKey){
-          await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',[`${input.customerId}:${input.idempotencyKey}`]);
+          await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',[String(input.customerId)+':'+String(input.idempotencyKey)]);
           const idem=await client.query('select b.* from booking_idempotency_keys i join bookings b on b.id=i.booking_id where i.customer_id=$1 and i.idempotency_key=$2 for share',[input.customerId,input.idempotencyKey]);
           if(idem.rows[0]){await client.query('commit');const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=mapBooking({...idem.rows[0],vehicle:input.vehicle});throw x;}
         }
-        const vehicleCheck = await client.query('select id, owner_id, active from vehicles where id=$1 for share',[input.vehicle.id]);
-        if (!vehicleCheck.rows[0]) { const x=new Error('vehicle not found'); x.code='VEHICLE_NOT_FOUND'; throw x; }
-        if (!vehicleCheck.rows[0].active) { const x=new Error('vehicle inactive'); x.code='VEHICLE_INACTIVE'; throw x; }
-        let serviceLocation=null;
-        if(vehicleCheck.rows[0].owner_id){
-          const locationResult=await client.query('select service_latitude,service_longitude,service_address from vendors where id=$1 and status=\'active\'',[vehicleCheck.rows[0].owner_id]);
-          serviceLocation=locationResult.rows[0]||null;
-        }
+        const vehicleQuery=await client.query('select * from vehicles where id=$1 for update',[input.vehicle.id]);
+        const row=vehicleQuery.rows[0];
+        if(!row){const x=new Error('vehicle not found');x.code='VEHICLE_NOT_FOUND';throw x;}
+        if(!row.active||row.maintenance_required||String(row.operational_state||'AVAILABLE')!=='AVAILABLE'){const x=new Error('vehicle unavailable');x.code='VEHICLE_UNAVAILABLE';throw x;}
+        const authoritativeVehicle=mapManagedVehicle(row);
+        const authoritativePricing=pricingService.calculateVehicle({vehicle:authoritativeVehicle,startAt:input.startAt,endAt:input.endAt,delivery:Boolean(input.delivery)});
+        const serviceLocation=row.owner_id ? (await client.query("select service_latitude,service_longitude,service_address from vendors where id=$1 and status='active'",[row.owner_id])).rows[0] || null : null;
         const deliveryLatitude=input.deliveryLatitude == null || input.deliveryLatitude === '' ? null : Number(input.deliveryLatitude);
         const deliveryLongitude=input.deliveryLongitude == null || input.deliveryLongitude === '' ? null : Number(input.deliveryLongitude);
         if(input.delivery && ((deliveryLatitude==null)!==(deliveryLongitude==null) || (deliveryLatitude!=null && (!Number.isFinite(deliveryLatitude)||deliveryLatitude < -90||deliveryLatitude > 90)) || (deliveryLongitude!=null && (!Number.isFinite(deliveryLongitude)||deliveryLongitude < -180||deliveryLongitude > 180)))){
           const x=new Error('invalid delivery location'); x.code='INVALID_DELIVERY_LOCATION'; throw x;
         }
-        const vendorServiceLatitude=serviceLocation?.service_latitude == null ? null : Number(serviceLocation.service_latitude);
-        const vendorServiceLongitude=serviceLocation?.service_longitude == null ? null : Number(serviceLocation.service_longitude);
-        const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,vendor_service_latitude,vendor_service_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,delivery_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,\'requested\',\'unpaid\',\'scheduled\',$17) returning *',[input.customerId,input.vehicle.id,vehicleCheck.rows[0].owner_id||null,input.startAt,input.endAt,input.delivery,input.address,deliveryLatitude,deliveryLongitude,vendorServiceLatitude,vendorServiceLongitude,Math.round(input.pricing.deliveryFee * 100),Math.round(input.pricing.rental * 100),Math.round(input.pricing.platformFee * 100),Math.round((input.pricing.securityDeposit||0) * 100),Math.round(input.pricing.total * 100),input.notes||null]);
+        const overlap=await client.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",[input.vehicle.id,input.startAt,input.endAt]);
+        if(overlap.rows[0]){const x=new Error('vehicle unavailable');x.code='VEHICLE_UNAVAILABLE';throw x;}
+        const reservationOverlap=await client.query("select 1 from rideon_vehicle_reservations where vehicle_id=$1 and status='active' and expires_at>now() and start_at<$3 and end_at>$2 limit 1",[input.vehicle.id,input.startAt,input.endAt]).catch(()=>({rows:[]}));
+        if(reservationOverlap.rows[0]){const x=new Error('vehicle temporarily reserved');x.code='VEHICLE_UNAVAILABLE';throw x;}
+        const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,vendor_service_latitude,vendor_service_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,delivery_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,\'requested\',\'unpaid\',\'scheduled\',$17) returning *',[input.customerId,row.id,row.owner_id||null,input.startAt,input.endAt,input.delivery,input.address,deliveryLatitude,deliveryLongitude,serviceLocation?.service_latitude==null?null:Number(serviceLocation.service_latitude),serviceLocation?.service_longitude==null?null:Number(serviceLocation.service_longitude),Math.round(authoritativePricing.deliveryFee*100),Math.round(authoritativePricing.rentalSubtotal*100),Math.round(authoritativePricing.platformFee*100),Math.round(authoritativePricing.securityDeposit*100),Math.round(authoritativePricing.totalPayable*100),input.notes||null]);
         if(input.idempotencyKey) await client.query('insert into booking_idempotency_keys (customer_id,idempotency_key,booking_id) values ($1,$2,$3)',[input.customerId,input.idempotencyKey,rows[0].id]);
-        if(Number(input.pricing.securityDeposit||0)>0) await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$4,$4,'pending') on conflict (booking_id) do nothing`,[rows[0].id,input.customerId,vehicleCheck.rows[0].owner_id||null,Math.round(Number(input.pricing.securityDeposit||0)*100)]);
-        await client.query('insert into booking_status_events (booking_id,next_status,actor_type,actor_id) values ($1,\'requested\',\'customer\',$2)',[rows[0].id,input.customerId]);
+        if(authoritativePricing.securityDeposit>0) await client.query("insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$4,$4,'pending') on conflict(booking_id) do nothing",[rows[0].id,input.customerId,row.owner_id||null,Math.round(authoritativePricing.securityDeposit*100)]);
+        await client.query("insert into booking_status_events (booking_id,next_status,actor_type,actor_id) values ($1,'requested','customer',$2)",[rows[0].id,input.customerId]);
         await client.query('commit');
-        return mapBooking({...rows[0],vehicle:input.vehicle});
+        return mapBooking({...rows[0],vehicle:authoritativeVehicle,pricing:{
+          days:authoritativePricing.days,rental:authoritativePricing.rentalSubtotal,deliveryFee:authoritativePricing.deliveryFee,platformFee:authoritativePricing.platformFee,tax:authoritativePricing.tax,discount:authoritativePricing.discount,securityDeposit:authoritativePricing.securityDeposit,total:authoritativePricing.totalPayable,totalPayable:authoritativePricing.totalPayable,refundableSecurityDeposit:authoritativePricing.refundableSecurityDeposit,payableExcludingDeposit:authoritativePricing.payableExcludingDeposit,currency:'INR',currencyUnit:'rupees'
+        }});
       } catch(e) {
         try{await client.query('rollback');}catch{}
         if(e.code==='23P01'){const x=new Error('vehicle unavailable');x.code='VEHICLE_UNAVAILABLE';throw x;}
@@ -1530,12 +1533,21 @@ export function createRepository({ databaseUrl, fleet }) {
         throw e;
       } finally { client.release(); }
     }
-    const key=input.idempotencyKey?`${input.customerId}:${input.idempotencyKey}`:null;
+
+    const key=input.idempotencyKey?String(input.customerId)+':'+String(input.idempotencyKey):null;
     if(key&&memory.idempotency.has(key)){const x=new Error('idempotency replay');x.code='IDEMPOTENCY_REPLAY';x.booking=memory.idempotency.get(key);throw x;}
-    if([...memory.bookings.values()].some(b=>b.vehicleId===input.vehicle.id&&['requested','confirmed','in_progress'].includes(b.status)&&new Date(input.startAt)<new Date(b.endAt)&&new Date(input.endAt)>new Date(b.startAt))){const x=new Error('vehicle unavailable');x.code='VEHICLE_UNAVAILABLE';throw x;}
-    const id=crypto.randomUUID();const deliveryLatitude=input.deliveryLatitude == null || input.deliveryLatitude === '' ? null : Number(input.deliveryLatitude);const deliveryLongitude=input.deliveryLongitude == null || input.deliveryLongitude === '' ? null : Number(input.deliveryLongitude);if(input.delivery && ((deliveryLatitude==null)!==(deliveryLongitude==null) || (deliveryLatitude!=null && (!Number.isFinite(deliveryLatitude)||deliveryLatitude < -90||deliveryLatitude > 90)) || (deliveryLongitude!=null && (!Number.isFinite(deliveryLongitude)||deliveryLongitude < -180||deliveryLongitude > 180)))){const x=new Error('invalid delivery location');x.code='INVALID_DELIVERY_LOCATION';throw x;}const vendor= input.vehicle.vendorServiceLocation || null;const booking={id,customerId:input.customerId,vehicleId:input.vehicle.id,vendorId:input.vehicle.ownerId||input.vehicle.vendorId||null,vehicle:input.vehicle,startAt:input.startAt,endAt:input.endAt,delivery:input.delivery,address:input.address,deliveryLatitude,deliveryLongitude,vendorServiceLatitude:vendor?.latitude ?? null,vendorServiceLongitude:vendor?.longitude ?? null,routeDistanceMeters:null,routeDurationSeconds:null,routeProvider:null,notes:input.notes,pricing:input.pricing,status:'requested',paymentStatus:'unpaid',createdAt:new Date().toISOString()};
-    if(Number(input.pricing.securityDeposit||0)>0) memory.securityDeposits.set(id,{bookingId:id,customerId:input.customerId,vendorId:input.vehicle.ownerId||null,originalAmount:Number(input.pricing.securityDeposit),refundableAmount:Number(input.pricing.securityDeposit),approvedDeduction:0,status:'pending'});memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
+    const vehicle=input.vehicle;
+    const authoritativePricing=pricingService.calculateVehicle({vehicle,startAt:input.startAt,endAt:input.endAt,delivery:Boolean(input.delivery)});
+    if(await isVehicleUnavailable(vehicle.id,input.startAt,input.endAt)){const x=new Error('vehicle unavailable');x.code='VEHICLE_UNAVAILABLE';throw x;}
+    const deliveryLatitude=input.deliveryLatitude == null || input.deliveryLatitude === '' ? null : Number(input.deliveryLatitude);
+    const deliveryLongitude=input.deliveryLongitude == null || input.deliveryLongitude === '' ? null : Number(input.deliveryLongitude);
+    if(input.delivery && ((deliveryLatitude==null)!==(deliveryLongitude==null) || (deliveryLatitude!=null && (!Number.isFinite(deliveryLatitude)||deliveryLatitude < -90||deliveryLatitude > 90)) || (deliveryLongitude!=null && (!Number.isFinite(deliveryLongitude)||deliveryLongitude < -180||deliveryLongitude > 180)))){const x=new Error('invalid delivery location');x.code='INVALID_DELIVERY_LOCATION';throw x;}
+    const vendor=vehicle.vendorServiceLocation||null; const id=crypto.randomUUID();
+    const booking={id,customerId:input.customerId,vehicleId:vehicle.id,vendorId:vehicle.ownerId||vehicle.vendorId||null,vehicle,startAt:input.startAt,endAt:input.endAt,delivery:input.delivery,address:input.address,deliveryLatitude,deliveryLongitude,vendorServiceLatitude:vendor?.latitude??null,vendorServiceLongitude:vendor?.longitude??null,routeDistanceMeters:null,routeDurationSeconds:null,routeProvider:null,notes:input.notes,pricing:{days:authoritativePricing.days,rental:authoritativePricing.rentalSubtotal,deliveryFee:authoritativePricing.deliveryFee,platformFee:authoritativePricing.platformFee,tax:authoritativePricing.tax,discount:authoritativePricing.discount,securityDeposit:authoritativePricing.securityDeposit,total:authoritativePricing.totalPayable,totalPayable:authoritativePricing.totalPayable,refundableSecurityDeposit:authoritativePricing.refundableSecurityDeposit,payableExcludingDeposit:authoritativePricing.payableExcludingDeposit,currency:'INR',currencyUnit:'rupees'},status:'requested',paymentStatus:'unpaid',createdAt:new Date().toISOString()};
+    if(authoritativePricing.securityDeposit>0)memory.securityDeposits.set(id,{bookingId:id,customerId:input.customerId,vendorId:vehicle.ownerId||null,originalAmount:authoritativePricing.securityDeposit,refundableAmount:authoritativePricing.securityDeposit,approvedDeduction:0,status:'pending'});
+    memory.bookings.set(id,booking);if(key)memory.idempotency.set(key,booking);return booking;
   }
+
 
   async function updateBookingRouteData(id, customerId, route = {}) {
     const distanceMeters = Number(route.distanceMeters);
