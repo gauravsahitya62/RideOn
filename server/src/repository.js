@@ -13,7 +13,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), financialTransactions:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), financialTransactions:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),rentalHandovers:new Map(),rentalReturns:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
 
   const mapPaymentRow = (row) => row && ({
     id:String(row.id),
@@ -56,6 +56,7 @@ export function createRepository({ databaseUrl, fleet }) {
         currency:'INR'
       },
       status:row.status,
+      lifecycleState:String(row.lifecycle_state ?? row.lifecycleState ?? (row.status === 'in_progress' ? 'ACTIVE_RENTAL' : row.status === 'completed' ? 'COMPLETED' : 'CONFIRMED')).toUpperCase(),
       paymentStatus:row.payment_status,
       paymentId:row.payment_id || undefined,
       paymentProviderReference:row.payment_provider_reference || undefined,
