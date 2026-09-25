@@ -1399,10 +1399,11 @@
       memory.paymentEvents.set(event.eventId, event);
       booking.paymentStatus = event.status;
       booking.paymentProviderReference = event.providerReference;
+      if (event.status==='paid' && booking.status==='requested') { booking.status='confirmed'; booking.lifecycleState='CONFIRMED'; }
       const paymentRecord = event.providerOrderId
         ? [...memory.payments.values()].find(p => p.providerOrderId === String(event.providerOrderId))
         : memory.payments.get(String(resolvedBookingId));
-      if (event.status==='paid') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='held'; }
+      if (event.status==='paid') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='held'; const order=memory.fleetOrders?.get(String(booking.fleetOrderId||'')); if(order){order.status='confirmed';for(const child of order.items||[]){if(child.status==='requested'){child.status='confirmed';child.lifecycleState='CONFIRMED';}child.paymentStatus='paid';}} }
       if (event.status==='refund_pending') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='refund_pending'; }
       if (event.status==='refunded') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) { deposit.status='refunded'; deposit.refundProviderReference=event.providerReference; } }
       if (paymentRecord) {
@@ -1453,11 +1454,11 @@
         await client.query('commit');
         return { applied:false, duplicate:true };
       }
-      await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[resolvedBookingId,event.status,event.providerReference]);
+      await client.query("update bookings set payment_status=$2,payment_provider_reference=$3,status=case when $2='paid' and status='requested' then 'confirmed' else status end,lifecycle_state=case when $2='paid' and status='requested' then 'CONFIRMED' else lifecycle_state end,updated_at=now() where id=$1",[resolvedBookingId,event.status,event.providerReference]);
       await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
       if(fleetOrder){
         await client.query('update fleet_orders set payment_status=$2,updated_at=now() where id=$1',[fleetOrder.id,event.status]);
-        await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where fleet_order_id=$1',[fleetOrder.id,event.status,event.providerReference]);
+        await client.query("update bookings set payment_status=$2,payment_provider_reference=$3,status=case when $2='paid' and status='requested' then 'confirmed' else status end,lifecycle_state=case when $2='paid' and status='requested' then 'CONFIRMED' else lifecycle_state end,updated_at=now() where fleet_order_id=$1",[fleetOrder.id,event.status,event.providerReference]);
         if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('pending','held')",[fleetOrder.id]);
         if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','refund_pending')",[fleetOrder.id]);
         if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','refund_pending','release_pending')",[fleetOrder.id,event.providerReference]);
