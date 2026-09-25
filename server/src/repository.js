@@ -957,7 +957,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if(customerId && String(b.customerId)!==String(customerId)) throw Object.assign(new Error('Customer does not match this booking.'),{code:'HANDOVER_CUSTOMER_MISMATCH'});
       if(vehicleId && String(b.vehicleId)!==String(vehicleId)) throw Object.assign(new Error('Vehicle does not match this booking.'),{code:'HANDOVER_VEHICLE_MISMATCH'});
       if(customerConfirmed!==true) throw Object.assign(new Error('Customer confirmation is required for handover.'),{code:'CUSTOMER_HANDOVER_CONFIRMATION_REQUIRED'});
-      if(String(b.paymentStatus||'').toLowerCase()!=='paid') throw Object.assign(new Error('Payment must be confirmed before handover.'),{code:'PAYMENT_NOT_CONFIRMED'});
+      if(!['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus||'').toLowerCase())) throw Object.assign(new Error('Payment must be confirmed before handover.'),{code:'PAYMENT_NOT_CONFIRMED'});
       const d=memory.securityDeposits.get(String(bookingId)); const deposit=Number(d?.originalAmount??b.pricing?.securityDeposit??0);
       if(deposit>0 && !['held','settlement_pending','settled'].includes(String(d?.status||'pending'))) throw Object.assign(new Error('Security deposit is not held.'),{code:'DEPOSIT_NOT_READY_FOR_HANDOVER'});
       const v=memory.vehicles.get(String(b.vehicleId))||b.vehicle;
