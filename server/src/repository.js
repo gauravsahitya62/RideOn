@@ -600,6 +600,33 @@ export function createRepository({ databaseUrl, fleet }) {
     const items=itemRows.rows.map(r=>mapBooking({...r,vehicle:{id:String(r.vehicle_id),name:r.v_name,type:String(r.v_type),make:r.make,model:r.model,imageUrls:r.image_urls||[],description:r.description||'',deliveryAvailable:r.delivery_available!==false}}));
     return {id:String(rows[0].id),customerId:String(rows[0].customer_id),vendorId:String(rows[0].vendor_id),vendorName:rows[0].business_name,startAt:iso(rows[0].start_at),endAt:iso(rows[0].end_at),delivery:Boolean(rows[0].delivery_required),address:rows[0].delivery_address,rentalSubtotal:Number(rows[0].rental_total_paise)/100,deliveryFee:Number(rows[0].delivery_fee_paise)/100,platformFee:Number(rows[0].platform_fee_paise)/100,securityDeposit:Number(rows[0].security_deposit_paise)/100,total:Number(rows[0].total_paise)/100,paymentStatus:rows[0].payment_status,status:rows[0].status,idempotencyKey:rows[0].idempotency_key||null,quoteExpiresAt:iso(rows[0].quote_expires_at),items};
   }
+  async function getFleetOrder(fleetOrderId, customerId) {
+    if(!useDatabase){
+      const order=memory.fleetOrders?.get(String(fleetOrderId));
+      return order && String(order.customerId)===String(customerId) ? order : null;
+    }
+    const client=await pool.connect();
+    try {
+      const order=await loadFleetOrderTx(client,fleetOrderId);
+      return order && String(order.customerId)===String(customerId) ? order : null;
+    } finally { client.release(); }
+  }
+
+  async function listCustomerFleetOrders(customerId,{limit=20,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(50,Number(limit)||20)),safeOffset=Math.max(0,Number(offset)||0);
+    if(!useDatabase){
+      const rows=[...(memory.fleetOrders?.values()||[])].filter(o=>String(o.customerId)===String(customerId)).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return rows.slice(safeOffset,safeOffset+safeLimit);
+    }
+    const client=await pool.connect();
+    try {
+      const q=await client.query('select id from fleet_orders where customer_id=$1 order by created_at desc limit $2 offset $3',[customerId,safeLimit,safeOffset]);
+      const orders=[];
+      for(const row of q.rows){ const order=await loadFleetOrderTx(client,row.id); if(order) orders.push(order); }
+      return orders;
+    } finally { client.release(); }
+  }
+
   async function updateVendor(customerId, input) {
     if (!useDatabase) {
       const vendor = await ensureVendorForCustomer(customerId, input);
