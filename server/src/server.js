@@ -540,6 +540,84 @@ app.get('/api/v1/vehicles', async (req, res) => {
   }
 });
 
+app.get('/api/v1/vendors/:vendorId', async (req,res)=>{
+  try{
+    const vendor=await repository.getPublicVendorProfile(req.params.vendorId);
+    if(!vendor)return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor not found.'}});
+    res.json({vendor});
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'vendor_profile_failed',requestId:req.requestId,code:error?.code||'VENDOR_PROFILE_FAILED'}));
+    res.status(503).json({error:{code:'VENDOR_PROFILE_UNAVAILABLE',message:'Vendor information is temporarily unavailable. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/vendors/:vendorId/vehicles', async (req,res)=>{
+  try{
+    const vendor=await repository.getPublicVendorProfile(req.params.vendorId);
+    if(!vendor)return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor not found.'}});
+    const limit=Math.min(100,Math.max(1,Number(req.query.limit)||50));
+    const offset=Math.max(0,Number(req.query.offset)||0);
+    const vehicles=(await repository.listPublicVendorVehicles(req.params.vendorId,{limit,offset})).map(mobileVehicle);
+    res.json({vendor,vehicles,data:vehicles,pagination:{limit,offset,count:vehicles.length}});
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'vendor_fleet_failed',requestId:req.requestId,code:error?.code||'VENDOR_FLEET_FAILED'}));
+    res.status(503).json({error:{code:'VENDOR_FLEET_UNAVAILABLE',message:'Vendor fleet is temporarily unavailable. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/quotes/multi', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({
+    vendorId:z.string().uuid(),
+    vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
+    pickupAt:z.string().datetime(),
+    returnAt:z.string().datetime(),
+    delivery:z.boolean().default(true),
+    address:z.string().trim().max(300).default(''),
+    deliveryLatitude:z.union([z.number(),z.string()]).nullable().optional(),
+    deliveryLongitude:z.union([z.number(),z.string()]).nullable().optional(),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid fleet booking details.',details:parsed.error.flatten()}});
+  try{
+    const quote=await repository.quoteMultiVehicle({customerId:req.user.id,vendorId:parsed.data.vendorId,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude});
+    res.json({quote});
+  }catch(error){
+    const map={INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'MULTI_QUOTE_FAILED',message:error?.code==='MULTI_VEHICLE_UNAVAILABLE'?'One or more selected vehicles are no longer available.':'We could not prepare the fleet quote right now. Please retry.',vehicleIds:error?.vehicleIds}});
+  }
+});
+
+app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({
+    vendorId:z.string().uuid(),
+    vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
+    pickupAt:z.string().datetime(),
+    returnAt:z.string().datetime(),
+    delivery:z.boolean().default(true),
+    address:z.string().trim().min(8).max(300),
+    deliveryLatitude:z.union([z.number(),z.string()]).nullable().optional(),
+    deliveryLongitude:z.union([z.number(),z.string()]).nullable().optional(),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid fleet checkout details.',details:parsed.error.flatten()}});
+  const idempotencyKey=req.get('Idempotency-Key')?.trim()||null;
+  if(idempotencyKey&&idempotencyKey.length>128)return res.status(400).json({error:{code:'INVALID_IDEMPOTENCY_KEY'}});
+  try{
+    const order=await repository.createFleetOrder({customerId:req.user.id,vendorId:parsed.data.vendorId,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
+    res.status(201).json({order,data:order});
+  }catch(error){
+    const map={INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404,VEHICLE_NOT_FOUND:404};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_ORDER_FAILED',message:error?.code==='MULTI_VEHICLE_UNAVAILABLE'?'One or more selected vehicles became unavailable. No vehicles were booked.':'We could not create the fleet booking. Please retry.',vehicleIds:error?.vehicleIds}});
+  }
+});
+
+app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    if(!repository.getFleetOrder) return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
+    const order=await repository.getFleetOrder(req.params.id,req.user.id);
+    if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
+    res.json({order});
+  }catch(error){res.status(503).json({error:{code:'FLEET_ORDER_UNAVAILABLE',message:'Fleet booking is temporarily unavailable. Please retry.'}});}
+});
+
 app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
   const customer = await repository.findCustomerById(req.user.id);
   if (!customer) return res.status(404).json({ error:{ code:'USER_NOT_FOUND' } });
