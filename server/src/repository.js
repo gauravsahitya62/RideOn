@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import pg from 'pg';
 import { calculateCancellation } from './lifecycle.js';
+import { createPricingService } from './pricing.js';
 
 const { Pool } = pg;
 
@@ -13,7 +14,8 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), financialTransactions:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
+  const pricingService = createPricingService();
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), financialTransactions:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map(),vehicleReservations:new Map() };
 
   const mapPaymentRow = (row) => row && ({
     id:String(row.id),
@@ -604,22 +606,86 @@ export function createRepository({ databaseUrl, fleet }) {
   async function quoteMultiVehicle({customerId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null}={}) {
     void customerId;
     const ids=[...new Set((vehicleIds||[]).map(v=>String(v).trim()).filter(Boolean))];
-    if(ids.length<2||ids.length>10){const e=new Error('Select between 2 and 10 vehicles.');e.code='INVALID_MULTI_CART';throw e;}
-    const start=new Date(startAt),end=new Date(endAt);
-    if(Number.isNaN(start.getTime())||Number.isNaN(end.getTime())||end<=start||start.getTime()<Date.now()){const e=new Error('Pickup and return must form a valid booking window.');e.code='INVALID_BOOKING_WINDOW';throw e;}
-    const days=Math.ceil((end-start)/86400000);
-    if(days<1||days>30){const e=new Error('Booking duration must be between 1 and 30 days.');e.code='INVALID_BOOKING_WINDOW';throw e;}
+    if(ids.length<2||ids.length>10)throw Object.assign(new Error('Select between 2 and 10 vehicles.'),{code:'INVALID_MULTI_CART'});
+    const parsed=pricingService.parseWindow(startAt,endAt);
     const lat=delivery&&deliveryLatitude!=null&&deliveryLatitude!==''?Number(deliveryLatitude):null;
     const lon=delivery&&deliveryLongitude!=null&&deliveryLongitude!==''?Number(deliveryLongitude):null;
-    if(delivery && ((lat==null)!==(lon==null)||lat!=null&&(!Number.isFinite(lat)||lat<-90||lat>90)||lon!=null&&(!Number.isFinite(lon)||lon<-180||lon>180))){const e=new Error('A valid delivery location is required.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
-    const vehicles=useDatabase?(await pool.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active,operational_state,maintenance_required,fleet_vehicle_class from vehicles where active=true and id::text = any($1::text[]) and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE')='AVAILABLE' and coalesce(maintenance_required,false)=false`,[ids])).rows.map(mapManagedVehicle):[...memory.vehicles.values(),...fleet].filter(v=>v.active!==false&&ids.includes(String(v.id)));
-    if(vehicles.length!==ids.length){const e=new Error('One or more selected RideOn vehicles are unavailable.');e.code='MULTI_VEHICLE_ACCESS_DENIED';throw e;}
-    const availability=await Promise.all(vehicles.map(v=>checkVehicleAvailability(v.id,start.toISOString(),end.toISOString())));
+    if(delivery&&((lat==null)!==(lon==null)||lat!=null&&(!Number.isFinite(lat)||lat<-90||lat>90)||lon!=null&&(!Number.isFinite(lon)||lon<-180||lon>180)))throw Object.assign(new Error('A valid delivery location is required.'),{code:'INVALID_DELIVERY_LOCATION'});
+    const vehicles=useDatabase
+      ? (await pool.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active,operational_state,maintenance_required,fleet_vehicle_class from vehicles where active=true and id::text=any($1::text[]) and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE')='AVAILABLE' and coalesce(maintenance_required,false)=false`,[ids])).rows.map(mapManagedVehicle)
+      : [...memory.vehicles.values(),...fleet].filter(v=>v.active!==false&&ids.includes(String(v.id))&&String(v.type||'').toLowerCase()!=='car';
+    if(vehicles.length!==ids.length)throw Object.assign(new Error('One or more selected RideOn vehicles are unavailable.'),{code:'MULTI_VEHICLE_ACCESS_DENIED'});
+    const availability=await Promise.all(vehicles.map(v=>checkVehicleAvailability(v.id,parsed.start.toISOString(),parsed.end.toISOString())));
     const unavailable=availability.filter(x=>!x.available).map(x=>String(x.vehicleId));
-    if(unavailable.length){const e=new Error('One or more selected vehicles became unavailable.');e.code='MULTI_VEHICLE_UNAVAILABLE';e.vehicleIds=unavailable;throw e;}
-    const items=vehicles.map(vehicle=>{const rental=Number(vehicle.pricePerDay||0)*days;const deliveryFee=delivery?199:0;const platformFee=Math.round(rental*0.05);const securityDeposit=Number(vehicle.securityDeposit||0);return {vehicleId:String(vehicle.id),vehicleName:vehicle.name,rental,deliveryFee,platformFee,securityDeposit,total:rental+deliveryFee+platformFee+securityDeposit,currency:'INR'};});
-    const rentalSubtotal=items.reduce((a,x)=>a+x.rental,0),deliveryFee=items.reduce((a,x)=>a+x.deliveryFee,0),platformFee=items.reduce((a,x)=>a+x.platformFee,0),securityDeposit=items.reduce((a,x)=>a+x.securityDeposit,0);
-    return {fleetOwner:'rideon',vehicleIds:ids,startAt:start.toISOString(),endAt:end.toISOString(),delivery:Boolean(delivery),address:String(address||'').trim().slice(0,300),deliveryLatitude:lat,deliveryLongitude:lon,items,rentalSubtotal,deliveryFee,platformFee,securityDeposit,total:rentalSubtotal+deliveryFee+platformFee+securityDeposit,currency:'INR',quoteExpiresAt:new Date(Date.now()+5*60*1000).toISOString()};
+    if(unavailable.length)throw Object.assign(new Error('One or more selected vehicles became unavailable.'),{code:'MULTI_VEHICLE_UNAVAILABLE',vehicleIds:unavailable});
+    const quote=pricingService.calculateMultiVehicle({vehicles,startAt:parsed.start.toISOString(),endAt:parsed.end.toISOString(),delivery});
+    const items=quote.items.map((item)=>({
+      ...item,
+      rental:item.rentalSubtotal,
+      total:item.totalPayable,
+      deliveryFee:item.deliveryFee,
+      platformFee:item.platformFee,
+      securityDeposit:item.securityDeposit,
+      tax:item.tax,
+      discount:item.discount,
+    }));
+    return {
+      fleetOwner:'rideon', vehicleIds:ids, startAt:parsed.start.toISOString(), endAt:parsed.end.toISOString(),
+      delivery:Boolean(delivery), address:String(address||'').trim().slice(0,300),
+      deliveryLatitude:lat,deliveryLongitude:lon,items,
+      rentalSubtotal:quote.rentalSubtotal,deliveryFee:quote.deliveryFee,platformFee:quote.platformFee,
+      tax:quote.tax,discount:quote.discount,securityDeposit:quote.securityDeposit,
+      payableExcludingDeposit:quote.payableExcludingDeposit,total:quote.totalPayable,
+      totalPayable:quote.totalPayable,refundableSecurityDeposit:quote.refundableSecurityDeposit,
+      currency:'INR',quoteExpiresAt:quote.quoteExpiresAt,pricingConfigVersion:quote.pricingConfigVersion
+    };
+  }
+
+  async function createVehicleReservation({vehicleIds,customerId,startAt,endAt,expiresAt,idempotencyKey=null}={}) {
+    const ids=[...new Set((vehicleIds||[]).map(v=>String(v).trim()).filter(Boolean))];
+    const parsed=pricingService.parseWindow(startAt,endAt);
+    const expiry=expiresAt?new Date(expiresAt):new Date(pricingService.reservationExpiry());
+    if(Number.isNaN(expiry.getTime())||expiry<=new Date())throw Object.assign(new Error('Reservation expiry is invalid.'),{code:'INVALID_RESERVATION'});
+    if(!useDatabase){
+      for(const [id,res] of memory.vehicleReservations){
+        if(new Date(res.expiresAt)<=new Date()&&res.status==='active')res.status='expired';
+        if(res.status==='active'&&ids.includes(res.vehicleId)&&new Date(res.startAt)<parsed.end&&new Date(res.endAt)>parsed.start)throw Object.assign(new Error('Vehicle is temporarily reserved by another checkout.'),{code:'VEHICLE_UNAVAILABLE'});
+      }
+      const reservation={id:crypto.randomUUID(),vehicleIds:ids,customerId:String(customerId),startAt:parsed.start.toISOString(),endAt:parsed.end.toISOString(),expiresAt:expiry.toISOString(),status:'active',idempotencyKey};
+      memory.vehicleReservations.set(reservation.id,reservation);
+      return reservation;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      if(idempotencyKey){
+        const existing=await client.query("select * from rideon_vehicle_reservations where customer_id=$1 and idempotency_key=$2 for update",[customerId,idempotencyKey]);
+        if(existing.rows[0]){await client.query('commit');return existing.rows[0];}
+      }
+      const locked=await client.query("select id from vehicles where id::text=any($1::text[]) and active=true and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE')='AVAILABLE' and coalesce(maintenance_required,false)=false for update",[ids]);
+      if(locked.rows.length!==ids.length)throw Object.assign(new Error('One or more vehicles are unavailable.'),{code:'VEHICLE_UNAVAILABLE'});
+      await client.query("update rideon_vehicle_reservations set status='expired',updated_at=now() where status='active' and expires_at<=now()");
+      const conflicts=await client.query(`select 1 from rideon_vehicle_reservations where vehicle_id::text=any($1::text[]) and status='active' and start_at<$3 and end_at>$2 and expires_at>now() limit 1`,[ids,parsed.start.toISOString(),parsed.end.toISOString()]);
+      if(conflicts.rows[0])throw Object.assign(new Error('Vehicle is temporarily reserved by another checkout.'),{code:'VEHICLE_UNAVAILABLE'});
+      const rows=[];
+      for(const id of ids){
+        const q=await client.query(`insert into rideon_vehicle_reservations(vehicle_id,customer_id,start_at,end_at,status,expires_at,idempotency_key) values($1,$2,$3,$4,'active',$5,$6) returning *`,[id,customerId,parsed.start.toISOString(),parsed.end.toISOString(),expiry.toISOString(),idempotencyKey]);
+        rows.push(q.rows[0]);
+      }
+      await client.query('commit');
+      return {id:String(rows[0].id),vehicleIds:ids,customerId:String(customerId),startAt:parsed.start.toISOString(),endAt:parsed.end.toISOString(),expiresAt:expiry.toISOString(),status:'active',idempotencyKey};
+    }catch(error){try{await client.query('rollback')}catch{}throw error;}finally{client.release();}
+  }
+
+  async function releaseVehicleReservation(reservationId,{customerId=null,status='released'}={}) {
+    if(!['released','expired','converted'].includes(status))throw Object.assign(new Error('Invalid reservation state.'),{code:'INVALID_RESERVATION'});
+    if(!useDatabase){
+      const r=memory.vehicleReservations.get(String(reservationId));
+      if(!r||customerId&&String(r.customerId)!==String(customerId))return null;
+      r.status=status;r.updatedAt=new Date().toISOString();return r;
+    }
+    const q=await pool.query("update rideon_vehicle_reservations set status=$3,updated_at=now() where id=$1 and ($2::uuid is null or customer_id=$2) and status='active' returning *",[reservationId,customerId,status]);
+    return q.rows[0]||null;
   }
 
   async function createFleetOrder({customerId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null,idempotencyKey=null}={}) {
