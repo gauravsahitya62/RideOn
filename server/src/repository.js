@@ -655,7 +655,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if(Number.isNaN(startDate.getTime())||Number.isNaN(endDate.getTime())||endDate<=startDate||startDate.getTime()<Date.now()||days<1||days>30)throw Object.assign(new Error('Invalid booking window.'),{code:'INVALID_BOOKING_WINDOW'});
       const locked=await client.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active from vehicles where active=true and id::text=any($1::text[]) order by array_position($1::text[],id::text) for update`,[ids]);
       if(locked.rows.length!==ids.length)throw Object.assign(new Error('One or more selected RideOn vehicles are unavailable.'),{code:'MULTI_VEHICLE_ACCESS_DENIED'});
-      const conflict=await client.query(`select distinct b.vehicle_id from bookings b where b.vehicle_id::text=any($1::text[]) and b.status in ('requested','confirmed','in_progress') and b.start_at<$3 and b.end_at>$2`,[ids,startDate.toISOString(),endDate.toISOString()]);
+      const conflict=await client.query(`select distinct b.vehicle_id from bookings b where b.vehicle_id::text=any($1::text[]) and b.status in ('requested','confirmed','in_progress') and coalesce(b.lifecycle_state,'CONFIRMED') not in ('RETURNED','INSPECTION','COMPLETED','DAMAGE_REVIEW_REQUIRED') and b.start_at<$3 and b.end_at>$2`,[ids,startDate.toISOString(),endDate.toISOString()]);
       if(conflict.rows.length)throw Object.assign(new Error('One or more selected vehicles became unavailable.'),{code:'MULTI_VEHICLE_UNAVAILABLE',vehicleIds:conflict.rows.map(x=>String(x.vehicle_id))});
       const lat=delivery&&deliveryLatitude!=null&&deliveryLatitude!==''?Number(deliveryLatitude):null,lon=delivery&&deliveryLongitude!=null&&deliveryLongitude!==''?Number(deliveryLongitude):null;
       if(delivery&&((lat==null)!==(lon==null)||lat!=null&&(!Number.isFinite(lat)||lat<-90||lat>90)||lon!=null&&(!Number.isFinite(lon)||lon<-180||lon>180)))throw Object.assign(new Error('A valid delivery location is required.'),{code:'INVALID_DELIVERY_LOCATION'});
@@ -731,7 +731,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
     const typeFilter=String(type||'').trim().toLowerCase(),statusFilter=String(status||'').trim().toUpperCase();
     if(!useDatabase){ let rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car'); rows=rows.filter(v=>(!typeFilter||String(v.fleetVehicleClass||v.vehicleClass||'bike').toLowerCase()===typeFilter)&&(!statusFilter||String(v.operationalState||'AVAILABLE').toUpperCase()===statusFilter)&&(!city||String(v.city||'').toLowerCase()===String(city).toLowerCase())&&(!registration||String(v.registrationNumber||'').toLowerCase().includes(String(registration).toLowerCase()))&&(!model||String(v.model||'').toLowerCase().includes(String(model).toLowerCase()))&&(!q||[v.name,v.make,v.model,v.variant,v.city,v.registrationNumber].filter(Boolean).join(' ').toLowerCase().includes(String(q).toLowerCase()))); return rows.slice(safeOffset,safeOffset+safeLimit); }
-    const params=[],where=["v.type::text<>'car'"];
+    const params=[],where=["v.type::text<>'car'","coalesce(v.operational_state,'AVAILABLE')='AVAILABLE'","v.active=true"];
     if(typeFilter){params.push(typeFilter);where.push('lower(coalesce(v.fleet_vehicle_class,\'bike\'))=$'+params.length);}
     if(statusFilter){if(!FLEET_STATES.has(statusFilter)){const e=new Error('Invalid fleet status.');e.code='INVALID_FLEET_STATE';throw e;}params.push(statusFilter);where.push('v.operational_state=$'+params.length);}
     if(city){params.push(String(city));where.push('lower(trim(v.city))=lower(trim($'+params.length+'))');}
@@ -1455,25 +1455,23 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function checkVehicleAvailability(vehicleId,startAt,endAt) {
-    const start = new Date(startAt);
-    const end = new Date(endAt);
-    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
-      const e = new Error('invalid booking window');
-      e.code = 'INVALID_BOOKING_WINDOW';
-      throw e;
+    const start=new Date(startAt), end=new Date(endAt);
+    if(Number.isNaN(start.getTime())||Number.isNaN(end.getTime())||end<=start){const e=new Error('invalid booking window');e.code='INVALID_BOOKING_WINDOW';throw e;}
+    const blocked=new Set(['RENTED','RESERVED','INSPECTION','MAINTENANCE','INACTIVE']);
+    if(!useDatabase){
+      const v=memory.vehicles.get(String(vehicleId))||fleet.find(x=>String(x.id)===String(vehicleId));
+      if(!v)return {vehicleId:String(vehicleId),exists:false,active:false,available:false};
+      const state=String(v.operationalState||'AVAILABLE').toUpperCase();
+      if(v.active===false||blocked.has(state))return {vehicleId:String(vehicleId),exists:true,active:v.active!==false,operationalState:state,available:false};
+      const overlap=[...memory.bookings.values()].some(b=>String(b.vehicleId)===String(vehicleId)&&['requested','confirmed','in_progress'].includes(String(b.status))&&!['RETURNED','INSPECTION','COMPLETED','DAMAGE_REVIEW_REQUIRED'].includes(normalizeRentalLifecycle(b))&&start<new Date(b.endAt)&&end>new Date(b.startAt));
+      return {vehicleId:String(vehicleId),exists:true,active:true,operationalState:state,available:!overlap};
     }
-    if (!useDatabase) {
-      const vehicle = memory.vehicles.get(vehicleId) || fleet.find(v => v.id === vehicleId);
-      if (!vehicle) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-      if (vehicle.active === false) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
-      const overlap = [...memory.bookings.values()].some(b => b.vehicleId===vehicleId && ['requested','confirmed','in_progress'].includes(b.status) && start < new Date(b.endAt) && end > new Date(b.startAt));
-      return { vehicleId:String(vehicleId), exists:true, active:true, available:!overlap };
-    }
-    const vehicleResult = await pool.query('select id,active from vehicles where id=$1',[vehicleId]);
-    if (!vehicleResult.rows[0]) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-    if (!vehicleResult.rows[0].active) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
-    const bookingResult = await pool.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",[vehicleId,startAt,endAt]);
-    return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0 };
+    const vr=await pool.query('select id,active,operational_state from vehicles where id=$1',[vehicleId]);
+    if(!vr.rows[0])return {vehicleId:String(vehicleId),exists:false,active:false,available:false};
+    const state=String(vr.rows[0].operational_state||'AVAILABLE').toUpperCase();
+    if(!vr.rows[0].active||blocked.has(state))return {vehicleId:String(vehicleId),exists:true,active:Boolean(vr.rows[0].active),operationalState:state,available:false};
+    const overlap=await pool.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and coalesce(lifecycle_state,'CONFIRMED') not in ('RETURNED','INSPECTION','COMPLETED','DAMAGE_REVIEW_REQUIRED') and start_at<$3 and end_at>$2 limit 1",[vehicleId,startAt,endAt]);
+    return {vehicleId:String(vehicleId),exists:true,active:true,operationalState:state,available:overlap.rowCount===0};
   }
 
   async function createBooking(input) {
