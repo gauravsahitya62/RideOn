@@ -1748,7 +1748,7 @@ export function createRepository({ databaseUrl, fleet }) {
       }
       const expectedTotalPaise = fleetOrder ? Number(fleetOrder.total_paise) : Number(booking.total_paise);
       const currentPaymentStatus = fleetOrder ? String(fleetOrder.payment_status) : String(booking.payment_status);
-      if (event.status==='paid' && (fleetOrder ? fleetOrder.status !== 'requested' : !['requested','confirmed'].includes(String(booking.status)))) {
+      if (event.status==='paid' && (fleetOrder ? !['requested','confirmed'].includes(String(fleetOrder.status)) : !['requested','confirmed'].includes(String(booking.status)))) {
         await client.query('rollback'); return { applied:false, duplicate:false, invalid:true };
       }
       if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedTotalPaise || Number(event.amountPaise) !== Number(payment.amount_paise) || !event.providerReference || !canTransition(currentPaymentStatus, event.status)) {
