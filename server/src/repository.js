@@ -581,7 +581,7 @@ export function createRepository({ databaseUrl, fleet }) {
     return rows.map(mapManagedVehicle);
   }
 
-  async function quoteMultiVehicle({customerId,fleetOwnerId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null}={}) {
+  async function quoteMultiVehicle({customerId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null}={}) {
     void customerId;
     const ids=[...new Set((vehicleIds||[]).map(v=>String(v).trim()).filter(Boolean))];
     if(ids.length<2||ids.length>10){const e=new Error('Select between 2 and 10 vehicles.');e.code='INVALID_MULTI_CART';throw e;}
@@ -592,7 +592,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const lat=delivery&&deliveryLatitude!=null&&deliveryLatitude!==''?Number(deliveryLatitude):null;
     const lon=delivery&&deliveryLongitude!=null&&deliveryLongitude!==''?Number(deliveryLongitude):null;
     if(delivery && ((lat==null)!==(lon==null)||lat!=null&&(!Number.isFinite(lat)||lat<-90||lat>90)||lon!=null&&(!Number.isFinite(lon)||lon<-180||lon>180))){const e=new Error('A valid delivery location is required.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
-    const vehicles=useDatabase?(await pool.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active from vehicles where owner_id=$1 and active=true and id::text = any($2::text[])`,[fleetOwnerId,ids])).rows.map(mapManagedVehicle):[...memory.vehicles.values()].filter(v=>String(v.ownerId)===String(fleetOwnerId)&&v.active!==false&&ids.includes(String(v.id)));
+    const vehicles=useDatabase?(await pool.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active from vehicles where active=true and id::text = any($1::text[])`,[ids])).rows.map(mapManagedVehicle):[...memory.vehicles.values(),...fleet].filter(v=>v.active!==false&&ids.includes(String(v.id)));
     if(vehicles.length!==ids.length){const e=new Error('One or more selected vehicles do not belong to this vendor or are unavailable.');e.code='MULTI_VEHICLE_ACCESS_DENIED';throw e;}
     const availability=await Promise.all(vehicles.map(v=>checkVehicleAvailability(v.id,start.toISOString(),end.toISOString())));
     const unavailable=availability.filter(x=>!x.available).map(x=>String(x.vehicleId));
