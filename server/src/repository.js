@@ -856,14 +856,65 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createRideOnFleetVehicle(input,actorUserId) {
-    const data=validateFleetVehicleInput(input); const id=crypto.randomUUID();
-    if(!useDatabase){const reg=String(data.registrationNumber||'').trim().toLowerCase();if(reg&&[...memory.vehicles.values()].some(v=>String(v.registrationNumber||'').trim().toLowerCase()===reg))throw Object.assign(new Error('A vehicle with this registration number already exists.'),{code:'VEHICLE_EXISTS'});const v={id,ownerId:null,...data,active:data.active!==false,operationalState:'AVAILABLE',maintenanceRequired:false,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};memory.vehicles.set(id,v);return v;}
-    try{const q=await pool.query('insert into vehicles(id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,variant,color,pickup_location,pickup_latitude,pickup_longitude,service_area,fleet_vehicle_class,operational_state,maintenance_required,current_odometer,current_fuel_battery,active,updated_at) values($1,null,\'bike\',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,\'AVAILABLE\',false,$25,$26,$27,now()) returning *',[id,data.name,data.make||null,data.model||null,data.year||null,data.city,Math.round(data.dailyRate*100),Math.round(data.securityDeposit*100),data.transmission||null,data.fuel||null,data.seats||null,data.registrationNumber||null,data.description||null,data.imageUrls||[],data.deliveryAvailable!==false,data.variant||null,data.color||null,data.pickupLocation||null,data.pickupLatitude??null,data.pickupLongitude??null,data.serviceArea||{},data.fleetVehicleClass,data.currentOdometer??null,data.currentFuelBattery??null,data.active!==false]);await pool.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,next_state,details) values($1,$2,\'vehicle_created\',\'AVAILABLE\',$3)',[id,actorUserId||null,JSON.stringify({registrationNumber:data.registrationNumber||null})]);return mapManagedVehicle(q.rows[0]);}catch(error){if(error.code==='23505')throw Object.assign(new Error('A vehicle with this registration number already exists.'),{code:'VEHICLE_EXISTS'});throw error;}
+    const data=validateFleetVehicleInput(input);
+    const id=crypto.randomUUID();
+    if(!useDatabase){
+      const reg=String(data.registrationNumber||'').trim().toLowerCase();
+      if(reg&&[...memory.vehicles.values()].some(v=>String(v.registrationNumber||'').trim().toLowerCase()===reg))throw Object.assign(new Error('A vehicle with this registration number already exists.'),{code:'VEHICLE_EXISTS'});
+      const v={id,ownerId:null,...data,active:data.active!==false,pricingActive:true,operationalState:'AVAILABLE',maintenanceRequired:false,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      memory.vehicles.set(id,v);return v;
+    }
+    try{
+      const q=await pool.query('insert into vehicles(id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,variant,color,pickup_location,pickup_latitude,pickup_longitude,service_area,fleet_vehicle_class,operational_state,maintenance_required,current_odometer,current_fuel_battery,active,rideon_pricing_active,updated_at) values($1,null,\'bike\',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,\'AVAILABLE\',false,$25,$26,$27,true,now()) returning *',[id,data.name,data.make||null,data.model||null,data.year||null,data.city,Math.round(data.dailyRate*100),Math.round(data.securityDeposit*100),data.transmission||null,data.fuel||null,data.seats||null,data.registrationNumber||null,data.description||null,data.imageUrls||[],data.deliveryAvailable!==false,data.variant||null,data.color||null,data.pickupLocation||null,data.pickupLatitude??null,data.pickupLongitude??null,data.serviceArea||{},data.fleetVehicleClass,data.currentOdometer??null,data.currentFuelBattery??null,data.active!==false]);
+      await pool.query('insert into rideon_pricing_history(vehicle_id,daily_rate_paise,security_deposit_paise,delivery_fee_paise,pricing_active,changed_by) values($1,$2,$3,$4,true,$5)',[id,Math.round(data.dailyRate*100),Math.round(data.securityDeposit*100),Math.round(Number(process.env.RIDEON_DELIVERY_FEE ?? 199)*100),actorUserId||null]);
+      await pool.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,next_state,details) values($1,$2,\'vehicle_created\',\'AVAILABLE\',$3)',[id,actorUserId||null,JSON.stringify({pricingInitialized:true})]);
+      return mapManagedVehicle(q.rows[0]);
+    }catch(error){if(error.code==='23505')throw Object.assign(new Error('A vehicle with this registration number already exists.'),{code:'VEHICLE_EXISTS'});throw error;}
   }
 
   async function updateRideOnFleetVehicle(vehicleId,input,actorUserId) {
-    const data=validateFleetVehicleInput(input); if(!useDatabase){const v=memory.vehicles.get(String(vehicleId));if(!v||String(v.type||'').toLowerCase()==='car')return null;Object.assign(v,data,{ownerId:null,updatedAt:new Date().toISOString()});return v;}
-    const fields={name:'name',make:'make',model:'model',year:'year',city:'city',dailyRate:'daily_rate_paise',securityDeposit:'security_deposit_paise',transmission:'transmission',fuel:'fuel',seats:'seats',registrationNumber:'registration_number',description:'description',imageUrls:'image_urls',deliveryAvailable:'delivery_available',variant:'variant',color:'color',pickupLocation:'pickup_location',pickupLatitude:'pickup_latitude',pickupLongitude:'pickup_longitude',serviceArea:'service_area',fleetVehicleClass:'fleet_vehicle_class',currentOdometer:'current_odometer',currentFuelBattery:'current_fuel_battery'}; const sets=[],params=[vehicleId]; for(const [k,col] of Object.entries(fields)){if(data[k]===undefined)continue;let val=data[k];if(k==='dailyRate'||k==='securityDeposit')val=Math.round(Number(val)*100);params.push(val);sets.push(col+'=$'+params.length);} if(!sets.length)return getRideOnFleetVehicle(vehicleId); sets.push('owner_id=null','updated_at=now()'); const q=await pool.query('update vehicles set '+sets.join(',')+' where id=$1 and type::text<>\'car\' returning *',params); if(!q.rows[0])return null; await pool.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,details) values($1,$2,\'vehicle_updated\',$3)',[vehicleId,actorUserId||null,JSON.stringify({fields:Object.keys(input)})]); return mapManagedVehicle(q.rows[0]);
+    const data=validateFleetVehicleInput(input);
+    if(!useDatabase){
+      const v=memory.vehicles.get(String(vehicleId));if(!v||String(v.type||'').toLowerCase()==='car')return null;
+      const oldDaily=Number(v.dailyRate||v.pricePerDay||0),oldDeposit=Number(v.securityDeposit||0);
+      Object.assign(v,data,{ownerId:null,updatedAt:new Date().toISOString()});
+      if((data.dailyRate!=null&&Number(data.dailyRate)!==oldDaily)||(data.securityDeposit!=null&&Number(data.securityDeposit)!==oldDeposit)) {
+        v.pricingHistory=[...(v.pricingHistory||[]),{dailyRate:Number(v.dailyRate),securityDeposit:Number(v.securityDeposit),deliveryFee:Number(process.env.RIDEON_DELIVERY_FEE ?? 199),pricingActive:v.pricingActive!==false,changedBy:String(actorUserId||'')}];
+      }
+      return v;
+    }
+    const current=await pool.query("select * from vehicles where id=$1 and owner_id is null and type::text<>'car' for update",[vehicleId]);
+    if(!current.rows[0])return null;
+    const before=current.rows[0];
+    const fields={name:'name',make:'make',model:'model',year:'year',city:'city',dailyRate:'daily_rate_paise',securityDeposit:'security_deposit_paise',transmission:'transmission',fuel:'fuel',seats:'seats',registrationNumber:'registration_number',description:'description',imageUrls:'image_urls',deliveryAvailable:'delivery_available',variant:'variant',color:'color',pickupLocation:'pickup_location',pickupLatitude:'pickup_latitude',pickupLongitude:'pickup_longitude',serviceArea:'service_area',fleetVehicleClass:'fleet_vehicle_class',currentOdometer:'current_odometer',currentFuelBattery:'current_fuel_battery',pricingActive:'rideon_pricing_active'};
+    const sets=[],params=[vehicleId];
+    for(const [k,col] of Object.entries(fields)){
+      if(data[k]===undefined)continue;
+      let val=data[k];if(k==='dailyRate'||k==='securityDeposit')val=Math.round(Number(val)*100);
+      params.push(val);sets.push(col+'=$'+params.length);
+    }
+    if(!sets.length)return getRideOnFleetVehicle(vehicleId);
+    sets.push('owner_id=null','updated_at=now()');
+    const q=await pool.query('update vehicles set '+sets.join(',')+' where id=$1 and owner_id is null and type::text<>\'car\' returning *',params);
+    if(!q.rows[0])return null;
+    const changedDaily=data.dailyRate!==undefined&&Number(data.dailyRate)!==Number(before.daily_rate_paise||0)/100;
+    const changedDeposit=data.securityDeposit!==undefined&&Number(data.securityDeposit)!==Number(before.security_deposit_paise||0)/100;
+    const changedActive=data.pricingActive!==undefined&&Boolean(data.pricingActive)!==Boolean(before.rideon_pricing_active);
+    if(changedDaily||changedDeposit||changedActive) {
+      await pool.query('insert into rideon_pricing_history(vehicle_id,daily_rate_paise,security_deposit_paise,delivery_fee_paise,pricing_active,changed_by) values($1,$2,$3,$4,$5,$6)',[vehicleId,q.rows[0].daily_rate_paise,q.rows[0].security_deposit_paise,Math.round(Number(process.env.RIDEON_DELIVERY_FEE ?? 199)*100),q.rows[0].rideon_pricing_active!==false,actorUserId||null]);
+    }
+    await pool.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,details) values($1,$2,\'vehicle_updated\',$3)',[vehicleId,actorUserId||null,JSON.stringify({fields:Object.keys(input),pricingChanged:changedDaily||changedDeposit||changedActive})]);
+    return mapManagedVehicle(q.rows[0]);
+  }
+
+  async function listRideOnPricingHistory(vehicleId,{limit=50}={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50));
+    if(!useDatabase){
+      const v=memory.vehicles.get(String(vehicleId)); if(!v||v.ownerId)return [];
+      return (v.pricingHistory||[]).slice(-safeLimit).reverse();
+    }
+    const q=await pool.query("select id,vehicle_id,daily_rate_paise,security_deposit_paise,delivery_fee_paise,pricing_active,changed_by,created_at from rideon_pricing_history where vehicle_id=$1 order by created_at desc limit $2",[vehicleId,safeLimit]);
+    return q.rows.map(x=>({id:String(x.id),vehicleId:String(x.vehicle_id),dailyRate:Number(x.daily_rate_paise)/100,securityDeposit:Number(x.security_deposit_paise)/100,deliveryFee:Number(x.delivery_fee_paise)/100,pricingActive:Boolean(x.pricing_active),changedBy:x.changed_by?String(x.changed_by):null,createdAt:iso(x.created_at)}));
   }
 
   async function setRideOnFleetVehicleState(vehicleId,nextState,actorUserId) {
