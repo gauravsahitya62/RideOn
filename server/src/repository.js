@@ -2192,7 +2192,7 @@ export function createRepository({ databaseUrl, fleet }) {
     if(!useDatabase){
       const booking=memory.bookings.get(String(bookingId));
       if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-      if(booking.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
+      if(String(booking.lifecycleState||'').toUpperCase()!=='COMPLETED'){const e=new Error('Reviews are available only after the rental is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
       const vendor=[...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(booking.vendorId));
       const vendorOwnerId=vendor?.ownerCustomerId||vendor?.owner_customer_id;
       let reviewType,revieweeId;
@@ -2216,7 +2216,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const q=await client.query('select b.id,b.customer_id,b.vendor_id,b.vehicle_id,b.status,v.name as vehicle_name,v.owner_id,ven.business_name as vendor_name,ven.owner_customer_id as vendor_owner_customer_id from bookings b join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=coalesce(b.vendor_id,v.owner_id) where b.id=$1 for update',[bookingId]);
       const b=q.rows[0];
       if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-      if(b.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
+      if(String(b.lifecycle_state||'').toUpperCase()!=='COMPLETED'){const e=new Error('Reviews are available only after the rental is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
       let reviewType,revieweeId;
       if(reviewerRole==='customer'){
         if(String(b.customer_id)!==String(reviewerId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
@@ -2243,13 +2243,13 @@ export function createRepository({ databaseUrl, fleet }) {
       if(!b||(role==='customer'&&String(b.customerId)!==String(userId))||(role==='vendor'&&(!vendor||String(vendor.ownerCustomerId||vendor.owner_customer_id)!==String(userId)))){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
       const own=[...memory.reviews.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.reviewerUserId)===String(userId)&&x.reviewType===type);
-      return {eligible:b.status==='completed',review:own||null,reviewType:type};
+      return {eligible:String(b.lifecycleState||'').toUpperCase()==='COMPLETED',review:own||null,reviewType:type};
     }
     const b=role==='customer'?await getBooking(bookingId,userId):await getVendorBooking(userId,bookingId);
     if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
     const type=role==='customer'?'customer_to_vendor':'vendor_to_customer';
     const q=await pool.query(reviewSelect+' where r.booking_id=$1 and r.reviewer_user_id=$2 and r.review_type=$3 limit 1',[bookingId,userId,type]);
-    return {eligible:b.status==='completed',review:q.rows[0]?mapReview(q.rows[0]):null,reviewType:type};
+    return {eligible:String(b.lifecycleState||'').toUpperCase()==='COMPLETED',review:q.rows[0]?mapReview(q.rows[0]):null,reviewType:type};
   }
 
   async function updateReview({reviewId,userId,role,rating,comment}) {
