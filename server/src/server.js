@@ -12,8 +12,10 @@ import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
 import { createTrackingRealtimeServer } from './trackingRealtime.js';
+import { createPricingService } from './pricing.js';
 
 const fleet = [];
+const pricingService = createPricingService();
 
 const app = express();
 
@@ -87,43 +89,27 @@ function normalizeBookingInput(body = {}) {
 
 
 function validateBookingWindow(startAt,endAt) {
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
-    const error = new Error('Pickup and return must form a valid booking window.');
-    error.code = 'INVALID_BOOKING_WINDOW';
-    throw error;
-  }
-  if (start.getTime() < Date.now()) {
-    const error = new Error('Pickup cannot be in the past.');
-    error.code = 'INVALID_BOOKING_WINDOW';
-    throw error;
-  }
-  const days = Math.ceil((end.getTime() - start.getTime()) / 86400000);
-  if (days < 1 || days > 30) {
-    const error = new Error('Booking duration must be between 1 and 30 days.');
-    error.code = 'INVALID_BOOKING_WINDOW';
-    throw error;
-  }
-  return { start, end, days };
+  const parsed=pricingService.parseWindow(startAt,endAt);
+  return {start:parsed.start,end:parsed.end,days:parsed.days};
 }
 
 function pricing(vehicle, startAt, endAt, delivery) {
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  const durationMs = end.getTime() - start.getTime();
-  const days = Math.ceil(durationMs / 86400000);
-  if (!Number.isFinite(days) || days < 1 || days > 30) {
-    const error = new Error('Booking duration must be between 1 and 30 days.');
-    error.code = 'INVALID_BOOKING_WINDOW';
-    throw error;
-  }
-  const rental = vehicle.pricePerDay * days;
-  const deliveryFee = delivery ? 199 : 0;
-  const platformFee = Math.round(rental * 0.05);
-  const securityDeposit = Number(vehicle.securityDeposit || 0);
-  const total = rental + deliveryFee + platformFee + securityDeposit;
-  return { days, rental, deliveryFee, platformFee, securityDeposit, total, currency: 'INR', currencyUnit: 'rupees' };
+  const result = pricingService.calculateVehicle({ vehicle, startAt, endAt, delivery });
+  return {
+    days: result.days,
+    rental: result.rentalSubtotal,
+    deliveryFee: result.deliveryFee,
+    platformFee: result.platformFee,
+    tax: result.tax,
+    discount: result.discount,
+    securityDeposit: result.securityDeposit,
+    total: result.totalPayable,
+    totalPayable: result.totalPayable,
+    refundableSecurityDeposit: result.refundableSecurityDeposit,
+    payableExcludingDeposit: result.payableExcludingDeposit,
+    currency: result.currency,
+    currencyUnit: 'rupees',
+  };
 }
 
 const mobileVehicle = (v) => ({
@@ -646,6 +632,27 @@ app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async 
     if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
     res.json({order});
   }catch(error){res.status(503).json({error:{code:'FLEET_ORDER_UNAVAILABLE',message:'Fleet booking is temporarily unavailable. Please retry.'}});}
+});
+
+app.post('/api/v1/pricing/preview', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({
+    vehicleId:z.string().trim().min(1).max(64),
+    startAt:z.string().datetime(),
+    endAt:z.string().datetime(),
+    delivery:z.boolean().default(false),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid pricing details.',details:parsed.error.flatten()}});
+  try{
+    const vehicle=await repository.getRideOnFleetVehicle(parsed.data.vehicleId);
+    if(!vehicle)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found or unavailable.'}});
+    const availability=await repository.checkVehicleAvailability(parsed.data.vehicleId,parsed.data.startAt,parsed.data.endAt);
+    if(!availability.available)return res.status(409).json({error:{code:'VEHICLE_UNAVAILABLE',message:'Vehicle is unavailable for the selected dates.'}});
+    const quote=pricingService.calculateVehicle({vehicle,startAt:parsed.data.startAt,endAt:parsed.data.endAt,delivery:parsed.data.delivery});
+    res.json({quote});
+  }catch(error){
+    const status=error?.code==='INVALID_BOOKING_WINDOW'?400:503;
+    res.status(status).json({error:{code:error?.code||'PRICING_PREVIEW_FAILED',message:error?.message||'Pricing is temporarily unavailable.'}});
+  }
 });
 
 app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustomer, async (req,res)=>{
