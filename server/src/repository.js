@@ -1276,6 +1276,59 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
 
+
+  async function getCustomerRentalInspection({bookingId,customerId}={}) {
+    if(!useDatabase){
+      const b=await getRentalBookingForCustomer(bookingId,customerId);
+      if(!b) return null;
+      const ins=[...(memory.inspections?.values()||[])].filter(x=>String(x.bookingId||'')===String(bookingId)&&x.inspectionType==='return').sort((a,b)=>new Date(b.inspectedAt)-new Date(a.inspectedAt))[0]||null;
+      const damage=ins ? [...(memory.damageCases?.values()||[])].find(x=>String(x.inspectionId)===String(ins.id))||null : null;
+      return {inspection:ins,damageCase:damage};
+    }
+    const q=await pool.query(`select i.*,d.id as d_id,d.description as d_description,d.evidence_photos as d_evidence_photos,d.estimated_amount_paise,d.approved_deduction_paise,d.status as d_status
+      from vehicle_inspections i join bookings b on b.id=i.booking_id
+      left join fleet_damage_cases d on d.inspection_id=i.id
+      where i.booking_id=$1 and b.customer_id=$2 and i.inspection_type='return'
+      order by i.inspected_at desc limit 1`,[bookingId,customerId]);
+    if(!q.rows[0]) return null;
+    const row=q.rows[0];
+    return {inspection:{
+      id:String(row.id),bookingId:String(row.booking_id),vehicleId:String(row.vehicle_id),inspectionType:row.inspection_type,
+      inspectionStatus:row.inspection_status,odometer:row.odometer==null?null:Number(row.odometer),fuelBattery:row.fuel_battery==null?null:Number(row.fuel_battery),
+      exteriorCondition:row.exterior_condition||'',damageNotes:row.damage_notes||'',conditionPhotos:row.condition_photos||[],inspectedAt:iso(row.inspected_at)
+    },damageCase:row.d_id?{
+      id:String(row.d_id),bookingId:String(row.booking_id),inspectionId:String(row.id),description:row.d_description||'',
+      evidencePhotos:row.d_evidence_photos||[],estimatedAmountPaise:Number(row.estimated_amount_paise||0),
+      approvedDeductionPaise:Number(row.approved_deduction_paise||0),status:row.d_status
+    }:null};
+  }
+
+  async function listCustomerNotifications({customerId,limit=50,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
+    if(!useDatabase){
+      return [];
+    }
+    const q=await pool.query(`select id,booking_id,event_type,title,message,payload,created_at,read_at
+      from notification_events where customer_id=$1 order by created_at desc limit $2 offset $3`,[customerId,safeLimit,safeOffset]);
+    return q.rows.map(r=>({id:String(r.id),bookingId:r.booking_id?String(r.booking_id):null,eventType:r.event_type,title:r.title,message:r.message,payload:r.payload||{},createdAt:iso(r.created_at),readAt:iso(r.read_at)}));
+  }
+
+  async function createNotification({customerId,bookingId=null,eventType,title,message,payload={},audienceRole='customer'}={}) {
+    if(!customerId||!eventType||!title||!message)return null;
+    if(!useDatabase)return {id:crypto.randomUUID(),customerId:String(customerId),bookingId:bookingId?String(bookingId):null,eventType,title,message,payload,audienceRole,createdAt:new Date().toISOString(),readAt:null};
+    const dup=await pool.query(`select id from notification_events where customer_id=$1 and booking_id is not distinct from $2 and event_type=$3 order by created_at desc limit 1`,[customerId,bookingId,eventType]);
+    if(dup.rows[0])return {id:String(dup.rows[0].id),duplicate:true};
+    const q=await pool.query(`insert into notification_events(customer_id,booking_id,event_type,title,message,audience_role,payload) values($1,$2,$3,$4,$5,$6,$7) returning *`,[customerId,bookingId,eventType,String(title).slice(0,200),String(message).slice(0,2000),audienceRole,payload||{}]);
+    return {id:String(q.rows[0].id),customerId:String(q.rows[0].customer_id),bookingId:q.rows[0].booking_id?String(q.rows[0].booking_id):null,eventType:q.rows[0].event_type,title:q.rows[0].title,message:q.rows[0].message,payload:q.rows[0].payload||{},createdAt:iso(q.rows[0].created_at),readAt:iso(q.rows[0].read_at)};
+  }
+
+  async function markNotificationRead({notificationId,customerId}={}) {
+    if(!useDatabase)return {id:String(notificationId),readAt:new Date().toISOString()};
+    const q=await pool.query('update notification_events set read_at=coalesce(read_at,now()) where id=$1 and customer_id=$2 returning id,read_at',[notificationId,customerId]);
+    if(!q.rows[0]){const e=new Error('Notification not found.');e.code='NOTIFICATION_NOT_FOUND';throw e;}
+    return {id:String(q.rows[0].id),readAt:iso(q.rows[0].read_at)};
+  }
+
   async function getFleetBookingLifecycle(bookingId) {
     if (!useDatabase) {
       const b=memory.bookings.get(String(bookingId));
@@ -4422,7 +4475,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getFleetBookingOperations,getRideOnFleetDashboard,setRideOnFleetVehicleState,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,transitionRentalLifecycle,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,markOverdueRentals,getFleetBookingLifecycle,listFleetDamageCases,updateFleetDamageCase,settleFleetSecurityDeposit};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getFleetBookingOperations,getRideOnFleetDashboard,setRideOnFleetVehicleState,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,transitionRentalLifecycle,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,markOverdueRentals,getFleetBookingLifecycle,getCustomerRentalInspection,listCustomerNotifications,createNotification,markNotificationRead,listFleetDamageCases,updateFleetDamageCase,settleFleetSecurityDeposit};
 }
 +params.length);}
     const orderBy=sortValue==='price_asc'?'v.daily_rate_paise asc':sortValue==='price_desc'?'v.daily_rate_paise desc':'v.name asc';
