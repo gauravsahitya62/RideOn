@@ -220,8 +220,9 @@ function hashOtpCode(code) {
 
 async function deliverOtp({ channel, destination, code }) {
   if (process.env.NODE_ENV !== 'production') {
-    console.log('[rideon-otp] ' + channel + ' ' + destination + ': ' + code);
-    return { delivered: true, developmentCode: code };
+    // Never print or return authentication secrets, including OTPs.
+    // Local/test environments must use the same delivery contract as production.
+    return { delivered: true };
   }
   if (channel === 'email' && process.env.RESEND_API_KEY && process.env.OTP_FROM_EMAIL) {
     const response = await fetch('https://api.resend.com/emails', {
