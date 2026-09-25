@@ -168,18 +168,12 @@ function publicBooking(booking) {
     securityDepositInspectedAt: booking.securityDepositInspectedAt,
     securityDepositInspectedBy: booking.securityDepositInspectedBy,
     rejectionReason: booking.rejectionReason,
-    deliveryLatitude: booking.deliveryLatitude,
-    deliveryLongitude: booking.deliveryLongitude,
-    vendorServiceLatitude: booking.vendorServiceLatitude,
-    vendorServiceLongitude: booking.vendorServiceLongitude,
     routeDistanceMeters: booking.routeDistanceMeters,
     routeDurationSeconds: booking.routeDurationSeconds,
     routeProvider: booking.routeProvider,
     deliveryStatus: booking.deliveryStatus || 'scheduled',
     deliveryStartedAt: booking.deliveryStartedAt,
     deliveredAt: booking.deliveredAt,
-    deliveryFinalLatitude: booking.deliveryFinalLatitude,
-    deliveryFinalLongitude: booking.deliveryFinalLongitude,
   };
 }
 
