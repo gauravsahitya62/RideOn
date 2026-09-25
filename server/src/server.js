@@ -671,6 +671,42 @@ app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
   res.json({user,customer});
 });
 
+app.get('/api/v1/fleet', async (req,res)=>{
+  const rawType=String(req.query.type||'').trim().toLowerCase();
+  const type=rawType==='scooter'?'bike':rawType;
+  if(type && !['bike','car'].includes(type)) return res.status(400).json({error:{code:'INVALID_VEHICLE_TYPE',message:'Choose a valid fleet vehicle type.'}});
+  const sort=['recommended','price_asc','price_desc'].includes(String(req.query.sort||'').toLowerCase())?String(req.query.sort).toLowerCase():'recommended';
+  try{
+    const limit=Math.min(100,Math.max(1,Number(req.query.limit)||50)),offset=Math.max(0,Number(req.query.offset)||0);
+    const vehicles=await repository.listRideOnFleet({q:req.query.q,type,brand:req.query.brand,model:req.query.model,city:req.query.city,minPrice:req.query.minPrice,maxPrice:req.query.maxPrice,sort,limit,offset});
+    res.json({fleet:vehicles,data:vehicles,vehicles,meta:{count:vehicles.length,limit,offset}});
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'fleet_list_failed',requestId:req.requestId,code:error?.code||'FLEET_LIST_FAILED'}));
+    res.status(503).json({error:{code:'FLEET_UNAVAILABLE',message:'RideOn fleet is temporarily unavailable. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/fleet/:vehicleId', async (req,res)=>{
+  try{
+    const vehicle=await repository.getRideOnFleetVehicle(req.params.vehicleId);
+    if(!vehicle)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+    res.json({vehicle:mobileVehicle(vehicle),data:mobileVehicle(vehicle)});
+  }catch(error){res.status(503).json({error:{code:'FLEET_UNAVAILABLE',message:'RideOn fleet is temporarily unavailable. Please retry.'}});}
+});
+
+app.get('/api/v1/fleet/:vehicleId/availability', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({startAt:z.string().datetime(),endAt:z.string().datetime()}).safeParse(req.query);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_BOOKING_WINDOW',message:'Provide valid pickup and return timestamps.'}});
+  try{
+    validateBookingWindow(parsed.data.startAt,parsed.data.endAt);
+    const availability=await repository.checkVehicleAvailability(req.params.vehicleId,parsed.data.startAt,parsed.data.endAt);
+    if(!availability.exists)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+    res.json(availability);
+  }catch(error){
+    res.status(error?.code==='INVALID_BOOKING_WINDOW'?400:503).json({error:{code:error?.code||'FLEET_AVAILABILITY_FAILED',message:error?.message||'Fleet availability is temporarily unavailable.'}});
+  }
+});
+
 app.get('/api/v1/vehicles/:id', async (req, res) => {
   const vehicle = await repository.getVehicle(req.params.id);
   if (!vehicle) return res.status(404).json({ error: { code: 'VEHICLE_NOT_FOUND', message: 'Vehicle not found' } });
