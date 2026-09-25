@@ -499,6 +499,107 @@ export function createRepository({ databaseUrl, fleet }) {
     }));
   }
 
+  async function getPublicVendorProfile(vendorId) {
+    if (!useDatabase) {
+      const vendor = [...memory.vendors.values()].find(v => String(v.id) === String(vendorId) && v.status === 'active');
+      if (!vendor) return null;
+      const vehicles = [...memory.vehicles.values()].filter(v => String(v.ownerId) === String(vendor.id) && v.active !== false);
+      return { id:String(vendor.id), businessName:vendor.businessName, serviceCity:vendor.serviceCity || null, address:vendor.serviceAddress || vendor.address || null, latitude:vendor.serviceLatitude ?? null, longitude:vendor.serviceLongitude ?? null, rating:0, reviewCount:0, availableVehicleCount:vehicles.length };
+    }
+    const result = await pool.query(`select v.id,v.business_name,v.service_city,v.service_address,v.service_latitude,v.service_longitude,count(ve.id)::int as available_vehicle_count from vendors v left join vehicles ve on ve.owner_id=v.id and ve.active=true where v.id=$1 and v.status='active' group by v.id,v.business_name,v.service_city,v.service_address,v.service_latitude,v.service_longitude`, [vendorId]);
+    if (!result.rows[0]) return null;
+    const reviewRows = await pool.query(`select r.rating from reviews r join bookings b on b.id=r.booking_id join vehicles ve on ve.id=b.vehicle_id where r.review_type='customer_to_vendor' and coalesce(b.vendor_id,ve.owner_id)=$1`, [vendorId]);
+    const ratings = reviewRows.rows.map(x => Number(x.rating)).filter(Number.isFinite);
+    return { id:String(result.rows[0].id), businessName:result.rows[0].business_name, serviceCity:result.rows[0].service_city || null, address:result.rows[0].service_address || null, latitude:result.rows[0].service_latitude == null ? null : Number(result.rows[0].service_latitude), longitude:result.rows[0].service_longitude == null ? null : Number(result.rows[0].service_longitude), rating:ratings.length ? Number((ratings.reduce((a,b)=>a+b,0)/ratings.length).toFixed(2)) : 0, reviewCount:ratings.length, availableVehicleCount:Number(result.rows[0].available_vehicle_count || 0) };
+  }
+
+  async function listPublicVendorVehicles(vendorId, {limit=50,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50));
+    const safeOffset=Math.max(0,Number(offset)||0);
+    if (!useDatabase) return [...memory.vehicles.values()].filter(v=>String(v.ownerId)===String(vendorId)&&v.active!==false).slice(safeOffset,safeOffset+safeLimit);
+    const {rows}=await pool.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where owner_id=$1 and active=true order by name asc,created_at desc limit $2 offset $3`,[vendorId,safeLimit,safeOffset]);
+    return rows.map(mapManagedVehicle);
+  }
+
+  async function quoteMultiVehicle({customerId,vendorId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null}={}) {
+    void customerId;
+    const ids=[...new Set((vehicleIds||[]).map(v=>String(v).trim()).filter(Boolean))];
+    if(ids.length<2||ids.length>10){const e=new Error('Select between 2 and 10 vehicles.');e.code='INVALID_MULTI_CART';throw e;}
+    const start=new Date(startAt),end=new Date(endAt);
+    if(Number.isNaN(start.getTime())||Number.isNaN(end.getTime())||end<=start||start.getTime()<Date.now()){const e=new Error('Pickup and return must form a valid booking window.');e.code='INVALID_BOOKING_WINDOW';throw e;}
+    const days=Math.ceil((end-start)/86400000);
+    if(days<1||days>30){const e=new Error('Booking duration must be between 1 and 30 days.');e.code='INVALID_BOOKING_WINDOW';throw e;}
+    const lat=delivery&&deliveryLatitude!=null&&deliveryLatitude!==''?Number(deliveryLatitude):null;
+    const lon=delivery&&deliveryLongitude!=null&&deliveryLongitude!==''?Number(deliveryLongitude):null;
+    if(delivery && ((lat==null)!==(lon==null)||lat!=null&&(!Number.isFinite(lat)||lat<-90||lat>90)||lon!=null&&(!Number.isFinite(lon)||lon<-180||lon>180))){const e=new Error('A valid delivery location is required.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
+    const vehicles=useDatabase?(await pool.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active from vehicles where owner_id=$1 and active=true and id::text = any($2::text[])`,[vendorId,ids])).rows.map(mapManagedVehicle):[...memory.vehicles.values()].filter(v=>String(v.ownerId)===String(vendorId)&&v.active!==false&&ids.includes(String(v.id)));
+    if(vehicles.length!==ids.length){const e=new Error('One or more selected vehicles do not belong to this vendor or are unavailable.');e.code='MULTI_VEHICLE_ACCESS_DENIED';throw e;}
+    const availability=await Promise.all(vehicles.map(v=>checkVehicleAvailability(v.id,start.toISOString(),end.toISOString())));
+    const unavailable=availability.filter(x=>!x.available).map(x=>String(x.vehicleId));
+    if(unavailable.length){const e=new Error('One or more selected vehicles became unavailable.');e.code='MULTI_VEHICLE_UNAVAILABLE';e.vehicleIds=unavailable;throw e;}
+    const items=vehicles.map(vehicle=>{const rental=Number(vehicle.pricePerDay||0)*days;const deliveryFee=delivery?199:0;const platformFee=Math.round(rental*0.05);const securityDeposit=Number(vehicle.securityDeposit||0);return {vehicleId:String(vehicle.id),vehicleName:vehicle.name,rental,deliveryFee,platformFee,securityDeposit,total:rental+deliveryFee+platformFee+securityDeposit,currency:'INR'};});
+    const rentalSubtotal=items.reduce((a,x)=>a+x.rental,0),deliveryFee=items.reduce((a,x)=>a+x.deliveryFee,0),platformFee=items.reduce((a,x)=>a+x.platformFee,0),securityDeposit=items.reduce((a,x)=>a+x.securityDeposit,0);
+    return {vendorId:String(vendorId),vehicleIds:ids,startAt:start.toISOString(),endAt:end.toISOString(),delivery:Boolean(delivery),address:String(address||'').trim().slice(0,300),deliveryLatitude:lat,deliveryLongitude:lon,items,rentalSubtotal,deliveryFee,platformFee,securityDeposit,total:rentalSubtotal+deliveryFee+platformFee+securityDeposit,currency:'INR',quoteExpiresAt:new Date(Date.now()+5*60*1000).toISOString()};
+  }
+
+  async function createFleetOrder({customerId,vendorId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null,idempotencyKey=null}={}) {
+    const normalizedKey=idempotencyKey?String(idempotencyKey).trim():null;
+    if(!useDatabase){
+      if(!memory.fleetOrders)memory.fleetOrders=new Map();
+      if(!memory.fleetOrderIdempotency)memory.fleetOrderIdempotency=new Map();
+      if(normalizedKey){const existing=memory.fleetOrderIdempotency.get(`${customerId}:${normalizedKey}`);if(existing)return existing;}
+      const quote=await quoteMultiVehicle({customerId,vendorId,vehicleIds,startAt,endAt,delivery,address,deliveryLatitude,deliveryLongitude});
+      const created=[];
+      try{
+        for(const item of quote.items){
+          const vehicle=[...memory.vehicles.values()].find(v=>String(v.id)===String(item.vehicleId));
+          if(!vehicle)throw Object.assign(new Error('Vehicle not found.'),{code:'VEHICLE_NOT_FOUND'});
+          const booking=await createBooking({customerId,vehicle,startAt:quote.startAt,endAt:quote.endAt,delivery,address:quote.address,deliveryLatitude:quote.deliveryLatitude,deliveryLongitude:quote.deliveryLongitude,pricing:{days:Math.ceil((new Date(quote.endAt)-new Date(quote.startAt))/86400000),rental:item.rental,deliveryFee:item.deliveryFee,platformFee:item.platformFee,securityDeposit:item.securityDeposit,total:item.total,currency:'INR',currencyUnit:'rupees'},notes:null,idempotencyKey:`fleet:${normalizedKey||crypto.randomUUID()}:${item.vehicleId}`});
+          created.push(booking);
+        }
+      }catch(error){for(const b of created){memory.bookings.delete(String(b.id));}throw error;}
+      const order={id:crypto.randomUUID(),customerId:String(customerId),vendorId:String(vendorId),startAt:quote.startAt,endAt:quote.endAt,delivery:quote.delivery,address:quote.address,items:created,rentalSubtotal:quote.rentalSubtotal,deliveryFee:quote.deliveryFee,platformFee:quote.platformFee,securityDeposit:quote.securityDeposit,total:quote.total,paymentStatus:'unpaid',status:'requested',idempotencyKey:normalizedKey,quoteExpiresAt:quote.quoteExpiresAt,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      memory.fleetOrders.set(order.id,order);if(normalizedKey)memory.fleetOrderIdempotency.set(`${customerId}:${normalizedKey}`,order);return order;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      if(normalizedKey){const idem=await client.query('select id from fleet_orders where customer_id=$1 and idempotency_key=$2 for update',[customerId,normalizedKey]);if(idem.rows[0]){const order=await loadFleetOrderTx(client,idem.rows[0].id);await client.query('commit');return order;}}
+      const vendor=await client.query(`select id from vendors where id=$1 and status='active' for update`,[vendorId]);
+      if(!vendor.rows[0])throw Object.assign(new Error('Vendor not found.'),{code:'VENDOR_NOT_FOUND'});
+      const ids=[...new Set((vehicleIds||[]).map(v=>String(v).trim()).filter(Boolean))];
+      if(ids.length<2||ids.length>10)throw Object.assign(new Error('Select between 2 and 10 vehicles.'),{code:'INVALID_MULTI_CART'});
+      const start=new Date(startAt),end=new Date(endAt),days=Math.ceil((end-start)/86400000);
+      if(Number.isNaN(start.getTime())||Number.isNaN(end.getTime())||end<=start||start.getTime()<Date.now()||days<1||days>30)throw Object.assign(new Error('Invalid booking window.'),{code:'INVALID_BOOKING_WINDOW'});
+      const locked=await client.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active from vehicles where owner_id=$1 and active=true and id::text=any($2::text[]) for update`,[vendorId,ids]);
+      if(locked.rows.length!==ids.length)throw Object.assign(new Error('One or more selected vehicles do not belong to this vendor or are unavailable.'),{code:'MULTI_VEHICLE_ACCESS_DENIED'});
+      const conflict=await client.query(`select distinct v.id from vehicles v join bookings b on b.vehicle_id=v.id where v.owner_id=$1 and v.id::text=any($2::text[]) and b.status in ('requested','confirmed','in_progress') and b.start_at<$4 and b.end_at>$3`,[vendorId,ids,start.toISOString(),end.toISOString()]);
+      if(conflict.rows.length)throw Object.assign(new Error('One or more selected vehicles became unavailable.'),{code:'MULTI_VEHICLE_UNAVAILABLE',vehicleIds:conflict.rows.map(x=>String(x.id))});
+      const lat=delivery&&deliveryLatitude!=null&&deliveryLatitude!==''?Number(deliveryLatitude):null,lon=delivery&&deliveryLongitude!=null&&deliveryLongitude!==''?Number(deliveryLongitude):null;
+      if(delivery && ((lat==null)!==(lon==null)||lat!=null&&(!Number.isFinite(lat)||lat<-90||lat>90)||lon!=null&&(!Number.isFinite(lon)||lon<-180||lon>180)))throw Object.assign(new Error('A valid delivery location is required.'),{code:'INVALID_DELIVERY_LOCATION'});
+      const quoteRows=locked.rows.map(row=>{const vehicle=mapManagedVehicle(row);const rental=vehicle.dailyRate*days,deliveryFee=delivery?199:0,platformFee=Math.round(rental*0.05),securityDeposit=vehicle.securityDeposit;return {vehicle,vehicleId:String(vehicle.id),rental,deliveryFee,platformFee,securityDeposit,total:rental+deliveryFee+platformFee+securityDeposit};});
+      const parts={rental:quoteRows.reduce((a,x)=>a+x.rental,0),deliveryFee:quoteRows.reduce((a,x)=>a+x.deliveryFee,0),platformFee:quoteRows.reduce((a,x)=>a+x.platformFee,0),securityDeposit:quoteRows.reduce((a,x)=>a+x.securityDeposit,0)};const total=parts.rental+parts.deliveryFee+parts.platformFee+parts.securityDeposit;
+      const orderResult=await client.query(`insert into fleet_orders(customer_id,vendor_id,start_at,end_at,delivery_required,delivery_address,rental_total_paise,delivery_fee_paise,platform_fee_paise,security_deposit_paise,total_paise,payment_status,status,idempotency_key,quote_expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'unpaid','requested',$12,$13) returning id`,[customerId,vendorId,start.toISOString(),end.toISOString(),Boolean(delivery),String(address||'').trim().slice(0,300),Math.round(parts.rental*100),Math.round(parts.deliveryFee*100),Math.round(parts.platformFee*100),Math.round(parts.securityDeposit*100),Math.round(total*100),normalizedKey,new Date(Date.now()+5*60*1000)]);
+      const orderId=String(orderResult.rows[0].id),created=[];
+      for(const item of quoteRows){
+        const b=await client.query(`insert into bookings(customer_id,vehicle_id,vendor_id,fleet_order_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,vendor_service_latitude,vendor_service_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,delivery_status,customer_notes) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,(select service_latitude from vendors where id=$3),(select service_longitude from vendors where id=$3),$11,$12,$13,$14,$15,'requested','unpaid','scheduled',null) returning *`,[customerId,item.vehicle.id,vendorId,orderId,start.toISOString(),end.toISOString(),Boolean(delivery),String(address||'').trim().slice(0,300),delivery?lat:null,delivery?lon:null,Math.round(item.deliveryFee*100),Math.round(item.rental*100),Math.round(item.platformFee*100),Math.round(item.securityDeposit*100),Math.round(item.total*100)]);
+        const booking=mapBooking({...b.rows[0],vehicle:item.vehicle});created.push(booking);
+        if(item.securityDeposit>0)await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$4,$4,'pending') on conflict(booking_id) do nothing`,[booking.id,customerId,vendorId,Math.round(item.securityDeposit*100)]);
+        await client.query(`insert into booking_status_events(booking_id,next_status,actor_type,actor_id) values($1,'requested','customer',$2)`,[booking.id,customerId]);
+      }
+      await client.query(`insert into fleet_order_items(fleet_order_id,booking_id,vehicle_id,line_rental_total_paise,line_delivery_fee_paise,line_platform_fee_paise,line_security_deposit_paise,line_total_paise) select $1,id,vehicle_id,rental_total_paise,delivery_fee_paise,platform_fee_paise,security_deposit_paise,total_paise from bookings where fleet_order_id=$1`,[orderId]);
+      await client.query('commit');
+      return {id:orderId,customerId:String(customerId),vendorId:String(vendorId),startAt:start.toISOString(),endAt:end.toISOString(),delivery:Boolean(delivery),address:String(address||'').trim(),items:created,rentalSubtotal:parts.rental,deliveryFee:parts.deliveryFee,platformFee:parts.platformFee,securityDeposit:parts.securityDeposit,total,paymentStatus:'unpaid',status:'requested',quoteExpiresAt:new Date(Date.now()+5*60*1000).toISOString()};
+    }catch(error){try{await client.query('rollback')}catch{};if(error.code==='23P01')error.code='MULTI_VEHICLE_UNAVAILABLE';throw error;}finally{client.release();}
+  }
+
+  async function loadFleetOrderTx(client,orderId){
+    const {rows}=await client.query(`select fo.*,v.business_name from fleet_orders fo join vendors v on v.id=fo.vendor_id where fo.id=$1 for update`,[orderId]);
+    if(!rows[0])return null;
+    const itemRows=await client.query(`select b.*,ve.name as v_name,ve.type as v_type,ve.make,ve.model,ve.image_urls,ve.description,ve.delivery_available from fleet_order_items i join bookings b on b.id=i.booking_id join vehicles ve on ve.id=i.vehicle_id where i.fleet_order_id=$1 order by i.id`,[orderId]);
+    const items=itemRows.rows.map(r=>mapBooking({...r,vehicle:{id:String(r.vehicle_id),name:r.v_name,type:String(r.v_type),make:r.make,model:r.model,imageUrls:r.image_urls||[],description:r.description||'',deliveryAvailable:r.delivery_available!==false}}));
+    return {id:String(rows[0].id),customerId:String(rows[0].customer_id),vendorId:String(rows[0].vendor_id),vendorName:rows[0].business_name,startAt:iso(rows[0].start_at),endAt:iso(rows[0].end_at),delivery:Boolean(rows[0].delivery_required),address:rows[0].delivery_address,rentalSubtotal:Number(rows[0].rental_total_paise)/100,deliveryFee:Number(rows[0].delivery_fee_paise)/100,platformFee:Number(rows[0].platform_fee_paise)/100,securityDeposit:Number(rows[0].security_deposit_paise)/100,total:Number(rows[0].total_paise)/100,paymentStatus:rows[0].payment_status,status:rows[0].status,idempotencyKey:rows[0].idempotency_key||null,quoteExpiresAt:iso(rows[0].quote_expires_at),items};
+  }
   async function updateVendor(customerId, input) {
     if (!useDatabase) {
       const vendor = await ensureVendorForCustomer(customerId, input);
