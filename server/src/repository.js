@@ -991,20 +991,23 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function markOverdueRentals(now=new Date()) {
     const at=now instanceof Date?now:new Date(now);
+    if(Number.isNaN(at.getTime())) { const e=new Error('Invalid overdue check time.');e.code='INVALID_OVERDUE_TIME';throw e; }
     if(!useDatabase){
       const changed=[];
       for(const b of memory.bookings.values()){
-        if(['ACTIVE_RENTAL','CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP'].includes(String(b.lifecycleState||''))&&new Date(b.endAt)<=at){
-          if(b.lifecycleState!=='OVERDUE'){b.lifecycleState='OVERDUE';b.overdueAt=at.toISOString();b.updatedAt=at.toISOString();changed.push(b);}
+        const lifecycle=String(b.lifecycleState||'').toUpperCase();
+        if(lifecycle==='ACTIVE_RENTAL'&&new Date(b.endAt)<=at){
+          b.lifecycleState='OVERDUE'; b.overdueAt=at.toISOString(); b.updatedAt=at.toISOString(); changed.push(b);
         }
       }
       return changed;
     }
-    const q=await pool.query(`update bookings set lifecycle_state='OVERDUE',overdue_at=coalesce(overdue_at,now()),updated_at=now()
-      where end_at<=now() and lifecycle_state in ('ACTIVE_RENTAL','CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP')
-      returning id,vehicle_id,customer_id,end_at`);
-    if(q.rows.length){
-      for(const row of q.rows) await pool.query("insert into fleet_operation_audit(vehicle_id,booking_id,action,next_state,details) values($1,$2,'rental_overdue','OVERDUE',$3)",[row.vehicle_id,row.id,JSON.stringify({expectedReturn:row.end_at})]);
+    const q=await pool.query(`update bookings set lifecycle_state='OVERDUE',overdue_at=coalesce(overdue_at,$1),updated_at=$1
+      where end_at<=$1 and lifecycle_state='ACTIVE_RENTAL'
+      returning id,vehicle_id,customer_id,end_at`,[at.toISOString()]);
+    for(const row of q.rows){
+      await pool.query("insert into fleet_operation_audit(vehicle_id,booking_id,action,next_state,details) values($1,$2,'rental_overdue','OVERDUE',$3)",
+        [row.vehicle_id,row.id,JSON.stringify({expectedReturn:row.end_at,detectedAt:at.toISOString()})]);
     }
     return q.rows;
   }
