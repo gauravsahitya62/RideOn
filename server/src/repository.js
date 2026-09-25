@@ -340,6 +340,15 @@ export function createRepository({ databaseUrl, fleet }) {
   const mapManagedVehicle = (row) => row && ({
     id: String(row.id),
     ownerId: row.owner_id ? String(row.owner_id) : null,
+    variant: row.variant || '',
+    color: row.color || '',
+    fleetVehicleClass: row.fleet_vehicle_class || '',
+    pickupLocation: row.pickup_location || null,
+    serviceArea: row.service_area || {},
+    operationalState: row.operational_state || 'AVAILABLE',
+    maintenanceRequired: Boolean(row.maintenance_required),
+    currentOdometer: row.current_odometer == null ? null : Number(row.current_odometer),
+    currentFuelBattery: row.current_fuel_battery == null ? null : Number(row.current_fuel_battery),
     type: String(row.type),
     name: row.name || [row.make, row.model].filter(Boolean).join(' ') || 'RideOn vehicle',
     make: row.make || '',
@@ -546,10 +555,10 @@ export function createRepository({ databaseUrl, fleet }) {
     if(cityFilter){params.push(cityFilter);where.push("lower(trim(coalesce(v.city,'')))=lower(trim($"+params.length+"))");}
     if(min!=null&&Number.isFinite(min)){params.push(Math.round(min*100));where.push('v.daily_rate_paise>=  async function getRideOnFleetVehicle(vehicleId) {
     if(!useDatabase){
-      const v=[...memory.vehicles.values()].find(x=>String(x.id)===String(vehicleId)&&x.active!==false);
+      const v=[...memory.vehicles.values(),...fleet].find(x=>String(x.id)===String(vehicleId)&&x.active!==false&&String(x.type||'').toLowerCase()!=='car'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&x.maintenanceRequired!==true);
       return v||null;
     }
-    const {rows}=await pool.query('select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where id=$1 and active=true',[vehicleId]);
+    const {rows}=await pool.query("select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,variant,color,pickup_location,service_area,fleet_vehicle_class,operational_state,maintenance_required,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where id=$1 and active=true and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE') and coalesce(maintenance_required,false)=false",[vehicleId]);
     return rows[0]?mapManagedVehicle(rows[0]):null;
   }
 
