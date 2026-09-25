@@ -928,7 +928,9 @@ export function createRepository({ databaseUrl, fleet }) {
     const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);if(!useDatabase)return [...memory.bookings.values()].filter(b=>String(b.assignedStaffUserId||'')===String(staffUserId)).slice(safeOffset,safeOffset+safeLimit);const q=await pool.query('select b.*,v.name as v_name,v.type as v_type,v.make,v.model,v.image_urls,v.description,v.delivery_available from bookings b join vehicles v on v.id=b.vehicle_id where b.assigned_staff_user_id=$1 order by coalesce(b.scheduled_fulfillment_at,b.created_at) asc limit $2 offset $3',[staffUserId,safeLimit,safeOffset]);return q.rows.map(row=>mapBooking({...row,vehicle:{id:String(row.vehicle_id),name:row.v_name,type:String(row.v_type),make:row.make,model:row.model,imageUrls:row.image_urls||[],description:row.description||'',deliveryAvailable:row.delivery_available!==false}}));
   }
 
-  const RENTAL_LIFECYCLE = new Set(['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP','HANDED_OVER','ACTIVE_RENTAL','RETURN_REQUESTED','RETURNED','INSPECTION','COMPLETED','DAMAGE_REVIEW_REQUIRED','OVERDUE']);
+    function isRideOnFleetBookingRow(row){return !row?.owner_id || row?.fleet_owner==='rideon';}
+
+const RENTAL_LIFECYCLE = new Set(['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP','HANDED_OVER','ACTIVE_RENTAL','RETURN_REQUESTED','RETURNED','INSPECTION','COMPLETED','DAMAGE_REVIEW_REQUIRED','OVERDUE']);
   const RENTAL_TRANSITIONS = {
     CONFIRMED:new Set(['DELIVERY_ASSIGNED','PICKUP_ASSIGNED','READY_FOR_PICKUP']), DELIVERY_ASSIGNED:new Set(['DELIVERY_STARTED','READY_FOR_PICKUP']), PICKUP_ASSIGNED:new Set(['READY_FOR_PICKUP','DELIVERY_STARTED']),
     DELIVERY_STARTED:new Set(['HANDED_OVER']), READY_FOR_PICKUP:new Set(['HANDED_OVER']), HANDED_OVER:new Set(['ACTIVE_RENTAL']), ACTIVE_RENTAL:new Set(['RETURN_REQUESTED','OVERDUE']),
@@ -1300,7 +1302,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type, v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,actorId]);
+      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type, v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
       if(!rows[0]){await client.query('rollback');const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       const current=rows[0].status;
       if(!allowed[current]?.includes(nextStatus)){await client.query('rollback');const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
@@ -1316,6 +1318,7 @@ export function createRepository({ databaseUrl, fleet }) {
         await client.query("update payments set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('paid','held','settlement_pending','settled')",[bookingId]);
         await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','review_required','refund_pending')",[bookingId]);
       }
+      if(!rows[0].owner_id && nextStatus==='completed'){const e=new Error('RideOn-owned rentals must complete return, inspection and deposit settlement before completion.');e.code='RIDEON_FLEET_COMPLETION_REQUIRED';await client.query('rollback');throw e;}
       if(nextStatus==='completed' && rows[0].delivery_required && rows[0].delivery_status!=='delivered'){await client.query('rollback');const e=new Error('Delivery must be completed before the rental can be completed.');e.code='DELIVERY_NOT_COMPLETED';throw e;}
       if(nextStatus==='completed' && Number(rows[0].security_deposit_paise||0)>0){
         await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status)
