@@ -149,6 +149,12 @@ function publicBooking(booking, { includeDeliveryLocation = false } = {}) {
     address: booking.address,
     notes: booking.notes,
     pricing: booking.pricing,
+    lifecycleState: booking.lifecycleState || booking.status,
+    returnRequestedAt: booking.returnRequestedAt,
+    returnLocation: booking.returnLocation,
+    returnReceivedAt: booking.returnReceivedAt,
+    overdueAt: booking.overdueAt,
+    pickupConfirmedAt: booking.pickupConfirmedAt,
     totalPrice: booking.pricing.total,
     total: booking.pricing.total,
     status: booking.status,
@@ -354,7 +360,7 @@ const supabaseRequireAuth = async (req, res, next) => {
       });
     }
 
-    if (!identity?.id || !['customer','vendor','support','admin'].includes(identity.role)) {
+    if (!identity?.id || !['customer','vendor','support','admin','delivery_staff'].includes(identity.role)) {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
 
@@ -386,7 +392,7 @@ async function resolveTrackingUser(token) {
     if(!identity?.id){
       identity=await repository.createOrLinkCustomerFromSupabase({supabaseUserId:user.id,email:user.email,fullName:metadata.full_name||metadata.name||user.email.split('@')[0],phone:metadata.phone||undefined,role:'customer'});
     }
-    if(!identity?.id||!['customer','vendor'].includes(identity.role))return null;
+    if(!identity?.id||!['customer','vendor','delivery_staff'].includes(identity.role))return null;
     return {id:identity.id,name:identity.fullName,role:identity.role,supabaseUserId:user.id,email:identity.email||user.email};
   }catch{return null;}
 }
