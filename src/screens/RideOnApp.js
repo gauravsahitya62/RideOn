@@ -78,7 +78,7 @@ const normalizeVehicle = raw => {
   if (!Number.isFinite(price)) return null;
   const seats = Number(raw.seats);
   return {
-    id: String(raw.id), type: titleCaseType(raw.type), name: String(raw.name).trim(),
+    id: String(raw.id), vendorId: raw.vendorId || raw.ownerId || raw.resolvedVendorId || null, vendorName: raw.vendorName || raw.businessName || null, type: titleCaseType(raw.type), name: String(raw.name).trim(),
     detail: String(raw.detail ?? raw.subtitle ?? '').trim(), price,
     city: String(raw.city || '').trim(), seats: Number.isFinite(seats) && seats > 0 ? seats : null,
     transmission: raw.transmission ? String(raw.transmission) : null,
