@@ -804,6 +804,47 @@ export function createRepository({ databaseUrl, fleet }) {
     return mapBooking({...rows[0],vehicle:{id:String(rows[0].vehicle_id),name:rows[0].v_name,type:String(rows[0].v_type)}});
   }
 
+  async function listVendorFleetOrders(vendorId,{limit=20,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(50,Number(limit)||20)),safeOffset=Math.max(0,Number(offset)||0);
+    if(!useDatabase){
+      const rows=[...(memory.fleetOrders?.values()||[])].filter(o=>String(o.vendorId)===String(vendorId)).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return rows.slice(safeOffset,safeOffset+safeLimit);
+    }
+    const q=await pool.query('select id from fleet_orders where vendor_id=$1 order by created_at desc limit $2 offset $3',[vendorId,safeLimit,safeOffset]);
+    const client=await pool.connect(); try { const orders=[]; for(const row of q.rows){const order=await loadFleetOrderTx(client,row.id);if(order)orders.push(order);} return orders; } finally { client.release(); }
+  }
+
+  async function updateFleetOrderStatus(vendorId,orderId,nextStatus,note='') {
+    const allowed={requested:['confirmed','rejected'],confirmed:['in_progress','cancelled'],in_progress:['completed']};
+    if(!allowed[nextStatus]){const e=new Error('Invalid booking status.');e.code='INVALID_BOOKING_STATUS';throw e;}
+    if(nextStatus==='rejected'&&!String(note||'').trim()){const e=new Error('A rejection reason is required.');e.code='REJECTION_REASON_REQUIRED';throw e;}
+    if(!useDatabase){
+      const order=memory.fleetOrders?.get(String(orderId));
+      if(!order||String(order.vendorId)!==String(vendorId))throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      if(!order.items.length||order.items.some(b=>!allowed[String(b.status)]?.includes(nextStatus)))throw Object.assign(new Error('Booking cannot move to that status.'),{code:'INVALID_BOOKING_TRANSITION'});
+      if(nextStatus==='confirmed'&&order.items.some(b=>!['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))))throw Object.assign(new Error('Payment must be confirmed before this booking can be accepted.'),{code:'PAYMENT_REQUIRED_FOR_ACCEPTANCE'});
+      if(nextStatus==='completed'&&order.items.some(b=>b.delivery&&b.deliveryStatus!=='delivered'))throw Object.assign(new Error('Delivery must be completed before the rental can be completed.'),{code:'DELIVERY_NOT_COMPLETED'});
+      order.items.forEach(b=>{b.status=nextStatus;if(nextStatus==='rejected'){b.cancellationReason=String(note).trim();}b.updatedAt=new Date().toISOString();});
+      order.status=nextStatus;if(nextStatus==='rejected')order.paymentStatus='refund_pending';if(nextStatus==='confirmed')order.paymentStatus='paid';order.updatedAt=new Date().toISOString();return order;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const oq=await client.query('select * from fleet_orders where id=$1 and vendor_id=$2 for update',[orderId,vendorId]);
+      if(!oq.rows[0])throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      const items=await client.query('select b.*,v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.fleet_order_id=$1 and v.owner_id=$2 for update',[orderId,vendorId]);
+      if(!items.rows.length||items.rows.some(b=>!allowed[String(b.status)]?.includes(nextStatus)))throw Object.assign(new Error('Booking cannot move to that status.'),{code:'INVALID_BOOKING_TRANSITION'});
+      if(nextStatus==='confirmed'&&items.rows.some(b=>!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))))throw Object.assign(new Error('Payment must be confirmed before this booking can be accepted.'),{code:'PAYMENT_REQUIRED_FOR_ACCEPTANCE'});
+      if(nextStatus==='completed'&&items.rows.some(b=>b.delivery_required&&b.delivery_status!=='delivered'))throw Object.assign(new Error('Delivery must be completed before the rental can be completed.'),{code:'DELIVERY_NOT_COMPLETED'});
+      const shouldRefund=nextStatus==='rejected'&&items.rows.some(b=>['paid','held','settlement_pending','settled'].includes(String(b.payment_status)));
+      await client.query('update fleet_orders set status=$2,payment_status=case when $2=\'rejected\' and $3 then \'refund_pending\' when $2=\'confirmed\' then \'paid\' else payment_status end,updated_at=now() where id=$1',[orderId,nextStatus,shouldRefund]);
+      await client.query('update bookings set status=$2,cancellation_reason=case when $2=\'rejected\' then $3 else cancellation_reason end,cancelled_at=case when $2=\'rejected\' then now() else cancelled_at end,payment_status=case when $2=\'rejected\' and payment_status in (\'paid\',\'held\',\'settlement_pending\',\'settled\') then \'refund_pending\' when $2=\'confirmed\' then \'paid\' else payment_status end,updated_at=now() where fleet_order_id=$1',[orderId,nextStatus,String(note||'').trim()||null]);
+      if(shouldRefund){await client.query("update payments set status='refund_pending',updated_at=now() where booking_id=(select booking_id from fleet_order_items where fleet_order_id=$1 order by id limit 1) and status in ('paid','held','settlement_pending','settled')",[orderId]);await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','review_required','refund_pending')",[orderId]);}
+      await client.query('commit');
+      return await loadFleetOrderTx(client,orderId);
+    }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
+  }
+
   async function updateVendorBookingStatus(vendorId, bookingId, nextStatus, note=''){
     const allowed = {
       requested: ['confirmed','rejected'],
