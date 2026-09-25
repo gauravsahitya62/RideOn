@@ -78,6 +78,7 @@ export default function OperationsScreen({ user, onLogout }) {
   const [dashboard, setDashboard] = useState(null);
   const [bookings, setBookings] = useState([]);
   const [damageCases, setDamageCases] = useState([]);
+  const [fleetVehicles, setFleetVehicles] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -85,14 +86,16 @@ export default function OperationsScreen({ user, onLogout }) {
   const load = useCallback(async () => {
     setError('');
     try {
-      const [dashResponse, bookingResponse, damageResponse] = await Promise.all([
+      const [dashResponse, bookingResponse, damageResponse, vehiclesResponse] = await Promise.all([
         rideOnApi.getFleetOpsDashboard(),
         rideOnApi.getFleetOpsBookings(),
         rideOnApi.listFleetDamageCases({ status: 'reported,under_review,approved' }),
+        rideOnApi.listFleetOpsVehicles({ limit: 50 }),
       ]);
       setDashboard(dashResponse?.dashboard || {});
       setBookings(bookingResponse?.bookings || bookingResponse?.data || []);
       setDamageCases(damageResponse?.cases || damageResponse?.data || []);
+      setFleetVehicles(vehiclesResponse?.vehicles || vehiclesResponse?.data || []);
     } catch (err) {
       setError(err?.message || 'Operations data is temporarily unavailable.');
     }
@@ -221,6 +224,58 @@ export default function OperationsScreen({ user, onLogout }) {
     );
   };
 
+  const editPricing = (vehicle) => {
+    if (user?.role !== 'admin') {
+      setError('Pricing changes are restricted to RideOn administrators.');
+      return;
+    }
+    Alert.prompt(
+      'Daily rental price',
+      `Current: ₹${Number(vehicle.dailyRate ?? vehicle.pricePerDay ?? 0).toFixed(2)}. Enter the new daily price.`,
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {text: 'Next', onPress: (dailyValue) => {
+          const dailyRate = Number(dailyValue);
+          if (!Number.isFinite(dailyRate) || dailyRate < 0) {
+            setError('Enter a valid non-negative daily rental price.');
+            return;
+          }
+          Alert.prompt(
+            'Security deposit',
+            `Current: ₹${Number(vehicle.securityDeposit || 0).toFixed(2)}. Enter the new deposit.`,
+            [
+              {text: 'Cancel', style: 'cancel'},
+              {text: 'Save', onPress: (depositValue) => {
+                const securityDeposit = Number(depositValue);
+                if (!Number.isFinite(securityDeposit) || securityDeposit < 0) {
+                  setError('Enter a valid non-negative security deposit.');
+                  return;
+                }
+                runAction('pricing:' + vehicle.id, () =>
+                  rideOnApi.updateFleetOpsVehicle(vehicle.id, {dailyRate,securityDeposit})
+                );
+              }},
+            ],
+            'plain-text',
+            String(vehicle.securityDeposit ?? 0)
+          );
+        }},
+      ],
+      'plain-text',
+      String(vehicle.dailyRate ?? vehicle.pricePerDay ?? 0)
+    );
+  };
+
+  const togglePricing = (vehicle) => {
+    if (user?.role !== 'admin') {
+      setError('Pricing activation is restricted to RideOn administrators.');
+      return;
+    }
+    runAction('pricing-active:' + vehicle.id, () =>
+      rideOnApi.updateFleetOpsVehicle(vehicle.id, {pricingActive: vehicle.pricingActive === false})
+    );
+  };
+
   const updateDamage = (caseItem, nextStatus) => {
     runAction('damage:' + caseItem.id, () =>
       rideOnApi.updateFleetDamageCase(caseItem.id, {status: nextStatus})
@@ -335,6 +390,33 @@ export default function OperationsScreen({ user, onLogout }) {
             </View>
           );
         })}
+
+        {user?.role === 'admin' && (
+          <>
+            <Text style={styles.sectionTitle}>Admin · Pricing</Text>
+            {fleetVehicles.length === 0 ? (
+              <View style={styles.empty}>
+                <Text style={styles.emptyTitle}>No RideOn fleet pricing records.</Text>
+              </View>
+            ) : fleetVehicles.slice(0, 50).map((vehicle) => (
+              <View style={styles.bookingCard} key={'pricing-' + vehicle.id}>
+                <View style={styles.rowBetween}>
+                  <View style={styles.flex}>
+                    <Text style={styles.bookingTitle}>{vehicle.name || 'RideOn vehicle'}</Text>
+                    <Text style={styles.muted}>{String(vehicle.fleetVehicleClass || vehicle.type || '').toUpperCase()} · {vehicle.operationalState || vehicle.operational_state || 'AVAILABLE'}</Text>
+                  </View>
+                  <Text style={styles.statePill}>{vehicle.pricingActive === false ? 'Pricing Off' : 'Pricing Active'}</Text>
+                </View>
+                <Text style={styles.detail}>Daily: ₹{Number(vehicle.dailyRate ?? vehicle.pricePerDay ?? 0).toFixed(2)}</Text>
+                <Text style={styles.detail}>Security deposit: ₹{Number(vehicle.securityDeposit || 0).toFixed(2)}</Text>
+                <View style={styles.actions}>
+                  <ActionButton label="Edit pricing" onPress={() => editPricing(vehicle)} disabled={!!busy} />
+                  <ActionButton secondary label={vehicle.pricingActive === false ? 'Activate pricing' : 'Deactivate pricing'} onPress={() => togglePricing(vehicle)} disabled={!!busy} />
+                </View>
+              </View>
+            ))}
+          </>
+        )}
 
         <Text style={styles.sectionTitle}>Damage reviews</Text>
         {damageCases.length === 0 ? (
