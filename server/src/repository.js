@@ -690,6 +690,45 @@ export function createRepository({ databaseUrl, fleet }) {
     return q.rows[0]||null;
   }
 
+  async function recalculateFleetOrderPricing(orderId, customerId) {
+    if(!useDatabase){
+      const order=memory.fleetOrders?.get(String(orderId));
+      if(!order||String(order.customerId)!==String(customerId))return {code:'FLEET_ORDER_NOT_FOUND'};
+      if(new Date(order.quoteExpiresAt)<=new Date())return {code:'QUOTE_STALE'};
+      const vehicles=order.items.map(item=>item.vehicle);
+      const availability=await Promise.all(order.items.map(item=>checkVehicleAvailability(item.vehicleId,order.startAt,order.endAt)));
+      if(availability.some(x=>!x.available))return {code:'VEHICLE_UNAVAILABLE'};
+      const quote=pricingService.calculateMultiVehicle({vehicles,startAt:order.startAt,endAt:order.endAt,delivery:Boolean(order.delivery)});
+      const freshTotal=Math.round(quote.totalPayable*100);
+      const storedTotal=Math.round(Number(order.total||0)*100);
+      if(freshTotal!==storedTotal||Math.round(Number(order.rentalSubtotal||0)*100)!==Math.round(quote.rentalSubtotal*100)||Math.round(Number(order.deliveryFee||0)*100)!==Math.round(quote.deliveryFee*100)||Math.round(Number(order.platformFee||0)*100)!==Math.round(quote.platformFee*100)||Math.round(Number(order.securityDeposit||0)*100)!==Math.round(quote.securityDeposit*100))return {code:'QUOTE_STALE'};
+      return {code:'OK',totalPaise:freshTotal,quote};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const oq=await client.query('select * from fleet_orders where id=$1 and customer_id=$2 for update',[orderId,customerId]);
+      if(!oq.rows[0]){await client.query('rollback');return {code:'FLEET_ORDER_NOT_FOUND'};}
+      const order=oq.rows[0];
+      if(!order.quote_expires_at||new Date(order.quote_expires_at)<=new Date()){await client.query('rollback');return {code:'QUOTE_STALE'};}
+      const items=await client.query(`select b.*,v.id as v_id,v.name as v_name,v.type as v_type,v.daily_rate_paise,v.security_deposit_paise,v.active,v.owner_id,v.operational_state,v.maintenance_required,v.fleet_vehicle_class from bookings b join vehicles v on v.id=b.vehicle_id where b.fleet_order_id=$1 order by b.id`,[orderId]);
+      if(!items.rows.length){await client.query('rollback');return {code:'FLEET_ORDER_NOT_FOUND'};}
+      for(const row of items.rows){
+        if(row.owner_id||String(row.type||'').toLowerCase()==='car'||!row.active||row.maintenance_required||String(row.operational_state||'AVAILABLE')!=='AVAILABLE'){await client.query('rollback');return {code:'VEHICLE_UNAVAILABLE'};}
+        const conflict=await client.query("select 1 from bookings where vehicle_id=$1 and id<>$2 and status in ('requested','confirmed','in_progress') and start_at<$4 and end_at>$3 limit 1",[row.vehicle_id,row.id,order.start_at,order.end_at]);
+        if(conflict.rows[0]){await client.query('rollback');return {code:'VEHICLE_UNAVAILABLE'};}
+        const reservation=await client.query("select 1 from rideon_vehicle_reservations where vehicle_id=$1 and status='active' and expires_at>now() and start_at<$3 and end_at>$2 and customer_id<>$4 limit 1",[row.vehicle_id,order.start_at,order.end_at,customerId]);
+        if(reservation.rows[0]){await client.query('rollback');return {code:'VEHICLE_UNAVAILABLE'};}
+      }
+      const vehicles=items.rows.map(row=>({id:String(row.v_id),name:row.v_name,type:row.v_type,pricePerDay:Number(row.daily_rate_paise||0)/100,securityDeposit:Number(row.security_deposit_paise||0)/100}));
+      const quote=pricingService.calculateMultiVehicle({vehicles,startAt:order.start_at,endAt:order.end_at,delivery:Boolean(order.delivery_required)});
+      const fresh={rental:Number(quote.rentalSubtotal),deliveryFee:Number(quote.deliveryFee),platformFee:Number(quote.platformFee),tax:Number(quote.tax),discount:Number(quote.discount),securityDeposit:Number(quote.securityDeposit),total:Number(quote.totalPayable)};
+      const stale=Number(order.rental_total_paise)!==Math.round(fresh.rental*100)||Number(order.delivery_fee_paise)!==Math.round(fresh.deliveryFee*100)||Number(order.platform_fee_paise)!==Math.round(fresh.platformFee*100)||Number(order.tax_paise||0)!==Math.round(fresh.tax*100)||Number(order.discount_paise||0)!==Math.round(fresh.discount*100)||Number(order.security_deposit_paise)!==Math.round(fresh.securityDeposit*100)||Number(order.total_paise)!==Math.round(fresh.total*100);
+      await client.query('commit');
+      return stale?{code:'QUOTE_STALE'}:{code:'OK',totalPaise:Math.round(fresh.total*100),quote:fresh};
+    }catch(error){try{await client.query('rollback')}catch{}finally{client.release();}throw error;}
+  }
+
   async function getAuthoritativeBookingPrice(bookingId, customerId=null) {
     if(!useDatabase){
       const b=memory.bookings.get(String(bookingId));
@@ -2745,7 +2784,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {markOverdueRentals,getFleetBookingOperations,transitionRentalLifecycle,getRentalBookingForCustomer,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,{health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,createVehicleReservation,releaseVehicleReservation,getAuthoritativeBookingPrice,createFleetReservation};
+  return {markOverdueRentals,getFleetBookingOperations,transitionRentalLifecycle,getRentalBookingForCustomer,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,{health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,createVehicleReservation,releaseVehicleReservation,getAuthoritativeBookingPrice,recalculateFleetOrderPricing,createFleetReservation};
 }
 +params.length);}
     if(max!=null&&Number.isFinite(max)){params.push(Math.round(max*100));where.push('v.daily_rate_paise<=  async function getRideOnFleetVehicle(vehicleId) {
