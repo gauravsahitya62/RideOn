@@ -1248,8 +1248,6 @@ test('multi-vehicle checkout rolls back all staged bookings when a selected vehi
   const competing=await repository.createBooking({customerId:customer.customer.id,vehicle:two,startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup',pricing:{days:2,rental:3000,deliveryFee:0,platformFee:150,securityDeposit:0,total:3150,currency:'INR',currencyUnit:'rupees'},notes:null,idempotencyKey:'rollback-competing'});
   assert.ok(competing.id);
   await assert.rejects(()=>repository.createFleetOrder({customerId:customer.customer.id,vendorId:vendor.id,vehicleIds:[one.id,two.id],startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup'}),e=>e.code==='MULTI_VEHICLE_UNAVAILABLE');
-  const remaining=[...repository.memory?.bookings?.values?.()||[]];
-  assert.ok(true);
 });
 
 test.after(async () => {
