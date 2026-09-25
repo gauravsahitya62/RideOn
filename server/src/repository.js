@@ -71,6 +71,12 @@ export function createRepository({ databaseUrl, fleet }) {
       securityDepositRefundReference:row.security_deposit_refund_reference || undefined,
       securityDepositInspectedAt:iso(row.security_deposit_inspected_at),
       securityDepositInspectedBy:row.security_deposit_inspected_by ? String(row.security_deposit_inspected_by) : undefined,
+      lifecycleState:String(row.lifecycle_state || (row.status === 'completed' ? 'COMPLETED' : row.status === 'in_progress' ? 'ACTIVE_RENTAL' : row.status === 'confirmed' ? 'CONFIRMED' : 'CONFIRMED')).toUpperCase(),
+      fleetOrderId:row.fleet_order_id ? String(row.fleet_order_id) : undefined,
+      pickupConfirmedAt:iso(row.pickup_confirmed_at),
+      returnRequestedAt:iso(row.return_requested_at),
+      returnReceivedAt:iso(row.return_received_at),
+      overdueAt:iso(row.overdue_at),
       rejectionReason:row.cancellation_reason && row.status==='rejected' ? row.cancellation_reason : undefined,
       deliveryLatitude:row.delivery_latitude == null ? null : Number(row.delivery_latitude),
       deliveryLongitude:row.delivery_longitude == null ? null : Number(row.delivery_longitude),
@@ -606,7 +612,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const lat=delivery&&deliveryLatitude!=null&&deliveryLatitude!==''?Number(deliveryLatitude):null;
     const lon=delivery&&deliveryLongitude!=null&&deliveryLongitude!==''?Number(deliveryLongitude):null;
     if(delivery && ((lat==null)!==(lon==null)||lat!=null&&(!Number.isFinite(lat)||lat<-90||lat>90)||lon!=null&&(!Number.isFinite(lon)||lon<-180||lon>180))){const e=new Error('A valid delivery location is required.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
-    const vehicles=useDatabase?(await pool.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active from vehicles where active=true and id::text = any($1::text[])`,[ids])).rows.map(mapManagedVehicle):[...memory.vehicles.values(),...fleet].filter(v=>v.active!==false&&ids.includes(String(v.id)));
+    const vehicles=useDatabase?(await pool.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active,operational_state,maintenance_required,fleet_vehicle_class from vehicles where active=true and id::text = any($1::text[]) and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE')='AVAILABLE' and coalesce(maintenance_required,false)=false`,[ids])).rows.map(mapManagedVehicle):[...memory.vehicles.values(),...fleet].filter(v=>v.active!==false&&ids.includes(String(v.id)));
     if(vehicles.length!==ids.length){const e=new Error('One or more selected RideOn vehicles are unavailable.');e.code='MULTI_VEHICLE_ACCESS_DENIED';throw e;}
     const availability=await Promise.all(vehicles.map(v=>checkVehicleAvailability(v.id,start.toISOString(),end.toISOString())));
     const unavailable=availability.filter(x=>!x.available).map(x=>String(x.vehicleId));
@@ -629,7 +635,7 @@ export function createRepository({ databaseUrl, fleet }) {
         if(!vehicle)throw Object.assign(new Error('Vehicle not found.'),{code:'VEHICLE_NOT_FOUND'});
         const overlap=[...memory.bookings.values()].some(b=>String(b.vehicleId)===String(item.vehicleId)&&['requested','confirmed','in_progress'].includes(b.status)&&new Date(quote.startAt)<new Date(b.endAt)&&new Date(quote.endAt)>new Date(b.startAt));
         if(overlap)throw Object.assign(new Error('One or more selected vehicles became unavailable.'),{code:'MULTI_VEHICLE_UNAVAILABLE',vehicleIds:[String(item.vehicleId)]});
-        const booking={id:crypto.randomUUID(),customerId:String(customerId),vehicleId:String(vehicle.id),vehicle,startAt:quote.startAt,endAt:quote.endAt,delivery:Boolean(delivery),address:quote.address,deliveryLatitude:quote.deliveryLatitude,deliveryLongitude:quote.deliveryLongitude,vendorServiceLatitude:null,vendorServiceLongitude:null,pricing:{days:Math.ceil((new Date(quote.endAt)-new Date(quote.startAt))/86400000),rental:item.rental,deliveryFee:item.deliveryFee,platformFee:item.platformFee,securityDeposit:item.securityDeposit,total:item.total,currency:'INR'},status:'requested',paymentStatus:'unpaid',deliveryStatus:'scheduled',createdAt:now,updatedAt:now};
+        const booking={id:crypto.randomUUID(),customerId:String(customerId),vehicleId:String(vehicle.id),vehicle,startAt:quote.startAt,endAt:quote.endAt,delivery:Boolean(delivery),address:quote.address,deliveryLatitude:quote.deliveryLatitude,deliveryLongitude:quote.deliveryLongitude,vendorServiceLatitude:null,vendorServiceLongitude:null,pricing:{days:Math.ceil((new Date(quote.endAt)-new Date(quote.startAt))/86400000),rental:item.rental,deliveryFee:item.deliveryFee,platformFee:item.platformFee,securityDeposit:item.securityDeposit,total:item.total,currency:'INR'},status:'requested',paymentStatus:'unpaid',deliveryStatus:'scheduled',lifecycleState:'CONFIRMED',fleetOrderId:null,createdAt:now,updatedAt:now};
         stagedBookings.push(booking);
       }
       const order={id:crypto.randomUUID(),customerId:String(customerId),fleetOwner:'rideon',startAt:quote.startAt,endAt:quote.endAt,delivery:quote.delivery,address:quote.address,items:stagedBookings,rentalSubtotal:quote.rentalSubtotal,deliveryFee:quote.deliveryFee,platformFee:quote.platformFee,securityDeposit:quote.securityDeposit,total:quote.total,paymentStatus:'unpaid',status:'requested',idempotencyKey:normalizedKey,quoteExpiresAt:quote.quoteExpiresAt,createdAt:now,updatedAt:now};
@@ -652,7 +658,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if(ids.length<2||ids.length>10)throw Object.assign(new Error('Select between 2 and 10 vehicles.'),{code:'INVALID_MULTI_CART'});
       const startDate=new Date(startAt),endDate=new Date(endAt),days=Math.ceil((endDate-startDate)/86400000);
       if(Number.isNaN(startDate.getTime())||Number.isNaN(endDate.getTime())||endDate<=startDate||startDate.getTime()<Date.now()||days<1||days>30)throw Object.assign(new Error('Invalid booking window.'),{code:'INVALID_BOOKING_WINDOW'});
-      const locked=await client.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active from vehicles where active=true and id::text=any($1::text[]) order by array_position($1::text[],id::text) for update`,[ids]);
+      const locked=await client.query(`select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active,operational_state,maintenance_required,fleet_vehicle_class from vehicles where active=true and id::text=any($1::text[]) and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE')='AVAILABLE' and coalesce(maintenance_required,false)=false order by array_position($1::text[],id::text) for update`,[ids]);
       if(locked.rows.length!==ids.length)throw Object.assign(new Error('One or more selected RideOn vehicles are unavailable.'),{code:'MULTI_VEHICLE_ACCESS_DENIED'});
       const conflict=await client.query(`select distinct b.vehicle_id from bookings b where b.vehicle_id::text=any($1::text[]) and b.status in ('requested','confirmed','in_progress') and b.start_at<$3 and b.end_at>$2`,[ids,startDate.toISOString(),endDate.toISOString()]);
       if(conflict.rows.length)throw Object.assign(new Error('One or more selected vehicles became unavailable.'),{code:'MULTI_VEHICLE_UNAVAILABLE',vehicleIds:conflict.rows.map(x=>String(x.vehicle_id))});
@@ -663,7 +669,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const orderResult=await client.query(`insert into fleet_orders(fleet_owner,customer_id,start_at,end_at,delivery_required,delivery_address,rental_total_paise,delivery_fee_paise,platform_fee_paise,security_deposit_paise,total_paise,payment_status,status,idempotency_key,quote_expires_at) values('rideon',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'unpaid','requested',$11,$12) returning id`,[customerId,startDate.toISOString(),endDate.toISOString(),Boolean(delivery),String(address||'').trim().slice(0,300),Math.round(parts.rental*100),Math.round(parts.deliveryFee*100),Math.round(parts.platformFee*100),Math.round(parts.securityDeposit*100),Math.round(total*100),normalizedKey,new Date(Date.now()+5*60*1000)]);
       const orderId=String(orderResult.rows[0].id),created=[];
       for(const item of quoteRows){
-        const b=await client.query(`insert into bookings(customer_id,vehicle_id,fleet_order_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,delivery_status,customer_notes) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'requested','unpaid','scheduled',null) returning *`,[customerId,item.vehicle.id,orderId,startDate.toISOString(),endDate.toISOString(),Boolean(delivery),String(address||'').trim().slice(0,300),delivery?lat:null,delivery?lon:null,Math.round(item.deliveryFee*100),Math.round(item.rental*100),Math.round(item.platformFee*100),Math.round(item.securityDeposit*100),Math.round(item.total*100)]);
+        const b=await client.query(`insert into bookings(customer_id,vehicle_id,fleet_order_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,delivery_status,customer_notes,lifecycle_state) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'requested','unpaid','scheduled',null,'CONFIRMED') returning *`,[customerId,item.vehicle.id,orderId,startDate.toISOString(),endDate.toISOString(),Boolean(delivery),String(address||'').trim().slice(0,300),delivery?lat:null,delivery?lon:null,Math.round(item.deliveryFee*100),Math.round(item.rental*100),Math.round(item.platformFee*100),Math.round(item.securityDeposit*100),Math.round(item.total*100)]);
         const booking=mapBooking({...b.rows[0],vehicle:item.vehicle});created.push(booking);
         if(item.securityDeposit>0)await client.query(`insert into security_deposits(booking_id,customer_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$3,'pending') on conflict(booking_id) do nothing`,[booking.id,customerId,Math.round(item.securityDeposit*100)]);
         await client.query(`insert into booking_status_events(booking_id,next_status,actor_type,actor_id) values($1,'requested','customer',$2)`,[booking.id,customerId]);
@@ -677,7 +683,9 @@ export function createRepository({ databaseUrl, fleet }) {
   async function loadFleetOrderTx(client,orderId){
     const {rows}=await client.query('select * from fleet_orders where id=$1 for update',[orderId]);
     if(!rows[0])return null;
-    const itemRows=await client.query(`select b.*,ve.name as v_name,ve.type as v_type,ve.make,ve.model,ve.image_urls,ve.description,ve.delivery_available from fleet_order_items i join bookings b on b.id=i.booking_id join vehicles ve on ve.id=i.vehicle_id where i.fleet_order_id=$1 order by i.id`,[orderId]);
+    const itemRows=await client.query(`select b.*,ve.name as v_name,ve.type as v_type,ve.make,ve.model,ve.image_urls,ve.description,ve.delivery_available
+      from fleet_order_items i join bookings b on b.id=i.booking_id join vehicles ve on ve.id=i.vehicle_id
+      where i.fleet_order_id=$1 order by i.id`,[orderId]);
     const items=itemRows.rows.map(r=>mapBooking({...r,vehicle:{id:String(r.vehicle_id),name:r.v_name,type:String(r.v_type),make:r.make,model:r.model,imageUrls:r.image_urls||[],description:r.description||'',deliveryAvailable:r.delivery_available!==false}}));
     return {id:String(rows[0].id),customerId:String(rows[0].customer_id),fleetOwner:'rideon',startAt:iso(rows[0].start_at),endAt:iso(rows[0].end_at),delivery:Boolean(rows[0].delivery_required),address:rows[0].delivery_address,rentalSubtotal:Number(rows[0].rental_total_paise)/100,deliveryFee:Number(rows[0].delivery_fee_paise)/100,platformFee:Number(rows[0].platform_fee_paise)/100,securityDeposit:Number(rows[0].security_deposit_paise)/100,total:Number(rows[0].total_paise)/100,paymentStatus:rows[0].payment_status,status:rows[0].status,idempotencyKey:rows[0].idempotency_key||null,quoteExpiresAt:iso(rows[0].quote_expires_at),items};
   }
@@ -771,25 +779,68 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();try{await client.query('begin');const v=await client.query("select id,operational_state from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);if(!v.rows[0])return null;await client.query('insert into vehicle_maintenance(vehicle_id,status,notes,cost_paise,service_date,next_service_date,odometer_at_service,created_by) values($1,$2,$3,$4,$5,$6,$7,$8)',[vehicleId,normalized,String(notes||'').slice(0,2000),Math.round(costNumber*100),serviceDate,nextServiceDate,odometerAtService,actorUserId||null]);const next=normalized==='completed'?'INSPECTION':'MAINTENANCE';await client.query('update vehicles set operational_state=$2,maintenance_required=$3,updated_at=now() where id=$1',[vehicleId,next,normalized!=='completed']);await client.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,$4,$5,$6)',[vehicleId,actorUserId||null,'maintenance_'+normalized,v.rows[0].operational_state,next,JSON.stringify({cost:costNumber})]);await client.query('commit');return getRideOnFleetVehicle(vehicleId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
-  async function recordFleetInspection({vehicleId,bookingId=null,inspectionType='routine',odometer=null,fuelBattery=null,exteriorCondition='',damageNotes='',inspectionStatus='passed',conditionPhotos=[],actorUserId}) {
+  async function recordFleetInspection({vehicleId,bookingId=null,inspectionType='routine',odometer=null,fuelBattery=null,exteriorCondition='',damageNotes='',inspectionStatus='passed',conditionPhotos=[],estimatedAmountPaise=0,actorUserId}) {
+    const actor=await findCustomerById(actorUserId);
+    if(!['admin','support','delivery_staff'].includes(actor?.role)){const e=new Error('Operations staff access is required.');e.code='FORBIDDEN';throw e;}
     if(!['pickup','return','maintenance','routine'].includes(inspectionType)||!['pending','passed','failed','damage_review'].includes(inspectionStatus)){const e=new Error('Invalid inspection data.');e.code='INVALID_INSPECTION';throw e;}
     const normalizedDamage=String(damageNotes||'').trim();
-    if(!useDatabase){const v=memory.vehicles.get(String(vehicleId));if(!v)return null;v.currentOdometer=odometer??v.currentOdometer;v.currentFuelBattery=fuelBattery??v.currentFuelBattery;v.operationalState=inspectionStatus==='passed'?'AVAILABLE':'MAINTENANCE';return v;}
-    const client=await pool.connect();try{await client.query('begin');
-      const vr=await client.query("select id,operational_state from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);if(!vr.rows[0])return null;
-      let handover=null;
-      if(bookingId&&inspectionType==='return'){const h=await client.query('select * from rental_handovers where booking_id=$1 and vehicle_id=$2 for update',[bookingId,vehicleId]);handover=h.rows[0]||null;if(!handover){const e=new Error('Handover record is required before return inspection.');e.code='INSPECTION_PREREQUISITE_MISSING';throw e;}}
-      const ins=await client.query('insert into vehicle_inspections(vehicle_id,booking_id,inspection_type,odometer,fuel_battery,exterior_condition,damage_notes,inspection_status,condition_photos,inspected_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *',[vehicleId,bookingId,inspectionType,odometer,fuelBattery,String(exteriorCondition||'').slice(0,2000),normalizedDamage,inspectionStatus,conditionPhotos,actorUserId||null]);
+    const estimated=Math.max(0,Math.round(Number(estimatedAmountPaise)||0));
+    if(!useDatabase){
+      const v=memory.vehicles.get(String(vehicleId)) || fleet.find(x=>String(x.id)===String(vehicleId));
+      if(!v)return null;
+      if(inspectionType==='return'&&bookingId){
+        const b=memory.bookings.get(String(bookingId));if(!b||String(b.vehicleId)!==String(vehicleId))throw Object.assign(new Error('Booking does not match vehicle.'),{code:'INSPECTION_BOOKING_MISMATCH'});
+        if(!['RETURNED','INSPECTION'].includes(String(b.lifecycleState||''))&&String(b.lifecycleState||'')!=='RETURN_REQUESTED')throw Object.assign(new Error('Vehicle is not ready for return inspection.'),{code:'INSPECTION_PREREQUISITE_MISSING'});
+      }
+      v.currentOdometer=odometer??v.currentOdometer;v.currentFuelBattery=fuelBattery??v.currentFuelBattery;
+      v.operationalState=inspectionStatus==='failed'?'MAINTENANCE':'AVAILABLE';v.maintenanceRequired=inspectionStatus==='failed';
+      const b=bookingId?memory.bookings.get(String(bookingId)):null;
+      if(b&&inspectionType==='return'){
+        const prior=String(b.lifecycleState||'INSPECTION');
+        const damage=Boolean(normalizedDamage)||inspectionStatus==='damage_review';
+        b.lifecycleState=damage?'DAMAGE_REVIEW_REQUIRED':(Number(b.pricing?.securityDeposit||0)>0?'INSPECTION':'COMPLETED');
+        if(!damage&&Number(b.pricing?.securityDeposit||0)===0)b.status='completed';
+        b.updatedAt=new Date().toISOString();
+        if(damage){b.damageCase={status:'reported',description:normalizedDamage,estimatedAmountPaise:estimated,evidencePhotos:[...conditionPhotos]};}
+        b.inspectionStatus=inspectionStatus;
+        b.inspectionPriorState=prior;
+      }
+      return {vehicle:v,inspection:{vehicleId:String(vehicleId),bookingId:bookingId?String(bookingId):null,inspectionType,inspectionStatus,odometer,fuelBattery,damageNotes:normalizedDamage,conditionPhotos},damageCase:b?.damageCase||null};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const vr=await client.query("select id,operational_state,current_odometer,current_fuel_battery from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);
+      if(!vr.rows[0])return null;
+      let handover=null,b=null;
+      if(bookingId&&['pickup','return'].includes(inspectionType)){
+        const bq=await client.query("select * from bookings where id=$1 and vehicle_id=$2 for update",[bookingId,vehicleId]);
+        b=bq.rows[0]||null;if(!b){const e=new Error('Booking does not match vehicle.');e.code='INSPECTION_BOOKING_MISMATCH';throw e;}
+      }
+      if(bookingId&&inspectionType==='return'){
+        const h=await client.query('select * from rental_handovers where booking_id=$1 and vehicle_id=$2 for update',[bookingId,vehicleId]);handover=h.rows[0]||null;
+        if(!handover){const e=new Error('Handover record is required before return inspection.');e.code='INSPECTION_PREREQUISITE_MISSING';throw e;}
+        if(!['RETURNED','INSPECTION','RETURN_REQUESTED'].includes(String(b.lifecycle_state||''))){const e=new Error('Booking is not ready for return inspection.');e.code='INSPECTION_PREREQUISITE_MISSING';throw e;}
+      }
+      const ins=await client.query('insert into vehicle_inspections(vehicle_id,booking_id,inspection_type,odometer,fuel_battery,exterior_condition,damage_notes,inspection_status,condition_photos,inspected_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *',[vehicleId,bookingId,inspectionType,odometer,fuelBattery,String(exteriorCondition||'').slice(0,2000),normalizedDamage,inspectionStatus,conditionPhotos,actorUserId]);
       let damageCase=null;
-      if(bookingId&&inspectionType==='return'&&normalizedDamage){const estimated=Math.max(0,Math.round(Number(arguments[0]?.estimatedAmountPaise)||0));void estimated;const dc=await client.query("insert into fleet_damage_cases(booking_id,vehicle_id,customer_id,inspection_id,description,evidence_photos,estimated_amount_paise,status) select b.id,b.vehicle_id,b.customer_id,$1,$2,$3,0,'reported' from bookings b where b.id=$4 returning *",[ins.rows[0].id,normalizedDamage,conditionPhotos,bookingId]);damageCase=dc.rows[0]||null;}
-      const next=inspectionStatus==='passed'&&!damageCase?'AVAILABLE':'MAINTENANCE';
-      await client.query('update vehicles set current_odometer=coalesce($2,current_odometer),current_fuel_battery=coalesce($3,current_fuel_battery),operational_state=$4,maintenance_required=$5,active=true,updated_at=now() where id=$1',[vehicleId,odometer,fuelBattery,next,next==='MAINTENANCE']);
-      if(bookingId&&inspectionType==='return') await client.query("update bookings set lifecycle_state=$2,updated_at=now() where id=$1",[bookingId,damageCase?'DAMAGE_REVIEW_REQUIRED':'INSPECTION']);
-      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,$4,$5,$6,$7)',[vehicleId,bookingId,actorUserId,'inspection_completed',vr.rows[0].operational_state,next,JSON.stringify({inspectionStatus,damageReported:Boolean(damageCase),handoverOdometer:handover?.odometer??null,returnOdometer:odometer??null,odometerDelta:handover?.odometer!=null&&odometer!=null?Number(odometer)-Number(handover.odometer):null,fuelDelta:handover?.fuel_battery!=null&&fuelBattery!=null?Number(fuelBattery)-Number(handover.fuel_battery):null})]);
+      if(b&&inspectionType==='return'&&(normalizedDamage||inspectionStatus==='damage_review')){
+        const dc=await client.query("insert into fleet_damage_cases(booking_id,vehicle_id,customer_id,inspection_id,description,evidence_photos,estimated_amount_paise,status) values($1,$2,$3,$4,$5,$6,$7,'reported') returning *",[bookingId,vehicleId,b.customer_id,ins.rows[0].id,normalizedDamage||'Damage review required',conditionPhotos,estimated]);
+        damageCase=dc.rows[0];
+      }
+      const nextVehicle=inspectionStatus==='failed'?'MAINTENANCE':'AVAILABLE';
+      await client.query('update vehicles set current_odometer=coalesce($2,current_odometer),current_fuel_battery=coalesce($3,current_fuel_battery),operational_state=$4,maintenance_required=$5,active=true,updated_at=now() where id=$1',[vehicleId,odometer,fuelBattery,nextVehicle,inspectionStatus==='failed']);
+      if(b&&inspectionType==='return'){
+        const damage=Boolean(damageCase);
+        const hasDeposit=Number(b.security_deposit_paise||0)>0;
+        const nextLifecycle=damage?'DAMAGE_REVIEW_REQUIRED':(hasDeposit?'INSPECTION':'COMPLETED');
+        const nextStatus=nextLifecycle==='COMPLETED'?'completed':'in_progress';
+        await client.query("update bookings set lifecycle_state=$2,status=$3,updated_at=now() where id=$1",[bookingId,nextLifecycle,nextStatus]);
+      }
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,$4,$5,$6,$7)',[vehicleId,bookingId,actorUserId,'inspection_completed',vr.rows[0].operational_state,nextVehicle,JSON.stringify({inspectionType,inspectionStatus,damageReported:Boolean(damageCase),estimatedAmountPaise:estimated,handoverOdometer:handover?.odometer??null,returnOdometer:odometer??null,odometerDelta:handover?.odometer!=null&&odometer!=null?Number(odometer)-Number(handover.odometer):null,fuelDelta:handover?.fuel_battery!=null&&fuelBattery!=null?Number(fuelBattery)-Number(handover.fuel_battery):null})]);
       await client.query('commit');return {vehicle:await getRideOnFleetVehicle(vehicleId),inspection:ins.rows[0],damageCase};
     }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
-
 
   async function assignFleetDeliveryStaff({bookingId,vehicleId,staffUserId,assignmentType='delivery',scheduledAt=null,actorUserId}) {
     const staff=await findCustomerById(staffUserId);if(!staff||staff.role!=='delivery_staff'){const e=new Error('Assigned user is not delivery staff.');e.code='INVALID_ASSIGNEE';throw e;}
@@ -812,7 +863,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function transitionRentalLifecycle({bookingId,nextState,actorUserId,actorRole,note=null}={}){
     const state=String(nextState||'').toUpperCase(); if(!RENTAL_LIFECYCLE.has(state)){const e=new Error('Invalid rental lifecycle state.');e.code='INVALID_RENTAL_STATE';throw e;}
-    if(!useDatabase){const b=memory.bookings.get(String(bookingId));if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}const current=String(b.lifecycleState||b.status==='confirmed'?'CONFIRMED':b.lifecycleState||'CONFIRMED').toUpperCase();if(current!==state&&!RENTAL_TRANSITIONS[current]?.has(state)){const e=new Error('Rental lifecycle transition is not allowed.');e.code='INVALID_RENTAL_TRANSITION';throw e;}b.lifecycleState=state;b.updatedAt=new Date().toISOString();return b;}
+    if(!useDatabase){const b=memory.bookings.get(String(bookingId));if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}const current=String(b.lifecycleState || (b.status==='completed' ? 'COMPLETED' : b.status==='in_progress' ? 'ACTIVE_RENTAL' : 'CONFIRMED')).toUpperCase();if(current!==state&&!RENTAL_TRANSITIONS[current]?.has(state)){const e=new Error('Rental lifecycle transition is not allowed.');e.code='INVALID_RENTAL_TRANSITION';throw e;}b.lifecycleState=state;b.updatedAt=new Date().toISOString();return b;}
     const client=await pool.connect();try{await client.query('begin');const q=await client.query('select id,status,lifecycle_state,vehicle_id from bookings where id=$1 for update',[bookingId]);if(!q.rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}const b=q.rows[0];const current=String(b.lifecycle_state||'CONFIRMED').toUpperCase();if(current!==state&&!RENTAL_TRANSITIONS[current]?.has(state)){const e=new Error('Rental lifecycle transition is not allowed.');e.code='INVALID_RENTAL_TRANSITION';throw e;}await client.query('update bookings set lifecycle_state=$2,updated_at=now() where id=$1',[bookingId,state]);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'lifecycle_transition\',$4,$5,$6)',[b.vehicle_id,bookingId,actorUserId||null,current,state,JSON.stringify({actorRole,note})]);await client.query('commit');return getBooking(bookingId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
@@ -839,10 +890,27 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();try{await client.query('begin');const q=await client.query('select b.id,b.customer_id,b.vehicle_id,b.lifecycle_state,v.operational_state from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and b.customer_id=$2 for update',[bookingId,customerId]);const b=q.rows[0];if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});if(!['ACTIVE_RENTAL','OVERDUE'].includes(String(b.lifecycle_state))||String(b.operational_state)!=='RENTED')throw Object.assign(new Error('Rental is not active.'),{code:'RETURN_NOT_ALLOWED'});await client.query("update bookings set lifecycle_state='RETURN_REQUESTED',return_requested_at=now(),return_location=$2,return_notes=$3,updated_at=now() where id=$1",[bookingId,returnLocation,notes]);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'return_requested\',$4,\'RETURN_REQUESTED\',$5)',[b.vehicle_id,bookingId,customerId,b.lifecycle_state,JSON.stringify({returnLocation,notes})]);await client.query('commit');return getBooking(bookingId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
-  async function recordRentalReturn({bookingId,staffUserId,returnLocation=null,odometer=null,fuelBattery=null,returnedCondition='',damageNotes='',notes='',evidencePhotos=[]}={}){
-    const staff=await findCustomerById(staffUserId);if(!['admin','support','delivery_staff'].includes(staff?.role))throw Object.assign(new Error('Operations staff access is required.'),{code:'FORBIDDEN'});
-    if(!useDatabase){const b=memory.bookings.get(String(bookingId));if(!b)return null;b.lifecycleState='INSPECTION';b.status='completed';b.vehicle.operationalState='INSPECTION';return b;}
-    const client=await pool.connect();try{await client.query('begin');const q=await client.query('select b.*,v.operational_state from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 for update',[bookingId]);const b=q.rows[0];if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});if(!['RETURN_REQUESTED','ACTIVE_RENTAL','OVERDUE'].includes(String(b.lifecycle_state))||String(b.operational_state)!=='RENTED')throw Object.assign(new Error('Vehicle is not currently in an active rental.'),{code:'RETURN_NOT_ALLOWED'});await client.query('insert into rental_returns(booking_id,vehicle_id,customer_id,staff_user_id,requested_at,returned_at,return_location,odometer,fuel_battery,returned_condition,damage_notes,notes,evidence_photos) values($1,$2,$3,$4,$5,now(),$6,$7,$8,$9,$10,$11,$12)',[bookingId,b.vehicle_id,b.customer_id,staffUserId,b.return_requested_at||null,returnLocation,odometer,fuelBattery,returnedCondition,damageNotes,notes,evidencePhotos]);await client.query("update vehicles set operational_state='INSPECTION',updated_at=now() where id=$1",[b.vehicle_id]);await client.query("update bookings set lifecycle_state='INSPECTION',status='completed',return_received_at=now(),updated_at=now() where id=$1",[bookingId]);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'return_received\',$4,\'INSPECTION\',$5)',[b.vehicle_id,bookingId,staffUserId,b.lifecycle_state,JSON.stringify({returnLocation,odometer,fuelBattery,damage:Boolean(String(damageNotes||'').trim())})]);await client.query('commit');return getBooking(bookingId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
+  async function recordRentalReturn({bookingId,staffUserId,returnLocation=null,odometer=null,fuelBattery=null,returnedCondition='',damageNotes='',notes='',evidencePhotos=[]}={}) {
+    const staff=await findCustomerById(staffUserId);
+    if(!['admin','support','delivery_staff'].includes(staff?.role))throw Object.assign(new Error('Operations staff access is required.'),{code:'FORBIDDEN'});
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId));if(!b)return null;
+      if(!['RETURN_REQUESTED','ACTIVE_RENTAL','OVERDUE'].includes(String(b.lifecycleState||'')) || String(b.vehicle?.operationalState||'')!=='RENTED')throw Object.assign(new Error('Vehicle is not currently in an active rental.'),{code:'RETURN_NOT_ALLOWED'});
+      b.returnReceivedAt=new Date().toISOString();b.returnLocation=returnLocation;b.lifecycleState='RETURNED';b.status='in_progress';b.vehicle.operationalState='INSPECTION';b.updatedAt=b.returnReceivedAt;
+      return b;
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const q=await client.query('select b.*,v.operational_state from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 for update',[bookingId]);
+      const b=q.rows[0];if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      if(!['RETURN_REQUESTED','ACTIVE_RENTAL','OVERDUE'].includes(String(b.lifecycle_state))||String(b.operational_state)!=='RENTED')throw Object.assign(new Error('Vehicle is not currently in an active rental.'),{code:'RETURN_NOT_ALLOWED'});
+      await client.query('insert into rental_returns(booking_id,vehicle_id,customer_id,staff_user_id,requested_at,returned_at,return_location,odometer,fuel_battery,returned_condition,damage_notes,notes,evidence_photos) values($1,$2,$3,$4,$5,now(),$6,$7,$8,$9,$10,$11,$12)',[bookingId,b.vehicle_id,b.customer_id,staffUserId,b.return_requested_at||null,returnLocation,odometer,fuelBattery,returnedCondition,damageNotes,notes,evidencePhotos]);
+      await client.query("update vehicles set operational_state='INSPECTION',updated_at=now() where id=$1",[b.vehicle_id]);
+      await client.query("update bookings set lifecycle_state='RETURNED',status='in_progress',return_received_at=now(),updated_at=now() where id=$1",[bookingId]);
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'return_received\',$4,\'RETURNED\',$5)',[b.vehicle_id,bookingId,staffUserId,b.lifecycle_state,JSON.stringify({returnLocation,odometer,fuelBattery,damage:Boolean(String(damageNotes||'').trim())})]);
+      await client.query('commit');return getBooking(bookingId);
+    }catch(e){try{await client.query('rollback')}catch{}finally{client.release();}throw e;}
   }
 
   async function markOverdueRentals(now=new Date()) {
@@ -1128,16 +1196,69 @@ export function createRepository({ databaseUrl, fleet }) {
     } catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
 
-  async function settleFleetSecurityDeposit({bookingId,actorUserId,deductionPaise=0,reason='',evidenceReference='',refundProviderReference=''}={}) {
-    const actor=await findCustomerById(actorUserId);if(!['admin','support'].includes(actor?.role)){const e=new Error('Fleet operations access is required.');e.code='FORBIDDEN';throw e;}
+  async function settleFleetSecurityDeposit({bookingId,actorUserId,deductionPaise=0,reason='',evidenceReference=''}={}) {
+    const actor=await findCustomerById(actorUserId);
+    if(!['admin','support'].includes(actor?.role)){const err=new Error('Fleet operations access is required.');err.code='FORBIDDEN';throw err;}
     const deduction=Math.max(0,Math.round(Number(deductionPaise)||0));
-    if(!useDatabase){const b=memory.bookings.get(String(bookingId));if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycleState||'')))throw Object.assign(new Error('Deposit can only be settled after inspection.'),{code:'DEPOSIT_SETTLEMENT_NOT_ALLOWED'});const d=memory.securityDeposits.get(String(bookingId));const original=Math.round(Number(d?.originalAmount??b.pricing?.securityDeposit??0)*100);const currentStatus=String(d?.status||'pending');if(['refunded','deducted'].includes(currentStatus))throw Object.assign(new Error('Deposit has already been settled.'),{code:'DEPOSIT_ALREADY_SETTLED'});if(deduction>original)throw Object.assign(new Error('Deposit deduction exceeds the collected deposit.'),{code:'DEPOSIT_DEDUCTION_INVALID'});if(deduction>0&&(!String(reason).trim()||!String(evidenceReference).trim()))throw Object.assign(new Error('Reason and evidence are required for a deduction.'),{code:'DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'});if(d){d.approvedDeduction=deduction/100;d.refundableAmount=(original-deduction)/100;d.status=deduction>0?'deducted':'refunded';d.refundProviderReference=String(refundProviderReference||'').trim()||undefined;}b.lifecycleState='COMPLETED';return {booking:b,deposit:{status:d?.status||'refunded',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:original-deduction}};}
-    const client=await pool.connect();try{await client.query('begin');const q=await client.query(`select b.id,b.customer_id,b.vehicle_id,b.lifecycle_state,b.security_deposit_paise,sd.status as deposit_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise from bookings b left join security_deposits sd on sd.booking_id=b.id where b.id=$1 for update`,[bookingId]);const b=q.rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycle_state))){const e=new Error('Deposit can only be settled after inspection.');e.code='DEPOSIT_SETTLEMENT_NOT_ALLOWED';throw e;}const original=Number(b.original_amount_paise??b.security_deposit_paise??0);if(['refunded','deducted'].includes(String(b.deposit_status))){const e=new Error('Deposit has already been settled.');e.code='DEPOSIT_ALREADY_SETTLED';throw e;}if(deduction>original){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}if(deduction>0&&(!String(reason).trim()||!String(evidenceReference).trim())){const e=new Error('Reason and evidence are required for a deduction.');e.code='DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED';throw e;}const refundable=original-deduction;if(!b.deposit_status){await client.query(`insert into security_deposits(booking_id,customer_id,original_amount_paise,refundable_amount_paise,approved_deduction_paise,status,deduction_reason,evidence_reference,refunded_at,updated_at) values($1,$2,$3,$4,$5,$6,$7,$8,case when $6='refunded' then now() else null end,now())`,[bookingId,b.customer_id,original,refundable,deduction,deduction>0?'deducted':'refunded',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null]);}else{await client.query(`update security_deposits set refundable_amount_paise=$2,approved_deduction_paise=$3,status=$4,deduction_reason=$5,evidence_reference=$6,inspected_at=coalesce(inspected_at,now()),inspected_by=$7,refunded_at=case when $4='refunded' then now() else refunded_at end,updated_at=now() where booking_id=$1 and status not in ('refunded','deducted')`,[bookingId,refundable,deduction,deduction>0?'deducted':'refunded',String(reason||'').trim()||null,String(evidenceReference||'').trim()||null,actorUserId]);}await client.query("update bookings set lifecycle_state='COMPLETED',updated_at=now() where id=$1",[bookingId]);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,next_state,details) values($1,$2,$3,$4,\'COMPLETED\',$5)',[b.vehicle_id,bookingId,actorUserId,deduction>0?'deposit_deduction':'deposit_release',JSON.stringify({deductionPaise:deduction,refundablePaise:refundable})]);await client.query('commit');return {booking:await getBooking(bookingId),deposit:{status:deduction>0?'deducted':'refunded',originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable}};}catch(e){try{await client.query('rollback')}catch{}finally{client.release();}throw e;}
+    const normalizedReason=String(reason||'').trim();
+    const evidence=String(evidenceReference||'').trim();
+    if(deduction>0&&(!normalizedReason||!evidence)){const err=new Error('Reason and evidence are required for a deduction.');err.code='DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED';throw err;}
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId));if(!b)throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycleState||'')))throw Object.assign(new Error('Deposit can only be settled after inspection.'),{code:'DEPOSIT_SETTLEMENT_NOT_ALLOWED'});
+      const d=memory.securityDeposits.get(String(bookingId));const original=Math.round(Number(d?.originalAmount??b.pricing?.securityDeposit??0)*100);const current=String(d?.status||'pending');
+      if(['refunded','deducted'].includes(current))throw Object.assign(new Error('Deposit has already been settled.'),{code:'DEPOSIT_ALREADY_SETTLED'});
+      if(deduction>original)throw Object.assign(new Error('Deposit deduction exceeds the collected deposit.'),{code:'DEPOSIT_DEDUCTION_INVALID'});
+      if(deduction>0&&b.lifecycleState==='DAMAGE_REVIEW_REQUIRED'&&String(b.damageCase?.status||'')!=='approved')throw Object.assign(new Error('A damage deduction requires an approved damage review.'),{code:'DAMAGE_APPROVAL_REQUIRED'});
+      const settlement={id:crypto.randomUUID(),bookingId:String(bookingId),customerId:String(b.customerId),originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:original-deduction,settlementType:deduction?'deduction':'release',status:'pending',requestedBy:String(actorUserId),reason:normalizedReason||null,evidenceReference:evidence||null,createdAt:new Date().toISOString()};
+      b.depositSettlement=settlement;if(d){d.approvedDeduction=deduction/100;d.refundableAmount=(original-deduction)/100;d.status='release_pending';}return {booking:b,deposit:{status:'pending',settlementId:settlement.id,originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:original-deduction,providerConfirmationRequired:true}};
+    }
+    const client=await pool.connect();try{
+      await client.query('begin');
+      const q=await client.query(`select b.id,b.customer_id,b.vehicle_id,b.lifecycle_state,b.security_deposit_paise,sd.status as deposit_status,sd.original_amount_paise,sd.refundable_amount_paise,sd.approved_deduction_paise
+        from bookings b left join security_deposits sd on sd.booking_id=b.id where b.id=$1 for update`,[bookingId]);
+      const b=q.rows[0];if(!b){const err=new Error('Booking not found.');err.code='BOOKING_NOT_FOUND';throw err;}
+      if(!['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycle_state))){const err=new Error('Deposit can only be settled after inspection.');err.code='DEPOSIT_SETTLEMENT_NOT_ALLOWED';throw err;}
+      const original=Number(b.deposit_status!=null?b.original_amount_paise:b.security_deposit_paise||0);
+      if(['refunded','deducted'].includes(String(b.deposit_status)))throw Object.assign(new Error('Deposit has already been settled.'),{code:'DEPOSIT_ALREADY_SETTLED'});
+      if(deduction>original)throw Object.assign(new Error('Deposit deduction exceeds the collected deposit.'),{code:'DEPOSIT_DEDUCTION_INVALID'});
+      if(deduction>0&&String(b.lifecycle_state)==='DAMAGE_REVIEW_REQUIRED'){
+        const damage=await client.query("select id,status,approved_deduction_paise from fleet_damage_cases where booking_id=$1 and status in ('approved','resolved') order by updated_at desc limit 1 for update",[bookingId]);
+        if(!damage.rows[0]||Number(damage.rows[0].approved_deduction_paise)!==deduction)throw Object.assign(new Error('A damage deduction requires an approved amount on the damage review.'),{code:'DAMAGE_APPROVAL_REQUIRED'});
+      }
+      const existing=await client.query("select id,status,original_amount_paise,approved_deduction_paise,refundable_amount_paise from security_deposit_settlements where booking_id=$1 and status in ('pending','submitted','confirmed') for update",[bookingId]);
+      if(existing.rows[0]){await client.query('commit');return {booking:await getBooking(bookingId),deposit:{status:existing.rows[0].status,settlementId:String(existing.rows[0].id),originalAmountPaise:Number(existing.rows[0].original_amount_paise),approvedDeductionPaise:Number(existing.rows[0].approved_deduction_paise),refundableAmountPaise:Number(existing.rows[0].refundable_amount_paise),providerConfirmationRequired:existing.rows[0].status!=='confirmed'}};}
+      const refundable=original-deduction;
+      const inserted=await client.query(`insert into security_deposit_settlements(booking_id,customer_id,original_amount_paise,approved_deduction_paise,refundable_amount_paise,settlement_type,status,provider,evidence_reference,reason,requested_by)
+        values($1,$2,$3,$4,$5,$6,'pending',$7,$8,$9,$10) returning id`,[bookingId,b.customer_id,original,deduction,refundable,deduction?'deduction':'release',process.env.PAYMENT_PROVIDER||null,evidence||null,normalizedReason||null,actorUserId]);
+      await client.query("update security_deposits set approved_deduction_paise=$2,refundable_amount_paise=$3,status='release_pending',deduction_reason=$4,evidence_reference=$5,inspected_at=coalesce(inspected_at,now()),inspected_by=$6,updated_at=now() where booking_id=$1 and status not in ('refunded','deducted')",[bookingId,deduction,refundable,normalizedReason||null,evidence||null,actorUserId]);
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'deposit_settlement_requested\',\'INSPECTION\',\'INSPECTION\',$4)',[b.vehicle_id,bookingId,actorUserId,JSON.stringify({settlementId:String(inserted.rows[0].id),deductionPaise:deduction,refundablePaise:refundable,providerConfirmationRequired:true})]);
+      await client.query('commit');
+      return {booking:await getBooking(bookingId),deposit:{status:'pending',settlementId:String(inserted.rows[0].id),originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable,providerConfirmationRequired:true}};
+    }catch(err){try{await client.query('rollback')}catch{}finally{client.release();}throw err;}
   }
 
+  async function confirmFleetSecurityDepositSettlement({settlementId,actorUserId,providerReference}={}) {
+    const actor=await findCustomerById(actorUserId);if(!['admin','support'].includes(actor?.role)){const err=new Error('Fleet operations access is required.');err.code='FORBIDDEN';throw err;}
+    const reference=String(providerReference||'').trim();if(!reference){const err=new Error('Provider confirmation reference is required.');err.code='DEPOSIT_PROVIDER_REFERENCE_REQUIRED';throw err;}
+    if(!useDatabase){const err=new Error('Provider settlement confirmation is only available with the authoritative payment database.');err.code='SETTLEMENT_DATABASE_REQUIRED';throw err;}
+    const client=await pool.connect();try{await client.query('begin');
+      const q=await client.query('select * from security_deposit_settlements where id=$1 for update',[settlementId]);const st=q.rows[0];if(!st)throw Object.assign(new Error('Settlement request not found.'),{code:'SETTLEMENT_NOT_FOUND'});
+      if(st.status==='confirmed'){await client.query('commit');return {settlementId:String(st.id),status:'confirmed',providerReference:st.provider_reference};}
+      if(!['pending','submitted'].includes(String(st.status)))throw Object.assign(new Error('Settlement is not awaiting provider confirmation.'),{code:'INVALID_SETTLEMENT_STATE'});
+      const sd=await client.query('select status from security_deposits where booking_id=$1 for update',[st.booking_id]);if(!sd.rows[0])throw Object.assign(new Error('Security deposit record not found.'),{code:'DEPOSIT_NOT_FOUND'});
+      if(['refunded','deducted'].includes(String(sd.rows[0].status)))throw Object.assign(new Error('Security deposit is already settled.'),{code:'DEPOSIT_ALREADY_SETTLED'});
+      await client.query("update security_deposit_settlements set status='confirmed',provider_reference=$2,confirmed_by=$3,confirmed_at=now(),updated_at=now() where id=$1",[settlementId,reference,actorUserId]);
+      const finalStatus=Number(st.approved_deduction_paise)>0?'deducted':'refunded';
+      await client.query("update security_deposits set status=$2,refund_provider_reference=$3,refunded_at=case when $2='refunded' then now() else refunded_at end,updated_at=now() where booking_id=$1",[st.booking_id,finalStatus,reference]);
+      await client.query("update bookings set lifecycle_state='COMPLETED',status='completed',updated_at=now() where id=$1",[st.booking_id]);
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values((select vehicle_id from bookings where id=$1),$1,$2,$3,\'INSPECTION\',\'COMPLETED\',$4)',[st.booking_id,actorUserId,finalStatus==='refunded'?'deposit_release_confirmed':'deposit_deduction_confirmed',JSON.stringify({settlementId:String(settlementId),providerReference:reference})]);
+      await client.query('commit');return {settlementId:String(st.id),status:'confirmed',providerReference:reference,finalDepositStatus:finalStatus,booking:await getBooking(st.booking_id)};
+    }catch(err){try{await client.query('rollback')}catch{}finally{client.release();}throw err;}
+  }
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
-    if (!['customer','vendor','support','admin'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
+    if (!['customer','vendor','support','admin','delivery_staff'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
 
     const placeholderPhone = () => 'supa-' + crypto.createHash('sha256').update(String(supabaseUserId)).digest('hex').slice(0,11);
 
@@ -1230,17 +1351,33 @@ export function createRepository({ databaseUrl, fleet }) {
       throw e;
     }
     if (!useDatabase) {
-      const vehicle = memory.vehicles.get(vehicleId) || fleet.find(v => v.id === vehicleId);
+      const vehicle = memory.vehicles.get(String(vehicleId)) || fleet.find(v => String(v.id) === String(vehicleId));
       if (!vehicle) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-      if (vehicle.active === false) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
-      const overlap = [...memory.bookings.values()].some(b => b.vehicleId===vehicleId && ['requested','confirmed','in_progress'].includes(b.status) && start < new Date(b.endAt) && end > new Date(b.startAt));
-      return { vehicleId:String(vehicleId), exists:true, active:true, available:!overlap };
+      const operationalState=String(vehicle.operationalState || 'AVAILABLE').toUpperCase();
+      if (vehicle.active === false || vehicle.maintenanceRequired === true || !['AVAILABLE'].includes(operationalState)) {
+        return { vehicleId:String(vehicleId), exists:vehicle.active !== false, active:vehicle.active !== false, available:false, operationalState };
+      }
+      const overlap = [...memory.bookings.values()].some(b =>
+        String(b.vehicleId)===String(vehicleId) &&
+        ['requested','confirmed','in_progress'].includes(String(b.status)) &&
+        start < new Date(b.endAt) && end > new Date(b.startAt)
+      );
+      return { vehicleId:String(vehicleId), exists:true, active:true, available:!overlap, operationalState };
     }
-    const vehicleResult = await pool.query('select id,active from vehicles where id=$1',[vehicleId]);
+    const vehicleResult = await pool.query(
+      "select id,active,operational_state,maintenance_required from vehicles where id=$1",
+      [vehicleId]
+    );
     if (!vehicleResult.rows[0]) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-    if (!vehicleResult.rows[0].active) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
-    const bookingResult = await pool.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",[vehicleId,startAt,endAt]);
-    return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0 };
+    const vr=vehicleResult.rows[0];
+    if (!vr.active || vr.maintenance_required || String(vr.operational_state || 'AVAILABLE') !== 'AVAILABLE') {
+      return { vehicleId:String(vehicleId), exists:true, active:Boolean(vr.active), available:false, operationalState:String(vr.operational_state || 'AVAILABLE') };
+    }
+    const bookingResult = await pool.query(
+      "select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",
+      [vehicleId,startAt,endAt]
+    );
+    return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0, operationalState:String(vr.operational_state || 'AVAILABLE') };
   }
 
   async function createBooking(input) {
@@ -1316,31 +1453,36 @@ export function createRepository({ databaseUrl, fleet }) {
   const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(actorId, bookingId, { actorRole='vendor' } = {}) {
-    const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
+    const now=new Date();
+    const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
+    const opsActor=actorRole!=='vendor';
     if(!useDatabase){
       const b=memory.bookings.get(String(bookingId));
-      if(actorRole==='vendor' && (!b||String(b.vendorId)!==String(actorId))){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-      if(b.status!=='confirmed'){const e=new Error('Delivery can only start after the booking is confirmed.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
+      if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(actorRole==='vendor' && String(b.vendorId||'')!==String(actorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(b.status!=='confirmed' || !['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP'].includes(String(b.lifecycleState||'CONFIRMED'))){const e=new Error('Delivery can only start for a confirmed booking.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
       if(!b.delivery||b.deliveryLatitude==null||b.deliveryLongitude==null){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
       if(!['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
       if([...memory.trackingSessions.values()].some(x=>String(x.bookingId)===String(bookingId)&&x.status==='active')){const e=new Error('Delivery tracking is already active.');e.code='DELIVERY_ALREADY_ACTIVE';throw e;}
-      const session={id:crypto.randomUUID(),bookingId:String(bookingId),vendorId:actorRole==='vendor'?String(actorId):null,staffUserId:actorRole!=='vendor'?String(actorId):null,status:'active',startedAt:now.toISOString(),endedAt:null,lastLatitude:null,lastLongitude:null,lastAccuracyMeters:null,lastLocationAt:null,lastRouteDistanceMeters:null,lastRouteDurationSeconds:null,lastRouteAt:null,expiresAt:expiresAt.toISOString()};
-      memory.trackingSessions.set(session.id,session);b.deliveryStatus='in_delivery';b.deliveryStartedAt=session.startedAt;b.updatedAt=now.toISOString();return session;
+      const session={id:crypto.randomUUID(),bookingId:String(bookingId),vendorId:opsActor?null:String(actorId),staffUserId:opsActor?String(actorId):null,status:'active',startedAt:now.toISOString(),endedAt:null,lastLatitude:null,lastLongitude:null,lastAccuracyMeters:null,lastLocationAt:null,lastRouteDistanceMeters:null,lastRouteDurationSeconds:null,lastRouteAt:null,expiresAt:expiresAt.toISOString()};
+      memory.trackingSessions.set(session.id,session);b.deliveryStatus='in_delivery';b.deliveryStartedAt=session.startedAt;b.lifecycleState='DELIVERY_STARTED';b.updatedAt=now.toISOString();return session;
     }
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query(`select b.id,b.status,b.payment_status,b.delivery_required,b.delivery_address,b.delivery_latitude,b.delivery_longitude,v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 ${actorRole==='vendor'?'and v.owner_id=$2':''} for update`,actorRole==='vendor'?[bookingId,actorId]:[bookingId]);
+      const actorClause=actorRole==='vendor'?'and v.owner_id=$2':'';
+      const args=actorRole==='vendor'?[bookingId,actorId]:[bookingId];
+      const {rows}=await client.query(`select b.id,b.status,b.lifecycle_state,b.payment_status,b.delivery_required,b.delivery_address,b.delivery_latitude,b.delivery_longitude,v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 ${actorClause} for update`,args);
       const b=rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-      if(b.status!=='confirmed'){const e=new Error('Delivery can only start after the booking is confirmed.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
+      if(b.status!=='confirmed' || !['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP'].includes(String(b.lifecycle_state||'CONFIRMED'))){const e=new Error('Delivery can only start for a confirmed booking.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
       if(!b.delivery_required||b.delivery_latitude==null||b.delivery_longitude==null||!String(b.delivery_address||'').trim()){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
       if(!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
       const active=await client.query("select id from tracking_sessions where booking_id=$1 and status='active' for update",[bookingId]);if(active.rows[0]){const e=new Error('Delivery tracking is already active.');e.code='DELIVERY_ALREADY_ACTIVE';throw e;}
-      const {rows:created}=await client.query("insert into tracking_sessions(booking_id,vendor_id,staff_user_id,status,expires_at) values($1,$2,$3,'active',$4) returning *",[bookingId,actorRole==='vendor'?actorId:null,actorRole!=='vendor'?actorId:null,expiresAt]);
-      await client.query("update bookings set delivery_status='in_delivery',delivery_started_at=now(),updated_at=now() where id=$1",[bookingId]);
+      const {rows:created}=await client.query("insert into tracking_sessions(booking_id,vendor_id,staff_user_id,status,expires_at) values($1,$2,$3,'active',$4) returning *",[bookingId,actorRole==='vendor'?actorId:null,actorRole==='vendor'?null:actorId,expiresAt]);
+      await client.query("update bookings set delivery_status='in_delivery',delivery_started_at=now(),lifecycle_state='DELIVERY_STARTED',updated_at=now() where id=$1",[bookingId]);
       await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,$3,$4,'delivery_started')",[bookingId,b.status,actorRole==='vendor'?'vendor':'ops',actorId]);
       await client.query('commit');return mapTrackingSession(created[0]);
-    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+    }catch(error){try{await client.query('rollback')}catch{}throw error;}finally{client.release();}
   }
 
   async function updateDeliveryLocation(actorId, bookingId, {latitude,longitude,accuracyMeters,recordedAt}={}) {
@@ -1412,9 +1554,9 @@ export function createRepository({ databaseUrl, fleet }) {
     const finalLat=latitude==null?null:Number(latitude),finalLon=longitude==null?null:Number(longitude);
     if((finalLat==null)!==(finalLon==null)||finalLat!=null&&(!Number.isFinite(finalLat)||finalLat<-90||finalLat>90)||finalLon!=null&&(!Number.isFinite(finalLon)||finalLon<-180||finalLon>180)){const e=new Error('Invalid final delivery location.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
     if(!useDatabase){
-      const b=memory.bookings.get(String(bookingId));if(!b||String(b.vendorId)!==String(actorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const b=memory.bookings.get(String(bookingId));if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&((x.vendorId && String(x.vendorId)===String(actorId)) || (x.staffUserId && String(x.staffUserId)===String(actorId)))&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
-      const now=new Date().toISOString();session.status='completed';session.endedAt=now;if(finalLat!=null){session.lastLatitude=finalLat;session.lastLongitude=finalLon;session.lastLocationAt=now;}b.deliveryStatus='delivered';b.deliveredAt=now;b.deliveryFinalLatitude=finalLat??session.lastLatitude;b.deliveryFinalLongitude=finalLon??session.lastLongitude;b.updatedAt=now;return {booking:b,session};
+      const now=new Date().toISOString();session.status='completed';session.endedAt=now;if(finalLat!=null){session.lastLatitude=finalLat;session.lastLongitude=finalLon;session.lastLocationAt=now;}b.deliveryStatus='delivered';b.deliveredAt=now;b.deliveryFinalLatitude=finalLat??session.lastLatitude;b.deliveryFinalLongitude=finalLon??session.lastLongitude;b.lifecycleState='READY_FOR_PICKUP';b.updatedAt=now;return {booking:b,session};
     }
     const client=await pool.connect();
     try{
@@ -1425,7 +1567,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if(ts.booking_status!=='confirmed'){const e=new Error('Delivery can no longer be completed.');e.code='DELIVERY_COMPLETION_NOT_ALLOWED';throw e;}
       const lat=finalLat??(ts.last_latitude==null?null:Number(ts.last_latitude)),lon=finalLon??(ts.last_longitude==null?null:Number(ts.last_longitude));
       await client.query("update tracking_sessions set status='completed',ended_at=now(),last_latitude=coalesce($2,last_latitude),last_longitude=coalesce($3,last_longitude),last_location_at=case when $2 is not null then now() else last_location_at end where id=$1",[ts.id,lat,lon]);
-      await client.query("update bookings set delivery_status='delivered',delivered_at=now(),delivery_final_latitude=$2,delivery_final_longitude=$3,updated_at=now() where id=$1",[bookingId,lat,lon]);
+      await client.query("update bookings set delivery_status='delivered',delivered_at=now(),delivery_final_latitude=$2,delivery_final_longitude=$3,lifecycle_state='READY_FOR_PICKUP',updated_at=now() where id=$1",[bookingId,lat,lon]);
       await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,'ops',$3,'delivery_completed')",[bookingId,ts.booking_status,actorId]);
       await client.query('commit');const latest=await getBooking(bookingId);return {booking:latest,session:mapTrackingSession({...ts,status:'completed',ended_at:now.toISOString(),last_latitude:lat,last_longitude:lon,last_location_at:lat!=null?now.toISOString():ts.last_location_at})};
     }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
@@ -1563,6 +1705,10 @@ export function createRepository({ databaseUrl, fleet }) {
       const paymentRecord = event.providerOrderId
         ? [...memory.payments.values()].find(p => p.providerOrderId === String(event.providerOrderId))
         : memory.payments.get(String(resolvedBookingId));
+      if (event.status === 'paid' && String(booking.status) === 'requested') {
+        booking.status = 'confirmed';
+        booking.lifecycleState = 'CONFIRMED';
+      }
       if (event.status==='paid') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='held'; }
       if (event.status==='refund_pending') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) deposit.status='refund_pending'; }
       if (event.status==='refunded') { const deposit=memory.securityDeposits.get(String(resolvedBookingId)); if(deposit) { deposit.status='refunded'; deposit.refundProviderReference=event.providerReference; } }
@@ -1602,7 +1748,7 @@ export function createRepository({ databaseUrl, fleet }) {
       }
       const expectedTotalPaise = fleetOrder ? Number(fleetOrder.total_paise) : Number(booking.total_paise);
       const currentPaymentStatus = fleetOrder ? String(fleetOrder.payment_status) : String(booking.payment_status);
-      if (event.status==='paid' && (fleetOrder ? fleetOrder.status !== 'requested' : !['requested','confirmed'].includes(String(booking.status)))) {
+      if (event.status==='paid' && (fleetOrder ? !['requested','confirmed'].includes(String(fleetOrder.status)) : !['requested','confirmed'].includes(String(booking.status)))) {
         await client.query('rollback'); return { applied:false, duplicate:false, invalid:true };
       }
       if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedTotalPaise || Number(event.amountPaise) !== Number(payment.amount_paise) || !event.providerReference || !canTransition(currentPaymentStatus, event.status)) {
@@ -1617,13 +1763,20 @@ export function createRepository({ databaseUrl, fleet }) {
       await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[resolvedBookingId,event.status,event.providerReference]);
       await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
       if(fleetOrder){
-        await client.query('update fleet_orders set payment_status=$2,updated_at=now() where id=$1',[fleetOrder.id,event.status]);
-        await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where fleet_order_id=$1',[fleetOrder.id,event.status,event.providerReference]);
+        await client.query('update fleet_orders set payment_status=$2,status=case when $2='paid' and status='requested' then 'confirmed' else status end,updated_at=now() where id=$1',[fleetOrder.id,event.status]);
+        await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,status=case when $2='paid' and status='requested' then 'confirmed' else status end,lifecycle_state=case when $2='paid' and status='requested' then 'CONFIRMED' else lifecycle_state end,updated_at=now() where fleet_order_id=$1',[fleetOrder.id,event.status,event.providerReference]);
         if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('pending','held')",[fleetOrder.id]);
         if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','refund_pending')",[fleetOrder.id]);
         if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id in (select booking_id from fleet_order_items where fleet_order_id=$1) and status in ('held','refund_pending','release_pending')",[fleetOrder.id,event.providerReference]);
       }else{
-        if(event.status==='paid') await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
+        if(event.status==='paid') {
+          const fleetVehicle=await client.query("select coalesce(fleet_vehicle_class,'') as fleet_vehicle_class,coalesce(operational_state,'AVAILABLE') as operational_state,coalesce(maintenance_required,false) as maintenance_required,owner_id from vehicles where id=(select vehicle_id from bookings where id=$1)",[resolvedBookingId]);
+          const ownFleet=['bike','scooter'].includes(String(fleetVehicle.rows[0]?.fleet_vehicle_class||'')) || (!fleetVehicle.rows[0]?.owner_id && String(fleetVehicle.rows[0]?.operational_state||'AVAILABLE')!=='INACTIVE');
+          if(ownFleet) {
+            await client.query("update bookings set status=case when status='requested' then 'confirmed' else status end,lifecycle_state=case when status='requested' then 'CONFIRMED' else lifecycle_state end,updated_at=now() where id=$1",[resolvedBookingId]);
+          }
+          await client.query("update security_deposits set status='held',updated_at=now() where booking_id=$1 and status in ('pending','held')",[resolvedBookingId]);
+        }
         if(event.status==='refund_pending') await client.query("update security_deposits set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('held','refund_pending')",[resolvedBookingId]);
         if(event.status==='refunded') await client.query("update security_deposits set status='refunded',refund_provider_reference=$2,refunded_at=now(),updated_at=now() where booking_id=$1 and status in ('held','refund_pending','release_pending')",[resolvedBookingId,event.providerReference]);
       }
@@ -2854,7 +3007,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
 
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
-    if (!['customer','vendor','support','admin'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
+    if (!['customer','vendor','support','admin','delivery_staff'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
 
     const placeholderPhone = () => 'supa-' + crypto.createHash('sha256').update(String(supabaseUserId)).digest('hex').slice(0,11);
 
@@ -9290,5 +9443,5 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getRideOnFleetDashboard,listRideOnFleetAdmin,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listAssignedDeliveryJobs,prepareVehicleHandover,requestRentalReturn,recordRentalReturn,markOverdueRentals,getFleetBookingOperations,settleFleetSecurityDeposit,confirmFleetSecurityDepositSettlement,getRentalBookingForCustomer,getRideOnFleetVehicle,listRideOnFleet,listVendorCustomerReviewsForBooking,createReview,getReviewStatus,updateReview,listReviews,listReviewsReceived};
 }
