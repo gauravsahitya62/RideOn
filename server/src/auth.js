@@ -20,7 +20,7 @@ export function createAuth({ jwtSecret, accessTokenTtlSeconds = 3600, bcryptRoun
     if (!token) return res.status(401).json({ error: { code: 'AUTH_REQUIRED', message: 'Authentication required.' } });
     try {
       const payload = jwt.verify(token, secret, { issuer, audience });
-      if (!payload?.sub || !['customer', 'vendor'].includes(payload.role) || payload.authEnvironment !== environment) throw new Error('invalid claims');
+      if (!payload?.sub || !['customer','vendor','support','admin','delivery_staff'].includes(payload.role) || payload.authEnvironment !== environment) throw new Error('invalid claims');
       req.user = { id: String(payload.sub), role: payload.role };
       next();
     } catch {
