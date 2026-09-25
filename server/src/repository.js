@@ -810,6 +810,7 @@
         const vehicleCheck = await client.query('select id, owner_id, active from vehicles where id=$1 for share',[input.vehicle.id]);
         if (!vehicleCheck.rows[0]) { const x=new Error('vehicle not found'); x.code='VEHICLE_NOT_FOUND'; throw x; }
         if (!vehicleCheck.rows[0].active) { const x=new Error('vehicle inactive'); x.code='VEHICLE_INACTIVE'; throw x; }
+        if (String(vehicleCheck.rows[0].operational_state || 'AVAILABLE') !== 'AVAILABLE') { const x=new Error('vehicle is not operationally available'); x.code='VEHICLE_UNAVAILABLE'; throw x; }
         let serviceLocation=null;
         if(vehicleCheck.rows[0].owner_id){
           const locationResult=await client.query('select service_latitude,service_longitude,service_address from vendors where id=$1 and status=\'active\'',[vehicleCheck.rows[0].owner_id]);
