@@ -893,6 +893,36 @@ app.get('/api/v1/vendor/bookings/:id/customer-reviews', supabaseRequireAuth, req
   }catch(error){res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load customer rating history right now. Please retry.'}});}
 });
 
+app.get('/api/v1/vendor/fleet-orders', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const limit=Math.min(50,Math.max(1,Number(req.query.limit)||20));
+    const offset=Math.max(0,Number(req.query.offset)||0);
+    const orders=await repository.listVendorFleetOrders(req.vendor.id,{limit,offset});
+    res.json({orders,data:orders,pagination:{limit,offset,count:orders.length}});
+  }catch(error){res.status(503).json({error:{code:'FLEET_ORDERS_UNAVAILABLE',message:'Grouped fleet bookings are temporarily unavailable. Please retry.'}});}
+});
+
+app.get('/api/v1/vendor/fleet-orders/:id', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const orders=await repository.listVendorFleetOrders(req.vendor.id,{limit:50,offset:0});
+    const order=orders.find(x=>String(x.id)===String(req.params.id));
+    if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
+    res.json({order});
+  }catch(error){res.status(503).json({error:{code:'FLEET_ORDER_UNAVAILABLE',message:'Fleet booking is temporarily unavailable. Please retry.'}});}
+});
+
+app.patch('/api/v1/vendor/fleet-orders/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['confirmed','rejected','cancelled','in_progress','completed']),note:z.string().trim().max(500).optional()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid grouped booking status.',details:parsed.error.flatten()}});
+  try{
+    const order=await repository.updateFleetOrderStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
+    res.json({order});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,INVALID_BOOKING_STATUS:400,INVALID_BOOKING_TRANSITION:409,PAYMENT_REQUIRED_FOR_ACCEPTANCE:409,DELIVERY_NOT_COMPLETED:409,REJECTION_REASON_REQUIRED:400};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_ORDER_STATUS_FAILED',message:error?.code==='PAYMENT_REQUIRED_FOR_ACCEPTANCE'?'Payment must be confirmed before accepting the grouped booking.':error?.code==='DELIVERY_NOT_COMPLETED'?'Complete delivery for every vehicle before completing the grouped booking.':error?.code==='REJECTION_REASON_REQUIRED'?'A rejection reason is required.':'We could not update the grouped booking right now. Please retry.'}});
+  }
+});
+
 app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
   const parsed=z.object({status:z.enum(['confirmed','rejected','cancelled','in_progress','completed']),note:z.string().trim().max(500).optional()}).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid booking status.',details:parsed.error.flatten()}});
