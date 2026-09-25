@@ -78,3 +78,24 @@ Payment-provider-specific verification depends on the provider adapter being cor
 Vendor service coordinates are required by the marketplace map contract and therefore remain visible to users of that workflow. Vendors should not store a private/home location as a public service point.
 
 Authorized customers receive live GPS during an active delivery. A final production privacy policy should define retention/deletion of historical tracking data before broad rollout.
+
+
+## Follow-up security hardening — 2026-09-25
+
+| Severity | Component | Finding | Root cause | Fix | Test / validation |
+|---|---|---|---|---|---|
+| MEDIUM | Vendor/customer privacy | A vendor could retrieve a customer's review history from unrelated bookings after opening one of that customer's completed bookings. | The vendor endpoint loaded all reviews received by the customer instead of scoping the query to the authorized booking. | Added a repository method that enforces vendor ownership of the requested booking and returns only reviews attached to that booking; the endpoint now uses that method. | New regression test covers the booking-scoped history boundary. |
+| MEDIUM | Authentication error privacy | OTP provider error text/status fields could be surfaced to API callers. | Auth handlers passed through provider messages and provider-specific fields. | OTP request and verification responses now use generic client-facing failure messages; provider details stay server-side. | Source validation confirms provider fields are not returned. |
+| MEDIUM | Payment abuse | Payment order creation and provider verification had only the global API throttle. | Financial endpoints did not have a tighter operation-specific limit. | Added a 20 requests/minute payment-operation limiter to create-order and verification. | Source validation confirms both routes use the dedicated limiter. |
+| LOW | API abuse/input | Vehicle IDs and several map/search query values were not consistently bounded at the HTTP boundary. | Client-controlled strings could pass into repository/provider paths without matching length caps. | Vehicle IDs capped at 64 characters; city/address and vehicle-search filters receive bounded input. | New oversized vehicle-ID regression test plus source validation. |
+| LOW | Privacy | Pickup-only bookings could persist delivery GPS supplied by a caller even though no delivery workflow existed. | Coordinate normalization happened before applying the delivery flag. | Delivery coordinates are persisted only when delivery is enabled. | New pickup-only GPS privacy regression test. |
+| MEDIUM | In-memory financial lifecycle | Refund idempotency could crash in memory mode. | Refund logic referenced an uninitialized `financialTransactions` map. | Initialized the in-memory financial transaction map. | Source validation confirms the map exists before refund operations use it. |
+| LOW | Authentication logging | Registration diagnostics logged the authenticated account email. | Identity-link logging included the Supabase email for correlation. | Removed the email from that log event while retaining non-secret request correlation and account-type information. | Source validation confirms the identity-link event no longer logs email. |
+
+## Follow-up validation
+
+The server test source contains 57 tests after the added security regressions. The repository's API workflow is configured for both memory and PostgreSQL migration/test jobs. The GitHub connector did not expose a push-triggered workflow result for the latest security commit, so a passing CI/build result is not claimed here.
+
+No database migration was added or modified; all follow-up fixes are application/repository-layer changes.
+
+The repository-level secret scan performed during this audit returned no committed matches for the checked private-key, service-role, payment-secret, JWT-secret, or Google API-key patterns. This does not substitute for rotating credentials that may have been exposed outside Git history.
