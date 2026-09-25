@@ -1229,7 +1229,7 @@
   async function abortDelivery(vendorId, bookingId, {actorRole='vendor'}={}) {
     if(!useDatabase){
       const b=memory.bookings.get(String(bookingId));if(!b || (actorRole==='vendor' ? String(b.vendorId)!==String(vendorId) : false)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&((x.vendorId&&String(x.vendorId)===String(vendorId))||(x.staffUserId&&String(x.staffUserId)===String(vendorId)))&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       session.status='aborted';session.endedAt=new Date().toISOString();b.deliveryStatus='aborted';b.updatedAt=new Date().toISOString();return {booking:b,session};
     }
     const client=await pool.connect();
