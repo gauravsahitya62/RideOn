@@ -1451,12 +1451,20 @@ export function createRepository({ databaseUrl, fleet }) {
       if (vehicle.active === false || vehicle.maintenanceRequired === true || !['AVAILABLE'].includes(operationalState)) {
         return { vehicleId:String(vehicleId), exists:vehicle.active !== false, active:vehicle.active !== false, available:false, operationalState };
       }
-      const overlap = [...memory.bookings.values()].some(b =>
+      for (const reservation of memory.vehicleReservations.values()) {
+        if (reservation.status==='active' && new Date(reservation.expiresAt)<=new Date()) reservation.status='expired';
+      }
+      const bookingOverlap = [...memory.bookings.values()].some(b =>
         String(b.vehicleId)===String(vehicleId) &&
         ['requested','confirmed','in_progress'].includes(String(b.status)) &&
         start < new Date(b.endAt) && end > new Date(b.startAt)
       );
-      return { vehicleId:String(vehicleId), exists:true, active:true, available:!overlap, operationalState };
+      const reservationOverlap = [...memory.vehicleReservations.values()].some(r =>
+        String(r.vehicleId)===String(vehicleId) &&
+        r.status==='active' && new Date(r.expiresAt)>new Date() &&
+        start < new Date(r.endAt) && end > new Date(r.startAt)
+      );
+      return { vehicleId:String(vehicleId), exists:true, active:true, available:!bookingOverlap && !reservationOverlap, operationalState };
     }
     const vehicleResult = await pool.query(
       "select id,active,operational_state,maintenance_required from vehicles where id=$1",
@@ -1467,11 +1475,16 @@ export function createRepository({ databaseUrl, fleet }) {
     if (!vr.active || vr.maintenance_required || String(vr.operational_state || 'AVAILABLE') !== 'AVAILABLE') {
       return { vehicleId:String(vehicleId), exists:true, active:Boolean(vr.active), available:false, operationalState:String(vr.operational_state || 'AVAILABLE') };
     }
+    await pool.query("update rideon_vehicle_reservations set status='expired',updated_at=now() where status='active' and expires_at<=now()");
     const bookingResult = await pool.query(
       "select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",
       [vehicleId,startAt,endAt]
     );
-    return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0, operationalState:String(vr.operational_state || 'AVAILABLE') };
+    const reservationResult = await pool.query(
+      "select 1 from rideon_vehicle_reservations where vehicle_id=$1 and status='active' and expires_at>now() and start_at<$3 and end_at>$2 limit 1",
+      [vehicleId,startAt,endAt]
+    );
+    return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0 && reservationResult.rowCount === 0, operationalState:String(vr.operational_state || 'AVAILABLE') };
   }
 
   async function createBooking(input) {
