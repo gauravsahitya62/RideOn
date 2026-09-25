@@ -156,6 +156,7 @@ export const rideOnApi = {
   createFleetOpsInspection: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/inspection`, { method:'POST', body:JSON.stringify(payload) }),
   settleFleetDeposit: (bookingId,payload) => request(`/api/v1/fleet-ops/bookings/${encode(bookingId)}/deposit/settle`, { method:'POST', body:JSON.stringify(payload) }),
   getFleetOpsDashboard: () => request('/api/v1/fleet-ops/dashboard'),
+  updateFleetDamageCase: (caseId,payload) => request(`/api/v1/fleet-ops/damage-cases/${encode(caseId)}`, { method:'PATCH', body:JSON.stringify(payload) }),
   listFleetOpsBookings: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/fleet-ops/bookings${query?`?${query}`:''}`); },
   getRentalInspection: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/inspection`),
   listNotifications: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/notifications${query?`?${query}`:''}`); },
