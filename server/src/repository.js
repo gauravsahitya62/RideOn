@@ -1156,12 +1156,15 @@ export function createRepository({ databaseUrl, fleet }) {
     if (!useDatabase) {
       if (memory.paymentEvents.has(event.eventId)) return { applied:false, duplicate:true };
       const payment = event.providerOrderId ? [...memory.payments.values()].find(p => p.providerOrderId === String(event.providerOrderId)) : (event.bookingId ? memory.payments.get(String(event.bookingId)) : null);
-      const resolvedBookingId = event.bookingId || payment?.bookingId;
+      const resolvedBookingId = payment?.bookingId;
       const booking = resolvedBookingId ? memory.bookings.get(String(resolvedBookingId)) : null;
       if (!booking || !payment) return { applied:false, duplicate:false, invalid:true };
+      // Provider order/payment and booking must remain bound; never let a webhook
+      // choose a different booking via a client/provider-supplied bookingId.
+      if (event.bookingId && String(event.bookingId) !== String(payment.bookingId)) return { applied:false, duplicate:false, invalid:true };
+      if (event.providerOrderId && payment.providerOrderId !== String(event.providerOrderId)) return { applied:false, duplicate:false, invalid:true };
       // Persist the first valid event before mutating booking/payment state so a retry is a strict replay.
 
-      if (event.providerOrderId && payment.providerOrderId !== String(event.providerOrderId)) return { applied:false, duplicate:false, invalid:true };
       const expectedPaise = Math.round(Number(booking.pricing?.total || 0) * 100);
       if (event.status==='paid' && !['requested','confirmed'].includes(String(booking.status))) return { applied:false, duplicate:false, invalid:true };
       if (event.currency !== 'INR' || Number(event.amountPaise) !== expectedPaise || !event.providerReference || !canTransition(booking.paymentStatus || 'unpaid', event.status)) {
@@ -1195,7 +1198,8 @@ export function createRepository({ databaseUrl, fleet }) {
           : { rows: [] };
       if (!paymentResult.rows[0]) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
       const payment = paymentResult.rows[0];
-      const resolvedBookingId = event.bookingId || String(payment.booking_id);
+      const resolvedBookingId = String(payment.booking_id);
+      if (event.bookingId && String(event.bookingId) !== resolvedBookingId) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
       if (event.providerOrderId && String(payment.provider_order_id) !== String(event.providerOrderId)) { await client.query('rollback'); return { applied:false, duplicate:false, invalid:true }; }
       const bookingResult = await client.query('select id,payment_status,total_paise from bookings where id=$1 for update',[resolvedBookingId]);
       if (!bookingResult.rows[0]) {
