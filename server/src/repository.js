@@ -827,8 +827,10 @@ export function createRepository({ databaseUrl, fleet }) {
         if(!['RETURNED','INSPECTION'].includes(String(b.lifecycleState||''))&&String(b.lifecycleState||'')!=='RETURN_REQUESTED')throw Object.assign(new Error('Vehicle is not ready for return inspection.'),{code:'INSPECTION_PREREQUISITE_MISSING'});
       }
       v.currentOdometer=odometer??v.currentOdometer;v.currentFuelBattery=fuelBattery??v.currentFuelBattery;
-      v.operationalState=inspectionStatus==='failed'?'MAINTENANCE':'AVAILABLE';v.maintenanceRequired=inspectionStatus==='failed';
       const b=bookingId?memory.bookings.get(String(bookingId)):null;
+      const hasDeposit=Boolean(b&&Number(b.pricing?.securityDeposit||0)>0);
+      const damagePending=Boolean(b&&inspectionType==='return'&&normalizedDamage)||inspectionStatus==='damage_review';
+      v.operationalState=inspectionStatus==='failed'?'MAINTENANCE':(inspectionType==='return'&&(hasDeposit||damagePending)?'INSPECTION':'AVAILABLE');v.maintenanceRequired=inspectionStatus==='failed';
       if(b&&inspectionType==='return'){
         const prior=String(b.lifecycleState||'INSPECTION');
         const damage=Boolean(normalizedDamage)||inspectionStatus==='damage_review';
@@ -862,7 +864,8 @@ export function createRepository({ databaseUrl, fleet }) {
         const dc=await client.query("insert into fleet_damage_cases(booking_id,vehicle_id,customer_id,inspection_id,description,evidence_photos,estimated_amount_paise,status) values($1,$2,$3,$4,$5,$6,$7,'reported') returning *",[bookingId,vehicleId,b.customer_id,ins.rows[0].id,normalizedDamage||'Damage review required',conditionPhotos,estimated]);
         damageCase=dc.rows[0];
       }
-      const nextVehicle=inspectionStatus==='failed'?'MAINTENANCE':'AVAILABLE';
+      let nextVehicle=inspectionStatus==='failed'?'MAINTENANCE':'AVAILABLE';
+      if(b&&inspectionType==='return'&&inspectionStatus!=='failed'&&(Boolean(damageCase)||Number(b.security_deposit_paise||0)>0))nextVehicle='INSPECTION';
       await client.query('update vehicles set current_odometer=coalesce($2,current_odometer),current_fuel_battery=coalesce($3,current_fuel_battery),operational_state=$4,maintenance_required=$5,active=true,updated_at=now() where id=$1',[vehicleId,odometer,fuelBattery,nextVehicle,inspectionStatus==='failed']);
       if(b&&inspectionType==='return'){
         const damage=Boolean(damageCase);
@@ -1286,6 +1289,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const finalStatus=Number(st.approved_deduction_paise)>0?'deducted':'refunded';
       await client.query("update security_deposits set status=$2,refund_provider_reference=$3,refunded_at=case when $2='refunded' then now() else refunded_at end,updated_at=now() where booking_id=$1",[st.booking_id,finalStatus,reference]);
       await client.query("update bookings set lifecycle_state='COMPLETED',status='completed',updated_at=now() where id=$1",[st.booking_id]);
+      await client.query("update vehicles set operational_state='AVAILABLE',maintenance_required=false,active=true,updated_at=now() where id=(select vehicle_id from bookings where id=$1) and maintenance_required=false",[st.booking_id]);
       await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values((select vehicle_id from bookings where id=$1),$1,$2,$3,\'INSPECTION\',\'COMPLETED\',$4)',[st.booking_id,actorUserId,finalStatus==='refunded'?'deposit_release_confirmed':'deposit_deduction_confirmed',JSON.stringify({settlementId:String(settlementId),providerReference:reference})]);
       await client.query('commit');return {settlementId:String(st.id),status:'confirmed',providerReference:reference,finalDepositStatus:finalStatus,booking:await getBooking(st.booking_id)};
     }catch(err){try{await client.query('rollback')}catch{}finally{client.release();}throw err;}
