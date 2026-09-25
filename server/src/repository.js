@@ -771,22 +771,88 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();try{await client.query('begin');const v=await client.query("select id,operational_state from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);if(!v.rows[0])return null;await client.query('insert into vehicle_maintenance(vehicle_id,status,notes,cost_paise,service_date,next_service_date,odometer_at_service,created_by) values($1,$2,$3,$4,$5,$6,$7,$8)',[vehicleId,normalized,String(notes||'').slice(0,2000),Math.round(costNumber*100),serviceDate,nextServiceDate,odometerAtService,actorUserId||null]);const next=normalized==='completed'?'INSPECTION':'MAINTENANCE';await client.query('update vehicles set operational_state=$2,maintenance_required=$3,updated_at=now() where id=$1',[vehicleId,next,normalized!=='completed']);await client.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,$4,$5,$6)',[vehicleId,actorUserId||null,'maintenance_'+normalized,v.rows[0].operational_state,next,JSON.stringify({cost:costNumber})]);await client.query('commit');return getRideOnFleetVehicle(vehicleId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
-  async function recordFleetInspection({vehicleId,bookingId=null,inspectionType='routine',odometer=null,fuelBattery=null,exteriorCondition='',damageNotes='',inspectionStatus='passed',conditionPhotos=[],actorUserId}) {
+  async function recordFleetInspection({vehicleId,bookingId=null,inspectionType='routine',odometer=null,fuelBattery=null,exteriorCondition='',damageNotes='',estimatedAmountPaise=0,inspectionStatus='pending',conditionPhotos=[],actorUserId}) {
     if(!['pickup','return','maintenance','routine'].includes(inspectionType)||!['pending','passed','failed','damage_review'].includes(inspectionStatus)){const e=new Error('Invalid inspection data.');e.code='INVALID_INSPECTION';throw e;}
     const normalizedDamage=String(damageNotes||'').trim();
-    if(!useDatabase){const v=memory.vehicles.get(String(vehicleId));if(!v)return null;v.currentOdometer=odometer??v.currentOdometer;v.currentFuelBattery=fuelBattery??v.currentFuelBattery;v.operationalState=inspectionStatus==='passed'?'AVAILABLE':'MAINTENANCE';return v;}
-    const client=await pool.connect();try{await client.query('begin');
-      const vr=await client.query("select id,operational_state from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);if(!vr.rows[0])return null;
-      let handover=null;
-      if(bookingId&&inspectionType==='return'){const h=await client.query('select * from rental_handovers where booking_id=$1 and vehicle_id=$2 for update',[bookingId,vehicleId]);handover=h.rows[0]||null;if(!handover){const e=new Error('Handover record is required before return inspection.');e.code='INSPECTION_PREREQUISITE_MISSING';throw e;}}
-      const ins=await client.query('insert into vehicle_inspections(vehicle_id,booking_id,inspection_type,odometer,fuel_battery,exterior_condition,damage_notes,inspection_status,condition_photos,inspected_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *',[vehicleId,bookingId,inspectionType,odometer,fuelBattery,String(exteriorCondition||'').slice(0,2000),normalizedDamage,inspectionStatus,conditionPhotos,actorUserId||null]);
+    const estimate=Math.max(0,Math.round(Number(estimatedAmountPaise)||0));
+    if(!useDatabase){
+      const v=memory.vehicles.get(String(vehicleId)); if(!v) return null;
+      if(bookingId && inspectionType==='return'){
+        const b=memory.bookings.get(String(bookingId)); if(!b||String(b.vehicleId)!==String(vehicleId)) throw Object.assign(new Error('Inspection booking and vehicle do not match.'),{code:'INSPECTION_VEHICLE_MISMATCH'});
+        if(!['RETURNED','INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(b.lifecycleState||''))) throw Object.assign(new Error('Vehicle return must be recorded before return inspection.'),{code:'INSPECTION_PREREQUISITE_MISSING'});
+      }
+      memory.inspections ??= new Map();
+      const id=crypto.randomUUID(),now=new Date().toISOString();
+      const handover=memory.handoverRecords?.get(String(bookingId))||null;
+      const result={id,vehicleId:String(vehicleId),bookingId:bookingId?String(bookingId):null,inspectionType,inspectionStatus,odometer,fuelBattery,exteriorCondition:String(exteriorCondition||''),damageNotes:normalizedDamage,conditionPhotos,inspectedBy:String(actorUserId||''),inspectedAt:now,
+        handoverOdometer:handover?.odometer??null,handoverFuelBattery:handover?.fuelBattery??null,
+        odometerDelta:handover?.odometer!=null&&odometer!=null?Number(odometer)-Number(handover.odometer):null,
+        fuelBatteryDelta:handover?.fuelBattery!=null&&fuelBattery!=null?Number(fuelBattery)-Number(handover.fuelBattery):null};
+      memory.inspections.set(id,result);
       let damageCase=null;
-      if(bookingId&&inspectionType==='return'&&normalizedDamage){const estimated=Math.max(0,Math.round(Number(arguments[0]?.estimatedAmountPaise)||0));void estimated;const dc=await client.query("insert into fleet_damage_cases(booking_id,vehicle_id,customer_id,inspection_id,description,evidence_photos,estimated_amount_paise,status) select b.id,b.vehicle_id,b.customer_id,$1,$2,$3,0,'reported' from bookings b where b.id=$4 returning *",[ins.rows[0].id,normalizedDamage,conditionPhotos,bookingId]);damageCase=dc.rows[0]||null;}
-      const next=inspectionStatus==='passed'&&!damageCase?'AVAILABLE':'MAINTENANCE';
-      await client.query('update vehicles set current_odometer=coalesce($2,current_odometer),current_fuel_battery=coalesce($3,current_fuel_battery),operational_state=$4,maintenance_required=$5,active=true,updated_at=now() where id=$1',[vehicleId,odometer,fuelBattery,next,next==='MAINTENANCE']);
-      if(bookingId&&inspectionType==='return') await client.query("update bookings set lifecycle_state=$2,updated_at=now() where id=$1",[bookingId,damageCase?'DAMAGE_REVIEW_REQUIRED':'INSPECTION']);
-      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,$4,$5,$6,$7)',[vehicleId,bookingId,actorUserId,'inspection_completed',vr.rows[0].operational_state,next,JSON.stringify({inspectionStatus,damageReported:Boolean(damageCase),handoverOdometer:handover?.odometer??null,returnOdometer:odometer??null,odometerDelta:handover?.odometer!=null&&odometer!=null?Number(odometer)-Number(handover.odometer):null,fuelDelta:handover?.fuel_battery!=null&&fuelBattery!=null?Number(fuelBattery)-Number(handover.fuel_battery):null})]);
-      await client.query('commit');return {vehicle:await getRideOnFleetVehicle(vehicleId),inspection:ins.rows[0],damageCase};
+      if(bookingId && inspectionType==='return' && (normalizedDamage || inspectionStatus==='damage_review')){
+        const b=memory.bookings.get(String(bookingId));
+        damageCase={id:crypto.randomUUID(),bookingId:String(bookingId),vehicleId:String(vehicleId),customerId:String(b.customerId),inspectionId:id,description:normalizedDamage||'Damage review required.',evidencePhotos:conditionPhotos,estimatedAmountPaise:estimate,approvedDeductionPaise:0,status:'reported',createdAt:now,updatedAt:now};
+        memory.damageCases.set(damageCase.id,damageCase);
+      }
+      v.currentOdometer=odometer??v.currentOdometer; v.currentFuelBattery=fuelBattery??v.currentFuelBattery; v.updatedAt=now;
+      if(inspectionType==='return' && bookingId){
+        const b=memory.bookings.get(String(bookingId));
+        if(damageCase || inspectionStatus==='damage_review'){b.lifecycleState='DAMAGE_REVIEW_REQUIRED';v.operationalState='MAINTENANCE';v.maintenanceRequired=true;}
+        else if(inspectionStatus==='passed'){b.lifecycleState='INSPECTION';v.operationalState='AVAILABLE';v.maintenanceRequired=false;}
+        else {b.lifecycleState='INSPECTION';v.operationalState='MAINTENANCE';v.maintenanceRequired=true;}
+        b.updatedAt=now;
+      } else {
+        v.operationalState=inspectionStatus==='passed'?'AVAILABLE':'MAINTENANCE';v.maintenanceRequired=inspectionStatus!=='passed';
+      }
+      return {vehicle:v,inspection:result,damageCase};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const vr=await client.query("select id,operational_state,current_odometer,current_fuel_battery from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);
+      if(!vr.rows[0]) return null;
+      let booking=null,handover=null;
+      if(bookingId){
+        const bq=await client.query("select id,vehicle_id,customer_id,lifecycle_state,status from bookings where id=$1 for update",[bookingId]);
+        booking=bq.rows[0]; if(!booking) throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+        if(String(booking.vehicle_id)!==String(vehicleId)) throw Object.assign(new Error('Inspection booking and vehicle do not match.'),{code:'INSPECTION_VEHICLE_MISMATCH'});
+      }
+      if(bookingId && inspectionType==='return'){
+        if(!['RETURNED','INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(booking.lifecycle_state||''))) throw Object.assign(new Error('Vehicle return must be recorded before return inspection.'),{code:'INSPECTION_PREREQUISITE_MISSING'});
+        const h=await client.query('select * from rental_handovers where booking_id=$1 and vehicle_id=$2 for update',[bookingId,vehicleId]);handover=h.rows[0]||null;
+        if(!handover) throw Object.assign(new Error('Handover record is required before return inspection.'),{code:'INSPECTION_PREREQUISITE_MISSING'});
+        const prior=await client.query("select id from vehicle_inspections where booking_id=$1 and inspection_type='return' order by inspected_at desc limit 1",[bookingId]);
+        if(prior.rows[0] && !['INSPECTION','DAMAGE_REVIEW_REQUIRED'].includes(String(booking.lifecycle_state||''))) throw Object.assign(new Error('Return inspection has already been recorded.'),{code:'INSPECTION_ALREADY_RECORDED'});
+      }
+      if(inspectionType==='return' && inspectionStatus==='pending') throw Object.assign(new Error('Choose PASS, FAIL, or DAMAGE REVIEW for the completed return inspection.'),{code:'INSPECTION_FINAL_STATUS_REQUIRED'});
+      const ins=await client.query(`insert into vehicle_inspections(vehicle_id,booking_id,inspection_type,odometer,fuel_battery,exterior_condition,damage_notes,inspection_status,condition_photos,inspected_by)
+        values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) returning *`,
+        [vehicleId,bookingId,inspectionType,odometer,fuelBattery,String(exteriorCondition||'').slice(0,2000),normalizedDamage,inspectionStatus,conditionPhotos,actorUserId||null]);
+      let damageCase=null;
+      const damageDetected=inspectionType==='return' && (normalizedDamage || inspectionStatus==='damage_review');
+      if(damageDetected){
+        const dc=await client.query(`insert into fleet_damage_cases(booking_id,vehicle_id,customer_id,inspection_id,description,evidence_photos,estimated_amount_paise,status)
+          values($1,$2,$3,$4,$5,$6,$7,'reported') returning *`,
+          [bookingId,vehicleId,booking.customer_id,ins.rows[0].id,normalizedDamage||'Damage review required.',conditionPhotos,estimate]);
+        damageCase=dc.rows[0];
+      }
+      const nextVehicleState=inspectionStatus==='passed'&&!damageCase?'AVAILABLE':'MAINTENANCE';
+      await client.query(`update vehicles set current_odometer=coalesce($2,current_odometer),current_fuel_battery=coalesce($3,current_fuel_battery),operational_state=$4,maintenance_required=$5,active=true,updated_at=now() where id=$1`,
+        [vehicleId,odometer,fuelBattery,nextVehicleState,nextVehicleState==='MAINTENANCE']);
+      if(bookingId && inspectionType==='return'){
+        const nextLifecycle=damageCase||inspectionStatus==='damage_review'?'DAMAGE_REVIEW_REQUIRED':'INSPECTION';
+        await client.query("update bookings set lifecycle_state=$2,updated_at=now() where id=$1",[bookingId,nextLifecycle]);
+      }
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'inspection_completed\',$4,$5,$6)',
+        [vehicleId,bookingId,actorUserId,'INSPECTION',nextVehicleState,JSON.stringify({
+          inspectionStatus,damageReported:Boolean(damageCase),estimatedAmountPaise:estimate,
+          handoverOdometer:handover?.odometer??null,returnOdometer:odometer??null,
+          odometerDelta:handover?.odometer!=null&&odometer!=null?Number(odometer)-Number(handover.odometer):null,
+          fuelDelta:handover?.fuel_battery!=null&&fuelBattery!=null?Number(fuelBattery)-Number(handover.fuel_battery):null
+        })]);
+      await client.query('commit');
+      return {vehicle:await getRideOnFleetVehicle(vehicleId),inspection:ins.rows[0],damageCase};
     }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
