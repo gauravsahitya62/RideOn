@@ -420,7 +420,7 @@ app.get('/api/v1/version', (_req, res) => {
   res.json({ service:'rideon-api', buildCommit, nodeEnv:process.env.NODE_ENV || 'development', timestamp:new Date().toISOString() });
 });
 
-const requireFleetOps = requireRole('admin','support');
+const requireFleetOps = requireRole('admin','support','delivery_staff');
 const requireDeliveryStaff = requireRole('delivery_staff');
 
 const fleetVehicleOpsSchema=z.object({
