@@ -1067,7 +1067,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type, v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
+      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type, v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,actorId]);
       if(!rows[0]){await client.query('rollback');const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       const current=rows[0].status;
       if(!allowed[current]?.includes(nextStatus)){await client.query('rollback');const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
@@ -1282,41 +1282,41 @@ export function createRepository({ databaseUrl, fleet }) {
 
   const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
-  async function startDelivery(vendorId, bookingId) {
+  async function startDelivery(actorId, bookingId, { actorRole='vendor' } = {}) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
     if(!useDatabase){
       const b=memory.bookings.get(String(bookingId));
-      if(!b||String(b.vendorId)!==String(vendorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(actorRole==='vendor' && (!b||String(b.vendorId)!==String(actorId))){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       if(b.status!=='confirmed'){const e=new Error('Delivery can only start after the booking is confirmed.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
       if(!b.delivery||b.deliveryLatitude==null||b.deliveryLongitude==null){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
       if(!['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
       if([...memory.trackingSessions.values()].some(x=>String(x.bookingId)===String(bookingId)&&x.status==='active')){const e=new Error('Delivery tracking is already active.');e.code='DELIVERY_ALREADY_ACTIVE';throw e;}
-      const session={id:crypto.randomUUID(),bookingId:String(bookingId),vendorId:String(vendorId),status:'active',startedAt:now.toISOString(),endedAt:null,lastLatitude:null,lastLongitude:null,lastAccuracyMeters:null,lastLocationAt:null,lastRouteDistanceMeters:null,lastRouteDurationSeconds:null,lastRouteAt:null,expiresAt:expiresAt.toISOString()};
+      const session={id:crypto.randomUUID(),bookingId:String(bookingId),vendorId:actorRole==='vendor'?String(actorId):null,staffUserId:actorRole!=='vendor'?String(actorId):null,status:'active',startedAt:now.toISOString(),endedAt:null,lastLatitude:null,lastLongitude:null,lastAccuracyMeters:null,lastLocationAt:null,lastRouteDistanceMeters:null,lastRouteDurationSeconds:null,lastRouteAt:null,expiresAt:expiresAt.toISOString()};
       memory.trackingSessions.set(session.id,session);b.deliveryStatus='in_delivery';b.deliveryStartedAt=session.startedAt;b.updatedAt=now.toISOString();return session;
     }
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query('select b.id,b.status,b.payment_status,b.delivery_required,b.delivery_address,b.delivery_latitude,b.delivery_longitude,v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and v.owner_id=$2 for update',[bookingId,vendorId]);
+      const {rows}=await client.query(`select b.id,b.status,b.payment_status,b.delivery_required,b.delivery_address,b.delivery_latitude,b.delivery_longitude,v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 ${actorRole==='vendor'?'and v.owner_id=$2':''} for update`,actorRole==='vendor'?[bookingId,actorId]:[bookingId]);
       const b=rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       if(b.status!=='confirmed'){const e=new Error('Delivery can only start after the booking is confirmed.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
       if(!b.delivery_required||b.delivery_latitude==null||b.delivery_longitude==null||!String(b.delivery_address||'').trim()){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
       if(!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
       const active=await client.query("select id from tracking_sessions where booking_id=$1 and status='active' for update",[bookingId]);if(active.rows[0]){const e=new Error('Delivery tracking is already active.');e.code='DELIVERY_ALREADY_ACTIVE';throw e;}
-      const {rows:created}=await client.query("insert into tracking_sessions(booking_id,vendor_id,status,expires_at) values($1,$2,'active',$3) returning *",[bookingId,vendorId,expiresAt]);
+      const {rows:created}=await client.query("insert into tracking_sessions(booking_id,vendor_id,staff_user_id,status,expires_at) values($1,$2,$3,'active',$4) returning *",[bookingId,actorRole==='vendor'?actorId:null,actorRole!=='vendor'?actorId:null,expiresAt]);
       await client.query("update bookings set delivery_status='in_delivery',delivery_started_at=now(),updated_at=now() where id=$1",[bookingId]);
-      await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,'vendor',$3,'delivery_started')",[bookingId,b.status,vendorId]);
+      await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,$3,$4,'delivery_started')",[bookingId,b.status,actorRole==='vendor'?'vendor':'ops',actorId]);
       await client.query('commit');return mapTrackingSession(created[0]);
     }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
 
-  async function updateDeliveryLocation(vendorId, bookingId, {latitude,longitude,accuracyMeters,recordedAt}={}) {
+  async function updateDeliveryLocation(actorId, bookingId, {latitude,longitude,accuracyMeters,recordedAt}={}) {
     const lat=Number(latitude),lon=Number(longitude),accuracy=accuracyMeters==null?null:Number(accuracyMeters),when=recordedAt?new Date(recordedAt):new Date();
     if(!Number.isFinite(lat)||lat<-90||lat>90||!Number.isFinite(lon)||lon<-180||lon>180){const e=new Error('Invalid delivery location.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
     if(accuracy!=null&&(!Number.isFinite(accuracy)||accuracy<0||accuracy>10000)){const e=new Error('Invalid GPS accuracy.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
     if(Number.isNaN(when.getTime())||when.getTime()>Date.now()+120000){const e=new Error('Invalid location timestamp.');e.code='INVALID_DELIVERY_TIMESTAMP';throw e;}
     if(!useDatabase){
-      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&(x.vendorId && String(x.vendorId)===String(actorId)) || (x.staffUserId && String(x.staffUserId)===String(actorId))&&x.status==='active');
       if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       if(new Date(session.expiresAt)<=new Date()){session.status='expired';session.endedAt=new Date().toISOString();const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
       if(session.lastLocationAt&&when.getTime()<new Date(session.lastLocationAt).getTime()-5000){const e=new Error('Location update is older than the last accepted update.');e.code='STALE_LOCATION_UPDATE';throw e;}
@@ -1325,7 +1325,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query("select ts.* from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and ts.vendor_id=$2 and ts.status='active' and v.owner_id=$2 for update",[bookingId,vendorId]);
+      const {rows}=await client.query("select ts.* from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and (ts.vendor_id=$2 or ts.staff_user_id=$2) and ts.status='active' for update",[bookingId,vendorId]);
       const session=rows[0];if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       if(new Date(session.expires_at)<=new Date()){await client.query("update tracking_sessions set status='expired',ended_at=now() where id=$1",[session.id]);await client.query("update bookings set delivery_status='aborted',updated_at=now() where id=$1 and delivery_status='in_delivery'",[bookingId]);const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
       if(session.last_location_at&&when.getTime()<new Date(session.last_location_at).getTime()-5000){const e=new Error('Location update is older than the last accepted update.');e.code='STALE_LOCATION_UPDATE';throw e;}
@@ -1334,34 +1334,34 @@ export function createRepository({ databaseUrl, fleet }) {
     }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
 
-  async function getActiveTrackingSession(vendorId, bookingId) {
+  async function getActiveTrackingSession(actorId, bookingId) {
     if(!useDatabase){
-      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&((x.vendorId && String(x.vendorId)===String(actorId)) || (x.staffUserId && String(x.staffUserId)===String(actorId)))&&x.status==='active');
       return session||null;
     }
-    const {rows}=await pool.query("select ts.* from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and ts.vendor_id=$2 and ts.status='active' and v.owner_id=$2",[bookingId,vendorId]);
+    const {rows}=await pool.query("select ts.* from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and (ts.vendor_id=$2 or ts.staff_user_id=$2) and ts.status='active'",[bookingId,vendorId]);
     return rows[0]?mapTrackingSession(rows[0]):null;
   }
 
-  async function updateTrackingRoute(vendorId, bookingId, {distanceMeters,durationSeconds,provider,polyline}={}) {
+  async function updateTrackingRoute(actorId, bookingId, {distanceMeters,durationSeconds,provider,polyline}={}) {
     if(!Number.isFinite(Number(distanceMeters))||Number(distanceMeters)<0||!Number.isFinite(Number(durationSeconds))||Number(durationSeconds)<0){const e=new Error('Invalid route data.');e.code='ROUTE_INVALID_DATA';throw e;}
     if(!useDatabase){
-      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&((x.vendorId && String(x.vendorId)===String(actorId)) || (x.staffUserId && String(x.staffUserId)===String(actorId)))&&x.status==='active');
       if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       session.lastRouteDistanceMeters=Math.round(Number(distanceMeters));session.lastRouteDurationSeconds=Math.round(Number(durationSeconds));session.lastRouteAt=new Date().toISOString();session.lastRoutePolyline=String(polyline||'');session.routeProvider=String(provider||'').slice(0,40);return session;
     }
-    const {rows}=await pool.query("update tracking_sessions ts set last_route_distance_meters=$3,last_route_duration_seconds=$4,last_route_at=now(),last_route_polyline=$5 where ts.id=(select id from tracking_sessions where booking_id=$1 and vendor_id=$2 and status='active' limit 1) returning *",[bookingId,vendorId,Math.round(Number(distanceMeters)),Math.round(Number(durationSeconds)),String(polyline||'')]);
+    const {rows}=await pool.query("update tracking_sessions ts set last_route_distance_meters=$3,last_route_duration_seconds=$4,last_route_at=now(),last_route_polyline=$5 where ts.id=(select id from tracking_sessions where booking_id=$1 and (vendor_id=$2 or staff_user_id=$2) and status='active' limit 1) returning *",[bookingId,vendorId,Math.round(Number(distanceMeters)),Math.round(Number(durationSeconds)),String(polyline||'')]);
     return rows[0]?mapTrackingSession(rows[0]):null;
   }
 
-  async function abortDelivery(vendorId, bookingId) {
+  async function abortDelivery(actorId, bookingId, { actorRole='vendor' } = {}) {
     if(!useDatabase){
-      const b=memory.bookings.get(String(bookingId));if(!b||String(b.vendorId)!==String(vendorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      const b=memory.bookings.get(String(bookingId));if(actorRole==='vendor' && (!b||String(b.vendorId)!==String(actorId))){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&((x.vendorId && String(x.vendorId)===String(actorId)) || (x.staffUserId && String(x.staffUserId)===String(actorId)))&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       session.status='aborted';session.endedAt=new Date().toISOString();b.deliveryStatus='aborted';b.updatedAt=new Date().toISOString();return {booking:b,session};
     }
     const client=await pool.connect();
-    try{await client.query('begin');const {rows}=await client.query("select ts.*,b.status as booking_status from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and ts.vendor_id=$2 and ts.status='active' and v.owner_id=$2 for update",[bookingId,vendorId]);const ts=rows[0];if(!ts){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}await client.query("update tracking_sessions set status='aborted',ended_at=now() where id=$1",[ts.id]);await client.query("update bookings set delivery_status='aborted',updated_at=now() where id=$1",[bookingId]);await client.query('commit');return {booking:await getBooking(bookingId),session:mapTrackingSession({...ts,status:'aborted',ended_at:new Date().toISOString()})};}catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+    try{await client.query('begin');const {rows}=await client.query("select ts.*,b.status as booking_status from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and (ts.vendor_id=$2 or ts.staff_user_id=$2) and ts.status='active' for update",[bookingId,vendorId]);const ts=rows[0];if(!ts){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}await client.query("update tracking_sessions set status='aborted',ended_at=now() where id=$1",[ts.id]);await client.query("update bookings set delivery_status='aborted',updated_at=now() where id=$1",[bookingId]);await client.query('commit');return {booking:await getBooking(bookingId),session:mapTrackingSession({...ts,status:'aborted',ended_at:new Date().toISOString()})};}catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
 
   async function getTrackingForCustomer(customerId, bookingId) {
@@ -1375,25 +1375,25 @@ export function createRepository({ databaseUrl, fleet }) {
     return {booking:mapBooking(r),session:r.ts_id?mapTrackingSession({id:r.ts_id,booking_id:r.id,vendor_id:r.ts_vendor_id,status:r.ts_status,started_at:r.ts_started_at,ended_at:r.ts_ended_at,last_latitude:r.ts_last_latitude,last_longitude:r.ts_last_longitude,last_accuracy_meters:r.ts_last_accuracy_meters,last_location_at:r.ts_last_location_at,last_route_distance_meters:r.ts_last_route_distance_meters,last_route_duration_seconds:r.ts_last_route_duration_seconds,last_route_polyline:r.ts_last_route_polyline,last_route_at:r.ts_last_route_at,expires_at:r.ts_expires_at}):null};
   }
 
-  async function completeDelivery(vendorId, bookingId, {latitude=null,longitude=null}={}) {
+  async function completeDelivery(actorId, bookingId, {latitude=null,longitude=null}={}) {
     const finalLat=latitude==null?null:Number(latitude),finalLon=longitude==null?null:Number(longitude);
     if((finalLat==null)!==(finalLon==null)||finalLat!=null&&(!Number.isFinite(finalLat)||finalLat<-90||finalLat>90)||finalLon!=null&&(!Number.isFinite(finalLon)||finalLon<-180||finalLon>180)){const e=new Error('Invalid final delivery location.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
     if(!useDatabase){
-      const b=memory.bookings.get(String(bookingId));if(!b||String(b.vendorId)!==String(vendorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&String(x.vendorId)===String(vendorId)&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      const b=memory.bookings.get(String(bookingId));if(!b||String(b.vendorId)!==String(actorId)){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const session=[...memory.trackingSessions.values()].find(x=>String(x.bookingId)===String(bookingId)&&((x.vendorId && String(x.vendorId)===String(actorId)) || (x.staffUserId && String(x.staffUserId)===String(actorId)))&&x.status==='active');if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       const now=new Date().toISOString();session.status='completed';session.endedAt=now;if(finalLat!=null){session.lastLatitude=finalLat;session.lastLongitude=finalLon;session.lastLocationAt=now;}b.deliveryStatus='delivered';b.deliveredAt=now;b.deliveryFinalLatitude=finalLat??session.lastLatitude;b.deliveryFinalLongitude=finalLon??session.lastLongitude;b.updatedAt=now;return {booking:b,session};
     }
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const {rows}=await client.query("select ts.*,b.status as booking_status from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and ts.vendor_id=$2 and ts.status='active' and v.owner_id=$2 for update",[bookingId,vendorId]);
+      const {rows}=await client.query("select ts.*,b.status as booking_status from tracking_sessions ts join bookings b on b.id=ts.booking_id join vehicles v on v.id=b.vehicle_id where ts.booking_id=$1 and (ts.vendor_id=$2 or ts.staff_user_id=$2) and ts.status='active' for update",[bookingId,vendorId]);
       const ts=rows[0];if(!ts){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       if(new Date(ts.expires_at)<=new Date()){await client.query("update tracking_sessions set status='expired',ended_at=now() where id=$1",[ts.id]);const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
       if(ts.booking_status!=='confirmed'){const e=new Error('Delivery can no longer be completed.');e.code='DELIVERY_COMPLETION_NOT_ALLOWED';throw e;}
       const lat=finalLat??(ts.last_latitude==null?null:Number(ts.last_latitude)),lon=finalLon??(ts.last_longitude==null?null:Number(ts.last_longitude));
       await client.query("update tracking_sessions set status='completed',ended_at=now(),last_latitude=coalesce($2,last_latitude),last_longitude=coalesce($3,last_longitude),last_location_at=case when $2 is not null then now() else last_location_at end where id=$1",[ts.id,lat,lon]);
       await client.query("update bookings set delivery_status='delivered',delivered_at=now(),delivery_final_latitude=$2,delivery_final_longitude=$3,updated_at=now() where id=$1",[bookingId,lat,lon]);
-      await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,'vendor',$3,'delivery_completed')",[bookingId,ts.booking_status,vendorId]);
+      await client.query("insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,'ops',$3,'delivery_completed')",[bookingId,ts.booking_status,actorId]);
       await client.query('commit');const latest=await getBooking(bookingId);return {booking:latest,session:mapTrackingSession({...ts,status:'completed',ended_at:now.toISOString(),last_latitude:lat,last_longitude:lon,last_location_at:lat!=null?now.toISOString():ts.last_location_at})};
     }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
