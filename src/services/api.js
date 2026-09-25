@@ -140,6 +140,20 @@ export const rideOnApi = {
     if (handlers.onError) socket.onerror = handlers.onError;
     return socket;
   },
+  getPublicVendor: (vendorId) => request(`/api/v1/vendors/${encode(vendorId)}`),
+  listPublicVendorVehicles: (vendorId,params={}) => {
+    const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString();
+    return request(`/api/v1/vendors/${encode(vendorId)}/vehicles${query?`?${query}`:''}`);
+  },
+  quoteMultiVehicle: (payload) => request('/api/v1/quotes/multi', { method:'POST', body:JSON.stringify(payload) }),
+  createFleetOrder: (payload,idempotencyKey) => request('/api/v1/fleet-orders', { method:'POST', headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined, body:JSON.stringify(payload) }),
+  getFleetOrder: (id) => request(`/api/v1/fleet-orders/${encode(id)}`),
+  listFleetOrders: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/fleet-orders${query?`?${query}`:''}`); },
+  createFleetOrderPayment: (id,idempotencyKey) => request(`/api/v1/fleet-orders/${encode(id)}/payment`, { method:'POST', headers:idempotencyKey?{'Idempotency-Key':idempotencyKey}:undefined, body:JSON.stringify({idempotencyKey}) }),
+  listVendorFleetOrders: (params={}) => { const query=new URLSearchParams(Object.entries(params).filter(([,v])=>v!=null&&v!=='')).toString(); return request(`/api/v1/vendor/fleet-orders${query?`?${query}`:''}`); },
+  getVendorFleetOrder: (id) => request(`/api/v1/vendor/fleet-orders/${encode(id)}`),
+  updateVendorFleetOrderStatus: (id,payload) => request(`/api/v1/vendor/fleet-orders/${encode(id)}/status`, { method:'PATCH', body:JSON.stringify(payload) }),
+
   listVehicles: (params = {}) => {
     const query = new URLSearchParams(
       Object.entries(params).filter(([, value]) => value != null && value !== '')
