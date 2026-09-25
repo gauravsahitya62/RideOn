@@ -902,10 +902,26 @@ export function createRepository({ databaseUrl, fleet }) {
 
 
   async function assignFleetDeliveryStaff({bookingId,vehicleId,staffUserId,assignmentType='delivery',scheduledAt=null,actorUserId}) {
-    const staff=await findCustomerById(staffUserId);if(!staff||staff.role!=='delivery_staff'){const e=new Error('Assigned user is not delivery staff.');e.code='INVALID_ASSIGNEE';throw e;}
-    if(!useDatabase)return {id:crypto.randomUUID(),bookingId:String(bookingId),vehicleId:String(vehicleId),assignmentType,staffUserId:String(staffUserId),status:'assigned',scheduledAt};
-    const b=await pool.query('select id,vehicle_id from bookings where id=$1 and vehicle_id=$2',[bookingId,vehicleId]);if(!b.rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-    const q=await pool.query("insert into vehicle_assignments(booking_id,vehicle_id,assignment_type,staff_user_id,status,scheduled_at) values($1,$2,$3,$4,'assigned',$5) returning *",[bookingId,vehicleId,assignmentType,staffUserId,scheduledAt||null]);await pool.query('update bookings set assigned_staff_user_id=$2,scheduled_fulfillment_at=coalesce($3,scheduled_fulfillment_at),updated_at=now() where id=$1',[bookingId,staffUserId,scheduledAt||null]);await pool.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,details) values($1,$2,$3,\'assignment_created\',$4)',[vehicleId,bookingId,actorUserId||null,JSON.stringify({staffUserId,assignmentType})]);return q.rows[0];
+    const staff=await findCustomerById(staffUserId);
+    if(!staff||staff.role!=='delivery_staff') throw Object.assign(new Error('Assigned user is not delivery staff.'),{code:'INVALID_ASSIGNEE'});
+    if(!['delivery','pickup','return'].includes(String(assignmentType))) throw Object.assign(new Error('Invalid fleet assignment type.'),{code:'INVALID_ASSIGNMENT_TYPE'});
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId)); if(!b||String(b.vehicleId)!==String(vehicleId))throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      const id=crypto.randomUUID();b.assignedStaffUserId=String(staffUserId);b.scheduledFulfillmentAt=scheduledAt||b.scheduledFulfillmentAt;
+      b.lifecycleState=assignmentType==='pickup'?'PICKUP_ASSIGNED':'DELIVERY_ASSIGNED';b.updatedAt=new Date().toISOString();
+      return {id,bookingId:String(bookingId),vehicleId:String(vehicleId),assignmentType,staffUserId:String(staffUserId),status:'assigned',scheduledAt};
+    }
+    const client=await pool.connect();try{
+      await client.query('begin');
+      const b=await client.query('select id,vehicle_id,lifecycle_state from bookings where id=$1 and vehicle_id=$2 for update',[bookingId,vehicleId]);
+      if(!b.rows[0])throw Object.assign(new Error('Booking not found.'),{code:'BOOKING_NOT_FOUND'});
+      const nextLifecycle=assignmentType==='pickup'?'PICKUP_ASSIGNED':'DELIVERY_ASSIGNED';
+      const q=await client.query("insert into vehicle_assignments(booking_id,vehicle_id,assignment_type,staff_user_id,status,scheduled_at) values($1,$2,$3,$4,'assigned',$5) returning *",[bookingId,vehicleId,assignmentType,staffUserId,scheduledAt||null]);
+      await client.query('update bookings set assigned_staff_user_id=$2,scheduled_fulfillment_at=coalesce($3,scheduled_fulfillment_at),lifecycle_state=$4,updated_at=now() where id=$1',[bookingId,staffUserId,scheduledAt||null,nextLifecycle]);
+      await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,\'assignment_created\',$4,$5,$6)',[vehicleId,bookingId,actorUserId||null,b.rows[0].lifecycle_state,nextLifecycle,JSON.stringify({staffUserId,assignmentType})]);
+      await client.query('commit');
+      return q.rows[0];
+    }catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
   async function listAssignedDeliveryJobs(staffUserId,{limit=50,offset=0}={}) {
