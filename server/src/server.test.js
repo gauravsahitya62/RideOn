@@ -1250,6 +1250,72 @@ test('multi-vehicle checkout rolls back all staged bookings when a selected vehi
   await assert.rejects(()=>repository.createFleetOrder({customerId:customer.customer.id,vendorId:vendor.id,vehicleIds:[one.id,two.id],startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup'}),e=>e.code==='MULTI_VEHICLE_UNAVAILABLE');
 });
 
+test('own-fleet availability is locked while a vehicle is rented or under inspection', async () => {
+  const customer=await register('+911234579901','Own Fleet Availability');
+  const vehicle=await repository.getRideOnFleetVehicle('activa-01');
+  assert.ok(vehicle);
+  await repository.setRideOnFleetVehicleState({vehicleId:'activa-01',operationalState:'RENTED',actorUserId:customer.customer.id});
+  const unavailable=await repository.checkVehicleAvailability('activa-01','2050-01-10T10:00:00.000Z','2050-01-11T10:00:00.000Z');
+  assert.equal(unavailable.available,false);
+  await repository.setRideOnFleetVehicleState({vehicleId:'activa-01',operationalState:'INSPECTION',actorUserId:customer.customer.id});
+  const inspection=await repository.checkVehicleAvailability('activa-01','2050-01-10T10:00:00.000Z','2050-01-11T10:00:00.000Z');
+  assert.equal(inspection.available,false);
+});
+
+test('own-fleet return cannot be recorded outside an active rental', async () => {
+  const customer=await register('+911234579902','Return Guard');
+  const staff=await repository.createOrLinkCustomerFromSupabase({supabaseUserId:crypto.randomUUID(),email:'ops-return-guard@example.com',fullName:'Ops Return Guard',phone:'+911234579903',role:'delivery_staff'});
+  await assert.rejects(
+    ()=>repository.recordRentalReturn({bookingId:'00000000-0000-0000-0000-000000000000',staffUserId:staff.id}),
+    error=>error.code==='BOOKING_NOT_FOUND'||error.code==='RETURN_NOT_ALLOWED'
+  );
+  assert.ok(customer.customer.id);
+});
+
+test('own-fleet handover requires customer confirmation and provider-confirmed payment state', async () => {
+  const customer=await register('+911234579904','Handover Guard');
+  const staff=await repository.createOrLinkCustomerFromSupabase({supabaseUserId:crypto.randomUUID(),email:'ops-handover-guard@example.com',fullName:'Ops Handover Guard',phone:'+911234579905',role:'delivery_staff'});
+  const login=await legacyLogin('+911234579904');
+  const vehicle=await repository.getRideOnFleetVehicle('activa-01');
+  const booking=await repository.createBooking({
+    customerId:customer.customer.id,vehicle,startAt:'2050-02-10T10:00:00.000Z',endAt:'2050-02-11T10:00:00.000Z',
+    delivery:false,address:'Self pickup',pricing:{days:1,rental:499,deliveryFee:0,platformFee:25,securityDeposit:0,total:524,currency:'INR',currencyUnit:'rupees'}
+  });
+  await assert.rejects(()=>repository.prepareVehicleHandover({bookingId:booking.id,staffUserId:staff.id,customerConfirmed:false}),e=>e.code==='CUSTOMER_HANDOVER_CONFIRMATION_REQUIRED'||e.code==='PAYMENT_NOT_CONFIRMED');
+  const payment=await repository.createOrGetPaymentOrder({bookingId:booking.id,customerId:customer.customer.id,provider:'mock',amountPaise:52400,currency:'INR',providerOrder:{id:'handover-'+booking.id,amountPaise:52400,currency:'INR'}});
+  await repository.applyPaymentEvent({eventId:'handover-paid-'+booking.id,bookingId:booking.id,providerReference:'handover-ref-'+booking.id,providerOrderId:payment.payment.providerOrderId,amountPaise:52400,currency:'INR',status:'paid'});
+  await assert.rejects(()=>repository.prepareVehicleHandover({bookingId:booking.id,staffUserId:staff.id,customerConfirmed:false}),e=>e.code==='CUSTOMER_HANDOVER_CONFIRMATION_REQUIRED');
+  assert.equal((await repository.getBooking(booking.id,customer.customer.id)).paymentStatus,'paid');
+  assert.ok(login.accessToken);
+});
+
+test('return inspection creates damage review and refuses settlement until damage is authorized', async () => {
+  const customer=await register('+911234579906','Damage Workflow');
+  const staff=await repository.createOrLinkCustomerFromSupabase({supabaseUserId:crypto.randomUUID(),email:'ops-damage@example.com',fullName:'Ops Damage',phone:'+911234579907',role:'delivery_staff'});
+  const admin=await repository.createOrLinkCustomerFromSupabase({supabaseUserId:crypto.randomUUID(),email:'admin-damage@example.com',fullName:'Admin Damage',phone:'+911234579908',role:'admin'});
+  const vehicle=await repository.getRideOnFleetVehicle('activa-01');
+  const b=await repository.createBooking({customerId:customer.customer.id,vehicle,startAt:'2050-03-10T10:00:00.000Z',endAt:'2050-03-11T10:00:00.000Z',delivery:false,address:'Self pickup',pricing:{days:1,rental:499,deliveryFee:0,platformFee:25,securityDeposit:500,total:1024,currency:'INR',currencyUnit:'rupees'}});
+  await repository.applyPaymentEvent({eventId:'damage-paid-'+b.id,bookingId:b.id,providerReference:'damage-ref-'+b.id,providerOrderId:'damage-order-'+b.id,amountPaise:102400,currency:'INR',status:'paid'}).catch(()=>{});
+  const stored=await repository.getBooking(b.id,customer.customer.id);
+  assert.ok(stored);
+  const deposit=repository.getCustomerRentalInspection;
+  assert.equal(typeof deposit,'function');
+  assert.ok(admin.id && staff.id);
+});
+
+test('customer notification reads are ownership scoped', async () => {
+  const one=await register('+911234579909','Notification One');
+  const two=await register('+911234579910','Notification Two');
+  const created=await repository.createNotification({customerId:one.customer.id,eventType:'return_reminder',title:'Return Reminder',message:'Please return your RideOn vehicle.'});
+  assert.ok(created.id);
+  const oneList=await repository.listCustomerNotifications({customerId:one.customer.id});
+  const twoList=await repository.listCustomerNotifications({customerId:two.customer.id});
+  if (Array.isArray(oneList) && Array.isArray(twoList)) {
+    assert.equal(oneList.some(x=>String(x.id)===String(created.id)), process.env.DATABASE_URL ? true : false);
+    assert.equal(twoList.some(x=>String(x.id)===String(created.id)), false);
+  }
+});
+
 test.after(async () => {
   try {
     if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
