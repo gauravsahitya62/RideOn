@@ -517,15 +517,24 @@ app.post('/api/v1/fleet-ops/bookings/:id/deposit/settle',supabaseRequireAuth,req
     let result=await repository.settleFleetSecurityDeposit({bookingId:req.params.id,actorUserId:req.user.id,...p.data});
     if(result?.providerAction){
       const action=result.providerAction;
-      const providerResult=await payments.refundPayment({paymentId:action.paymentId,amountPaise:action.amountPaise,providerOrderId:action.providerOrderId,idempotencyKey:action.idempotencyKey});
+      let providerResult;
+      try{providerResult=await payments.refundPayment({paymentId:action.paymentId,amountPaise:action.amountPaise,providerOrderId:action.providerOrderId,idempotencyKey:action.idempotencyKey});}
+      catch(error){
+        if(['UPI_PROVIDER_INTEGRATION_REQUIRED','PAYTM_ONBOARDING_REQUIRED'].includes(error?.code)) return res.status(202).json({status:'release_pending',providerAction:action,providerUnavailable:true});
+        throw error;
+      }
       if(!providerResult?.confirmed||!providerResult?.providerReference) return res.status(202).json({status:'release_pending',providerAction:action});
       result=await repository.finalizeFleetSecurityDeposit({bookingId:req.params.id,actorUserId:req.user.id,deductionPaise:p.data.deductionPaise,reason:p.data.reason,evidenceReference:p.data.evidenceReference,providerReference:providerResult.providerReference,idempotencyKey:action.idempotencyKey});
     }
     if(result?.booking?.customerId) await repository.createNotification({customerId:result.booking.customerId,bookingId:result.booking.id,eventType:'deposit_settled',title:'Deposit Settlement Complete',message:result.deposit?.approvedDeductionPaise?'Your security deposit has been settled after inspection.':'Your security deposit has been released after inspection.',payload:{status:result.deposit?.status,refundableAmountPaise:result.deposit?.refundableAmountPaise||0}});
     res.json(result);
   }catch(error){
-    const status=['DEPOSIT_ALREADY_SETTLED','DEPOSIT_SETTLEMENT_NOT_ALLOWED','DEPOSIT_DEDUCTION_INVALID','DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED','DEPOSIT_DAMAGE_AUTHORIZATION_REQUIRED','DEPOSIT_PROVIDER_REFERENCE_REQUIRED','DEPOSIT_PROVIDER_AMOUNT_INVALID'].includes(error?.code)?409:error?.code==='FORBIDDEN'?403:503;
-    res.status(status).json({error:{code:error?.code||'DEPOSIT_SETTLEMENT_FAILED',message:error?.message||'Security deposit settlement could not be completed.'}});
+    const statusMap={
+      FORBIDDEN:403,BOOKING_NOT_FOUND:404,DEPOSIT_ALREADY_SETTLED:409,DEPOSIT_SETTLEMENT_NOT_ALLOWED:409,DEPOSIT_DEDUCTION_INVALID:409,
+      DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED:409,DEPOSIT_DAMAGE_AUTHORIZATION_REQUIRED:409,DEPOSIT_PROVIDER_REFERENCE_REQUIRED:409,
+      DEPOSIT_PROVIDER_AMOUNT_INVALID:409,UPI_PROVIDER_INTEGRATION_REQUIRED:503,PAYTM_ONBOARDING_REQUIRED:503
+    };
+    res.status(statusMap[error?.code]||503).json({error:{code:error?.code||'DEPOSIT_SETTLEMENT_FAILED',message:error?.message||'Security deposit settlement could not be completed.'}});
   }
 });
 app.get('/api/v1/notifications',supabaseRequireAuth,requireCustomer,async(req,res)=>{
