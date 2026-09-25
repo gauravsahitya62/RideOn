@@ -30,3 +30,14 @@ CREATE TABLE IF NOT EXISTS rideon_vehicle_reservations (
 );
 CREATE INDEX IF NOT EXISTS rideon_vehicle_reservations_lookup_idx
   ON rideon_vehicle_reservations(vehicle_id,start_at,end_at,status,expires_at);
+
+ALTER TABLE bookings
+  ADD COLUMN IF NOT EXISTS tax_paise BIGINT NOT NULL DEFAULT 0 CHECK (tax_paise >= 0),
+  ADD COLUMN IF NOT EXISTS discount_paise BIGINT NOT NULL DEFAULT 0 CHECK (discount_paise >= 0);
+
+ALTER TABLE fleet_orders
+  ADD COLUMN IF NOT EXISTS tax_paise BIGINT NOT NULL DEFAULT 0 CHECK (tax_paise >= 0),
+  ADD COLUMN IF NOT EXISTS discount_paise BIGINT NOT NULL DEFAULT 0 CHECK (discount_paise >= 0);
+
+ALTER TABLE vehicles
+  ADD COLUMN IF NOT EXISTS rideon_pricing_active BOOLEAN NOT NULL DEFAULT TRUE;
