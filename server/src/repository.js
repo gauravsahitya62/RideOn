@@ -565,7 +565,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if(sortValue==='price_asc')rows.sort((a,b)=>Number(a.pricePerDay??a.dailyRate)-Number(b.pricePerDay??b.dailyRate));else if(sortValue==='price_desc')rows.sort((a,b)=>Number(b.pricePerDay??b.dailyRate)-Number(a.pricePerDay??a.dailyRate));else rows.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
       return rows.slice(safeOffset,safeOffset+safeLimit);
     }
-    const params=[];const where=["v.active=true","coalesce(v.type::text,'') <> 'car'","coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter')","coalesce(v.operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE')","coalesce(v.maintenance_required,false)=false"];
+    const params=[];const where=["v.active=true","coalesce(v.type::text,'') <> 'car'","coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter')","coalesce(v.operational_state,'AVAILABLE')='AVAILABLE'","coalesce(v.maintenance_required,false)=false"];
     if(query){params.push('%'+query+'%');where.push("lower(coalesce(v.name,'') || ' ' || coalesce(v.make,'') || ' ' || coalesce(v.model,'') || ' ' || coalesce(v.variant,'')) like $"+params.length);}
     if(classFilter){params.push(classFilter);where.push("lower(coalesce(v.fleet_vehicle_class,'bike'))=$"+params.length);}
     if(brandFilter){params.push(brandFilter);where.push("lower(coalesce(v.make,''))=$"+params.length);}
