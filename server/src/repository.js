@@ -15,6 +15,22 @@ export function createRepository({ databaseUrl, fleet }) {
   }) : null;
   const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), financialTransactions:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
 
+  const mapPaymentRow = (row) => row && ({
+    id:String(row.id),
+    bookingId:String(row.booking_id),
+    provider:row.provider,
+    providerOrderId:row.provider_order_id,
+    providerPaymentId:row.provider_payment_id || undefined,
+    providerReference:row.provider_reference || undefined,
+    amountPaise:Number(row.amount_paise),
+    amount:Number(row.amount_paise)/100,
+    currency:row.currency || 'INR',
+    status:row.status,
+    idempotencyKey:row.idempotency_key || undefined,
+    createdAt:iso(row.created_at),
+    updatedAt:iso(row.updated_at)
+  });
+
   const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
     if (!row) return null;
@@ -1482,6 +1498,36 @@ export function createRepository({ databaseUrl, fleet }) {
     }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
   }
 
+  async function createFleetOrderPayment({orderId,customerId,provider,amountPaise,idempotencyKey,providerOrder}={}) {
+    const normalizedAmount=Number(amountPaise);
+    if(!Number.isSafeInteger(normalizedAmount)||normalizedAmount<=0)throw Object.assign(new Error('Invalid payment amount.'),{code:'PAYMENT_CREATION_FAILED'});
+    if(!useDatabase){
+      const order=memory.fleetOrders?.get(String(orderId));
+      if(!order||String(order.customerId)!==String(customerId))throw Object.assign(new Error('Fleet booking not found.'),{code:'FLEET_ORDER_NOT_FOUND'});
+      if(Math.round(Number(order.total)*100)!==normalizedAmount)throw Object.assign(new Error('Fleet booking amount changed.'),{code:'PAYMENT_CREATION_FAILED'});
+      if(!memory.fleetPayments)memory.fleetPayments=new Map();
+      const existing=memory.fleetPayments.get(String(orderId));
+      if(existing&&['pending','paid'].includes(existing.status))return {payment:existing,created:false};
+      const payment={id:crypto.randomUUID(),fleetOrderId:String(orderId),bookingId:String(order.items[0]?.id||''),customerId:String(customerId),provider,providerOrderId:String(providerOrder.id),amountPaise:normalizedAmount,currency:'INR',status:'pending',idempotencyKey:idempotencyKey||null,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      memory.fleetPayments.set(String(orderId),payment);order.paymentStatus='pending';order.items.forEach(b=>{b.paymentStatus='pending'});return {payment,created:true};
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const orderQ=await client.query('select id,customer_id,total_paise,payment_status from fleet_orders where id=$1 and customer_id=$2 for update',[orderId,customerId]);
+      if(!orderQ.rows[0])throw Object.assign(new Error('Fleet booking not found.'),{code:'FLEET_ORDER_NOT_FOUND'});
+      if(Number(orderQ.rows[0].total_paise)!==normalizedAmount)throw Object.assign(new Error('Fleet booking amount changed.'),{code:'PAYMENT_CREATION_FAILED'});
+      if(['paid'].includes(String(orderQ.rows[0].payment_status)))throw Object.assign(new Error('Fleet booking is already paid.'),{code:'PAYMENT_ALREADY_PAID'});
+      const first=await client.query('select booking_id from fleet_order_items where fleet_order_id=$1 order by id limit 1',[orderId]);
+      if(!first.rows[0])throw Object.assign(new Error('Fleet booking has no items.'),{code:'FLEET_ORDER_INVALID'});
+      const existing=await client.query(`select id,booking_id,provider,provider_order_id,provider_payment_id,provider_reference,amount_paise,currency,status,idempotency_key,created_at,updated_at from payments where booking_id=$1 and status in ('unpaid','pending') order by created_at desc limit 1 for update`,[first.rows[0].booking_id]);
+      if(existing.rows[0]&&Number(existing.rows[0].amount_paise)===normalizedAmount){await client.query('update fleet_orders set payment_status=\'pending\',updated_at=now() where id=$1',[orderId]);await client.query('update bookings set payment_status=\'pending\',payment_provider_reference=$2,updated_at=now() where fleet_order_id=$1 and payment_status=\'unpaid\'',[orderId,String(providerOrder.id)]);await client.query('commit');return {payment:mapPaymentRow(existing.rows[0]),created:false};}
+      const inserted=await client.query(`insert into payments(booking_id,provider,provider_order_id,amount_paise,currency,status,idempotency_key) values($1,$2,$3,$4,'INR','pending',$5) returning id,booking_id,provider,provider_order_id,amount_paise,currency,status,idempotency_key,created_at,updated_at`,[first.rows[0].booking_id,provider,String(providerOrder.id),normalizedAmount,idempotencyKey||null]);
+      await client.query(`update fleet_orders set payment_status='pending',updated_at=now() where id=$1`,[orderId]);
+      await client.query(`update bookings set payment_status='pending',payment_provider_reference=$2,updated_at=now() where fleet_order_id=$1 and payment_status='unpaid'`,[orderId,String(providerOrder.id)]);
+      await client.query('commit');return {payment:mapPaymentRow(inserted.rows[0]),created:true};
+    }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
+  }
   async function verifyPayment({ paymentId, bookingId, customerId, providerPaymentId, providerOrderId, providerSignature }) {
     if (!useDatabase) {
       const p=[...(memory.payments?.values()||[])].find((candidate) =>
