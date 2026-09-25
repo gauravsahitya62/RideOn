@@ -720,8 +720,8 @@ export function createRepository({ databaseUrl, fleet }) {
   async function listRideOnFleetAdmin({q='',type='',city='',status='',registration='',model='',limit=50,offset=0}={}) {
     const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
     const typeFilter=String(type||'').trim().toLowerCase(),statusFilter=String(status||'').trim().toUpperCase();
-    if(!useDatabase){ let rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car'); rows=rows.filter(v=>(!typeFilter||String(v.fleetVehicleClass||v.vehicleClass||'bike').toLowerCase()===typeFilter)&&(!statusFilter||String(v.operationalState||'AVAILABLE').toUpperCase()===statusFilter)&&(!city||String(v.city||'').toLowerCase()===String(city).toLowerCase())&&(!registration||String(v.registrationNumber||'').toLowerCase().includes(String(registration).toLowerCase()))&&(!model||String(v.model||'').toLowerCase().includes(String(model).toLowerCase()))&&(!q||[v.name,v.make,v.model,v.variant,v.city,v.registrationNumber].filter(Boolean).join(' ').toLowerCase().includes(String(q).toLowerCase()))); return rows.slice(safeOffset,safeOffset+safeLimit); }
-    const params=[],where=["v.type::text<>'car'"];
+    if(!useDatabase){ let rows=[...memory.vehicles.values(),...fleet].filter(v=>v.ownerId==null&&String(v.type||'').toLowerCase()!=='car'); rows=rows.filter(v=>(!typeFilter||String(v.fleetVehicleClass||v.vehicleClass||'bike').toLowerCase()===typeFilter)&&(!statusFilter||String(v.operationalState||'AVAILABLE').toUpperCase()===statusFilter)&&(!city||String(v.city||'').toLowerCase()===String(city).toLowerCase())&&(!registration||String(v.registrationNumber||'').toLowerCase().includes(String(registration).toLowerCase()))&&(!model||String(v.model||'').toLowerCase().includes(String(model).toLowerCase()))&&(!q||[v.name,v.make,v.model,v.variant,v.city,v.registrationNumber].filter(Boolean).join(' ').toLowerCase().includes(String(q).toLowerCase()))); return rows.slice(safeOffset,safeOffset+safeLimit); }
+    const params=[],where=["v.owner_id is null","v.type::text<>'car'"];
     if(typeFilter){params.push(typeFilter);where.push('lower(coalesce(v.fleet_vehicle_class,\'bike\'))=$'+params.length);}
     if(statusFilter){if(!FLEET_STATES.has(statusFilter)){const e=new Error('Invalid fleet status.');e.code='INVALID_FLEET_STATE';throw e;}params.push(statusFilter);where.push('v.operational_state=$'+params.length);}
     if(city){params.push(String(city));where.push('lower(trim(v.city))=lower(trim($'+params.length+'))');}
@@ -734,8 +734,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function getRideOnFleetDashboard() {
-    if(!useDatabase){const rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car');const count=s=>rows.filter(v=>String(v.operationalState||'AVAILABLE').toUpperCase()===s).length;return {totalFleet:rows.length,available:count('AVAILABLE'),reserved:count('RESERVED'),rented:count('RENTED'),maintenance:count('MAINTENANCE'),inactive:count('INACTIVE')};}
-    const r=await pool.query("select count(*)::int total, count(*) filter(where operational_state='AVAILABLE')::int available, count(*) filter(where operational_state='RESERVED')::int reserved, count(*) filter(where operational_state='RENTED')::int rented, count(*) filter(where operational_state='MAINTENANCE')::int maintenance, count(*) filter(where operational_state='INACTIVE' or active=false)::int inactive from vehicles where type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter')");
+    if(!useDatabase){const rows=[...memory.vehicles.values(),...fleet].filter(v=>v.ownerId==null&&String(v.type||'').toLowerCase()!=='car');const count=s=>rows.filter(v=>String(v.operationalState||'AVAILABLE').toUpperCase()===s).length;return {totalFleet:rows.length,available:count('AVAILABLE'),reserved:count('RESERVED'),rented:count('RENTED'),maintenance:count('MAINTENANCE'),inactive:count('INACTIVE')};}
+    const r=await pool.query("select count(*)::int total, count(*) filter(where operational_state='AVAILABLE')::int available, count(*) filter(where operational_state='RESERVED')::int reserved, count(*) filter(where operational_state='RENTED')::int rented, count(*) filter(where operational_state='MAINTENANCE')::int maintenance, count(*) filter(where operational_state='INACTIVE' or active=false)::int inactive from vehicles where owner_id is null and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter')");
     const x=r.rows[0]||{};return {totalFleet:Number(x.total||0),available:Number(x.available||0),reserved:Number(x.reserved||0),rented:Number(x.rented||0),maintenance:Number(x.maintenance||0),inactive:Number(x.inactive||0)};
   }
 
@@ -759,7 +759,7 @@ export function createRepository({ databaseUrl, fleet }) {
   async function updateRideOnFleetVehicle(vehicleId,input,actorUserId) {
     const data=validateFleetVehicleInput(input);
     if(!useDatabase){
-      const v=memory.vehicles.get(String(vehicleId));if(!v||String(v.type||'').toLowerCase()==='car')return null;
+      const v=memory.vehicles.get(String(vehicleId));if(!v||v.ownerId!=null||String(v.type||'').toLowerCase()==='car')return null;
       const oldDaily=Number(v.dailyRate||v.pricePerDay||0),oldDeposit=Number(v.securityDeposit||0);
       Object.assign(v,data,{ownerId:null,updatedAt:new Date().toISOString()});
       if((data.dailyRate!=null&&Number(data.dailyRate)!==oldDaily)||(data.securityDeposit!=null&&Number(data.securityDeposit)!==oldDeposit)) {
@@ -820,7 +820,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const normalizedDamage=String(damageNotes||'').trim();
     const estimated=Math.max(0,Math.round(Number(estimatedAmountPaise)||0));
     if(!useDatabase){
-      const v=memory.vehicles.get(String(vehicleId)) || fleet.find(x=>String(x.id)===String(vehicleId));
+      const v=memory.vehicles.get(String(vehicleId)) || fleet.find(x=>String(x.id)===String(vehicleId)&&x.ownerId==null);
       if(!v)return null;
       if(inspectionType==='return'&&bookingId){
         const b=memory.bookings.get(String(bookingId));if(!b||String(b.vehicleId)!==String(vehicleId))throw Object.assign(new Error('Booking does not match vehicle.'),{code:'INSPECTION_BOOKING_MISMATCH'});
@@ -844,7 +844,7 @@ export function createRepository({ databaseUrl, fleet }) {
     const client=await pool.connect();
     try{
       await client.query('begin');
-      const vr=await client.query("select id,operational_state,current_odometer,current_fuel_battery from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);
+      const vr=await client.query("select id,operational_state,current_odometer,current_fuel_battery,owner_id from vehicles where id=$1 and owner_id is null and type::text<>'car' for update",[vehicleId]);
       if(!vr.rows[0])return null;
       let handover=null,b=null;
       if(bookingId&&['pickup','return'].includes(inspectionType)){
@@ -879,12 +879,12 @@ export function createRepository({ databaseUrl, fleet }) {
   async function assignFleetDeliveryStaff({bookingId,vehicleId,staffUserId,assignmentType='delivery',scheduledAt=null,actorUserId}) {
     const staff=await findCustomerById(staffUserId);if(!staff||staff.role!=='delivery_staff'){const e=new Error('Assigned user is not delivery staff.');e.code='INVALID_ASSIGNEE';throw e;}
     if(!useDatabase)return {id:crypto.randomUUID(),bookingId:String(bookingId),vehicleId:String(vehicleId),assignmentType,staffUserId:String(staffUserId),status:'assigned',scheduledAt};
-    const b=await pool.query('select id,vehicle_id from bookings where id=$1 and vehicle_id=$2',[bookingId,vehicleId]);if(!b.rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+    const b=await pool.query("select b.id,b.vehicle_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 and b.vehicle_id=$2 and v.owner_id is null and v.type::text<>'car' and coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter')",[bookingId,vehicleId]);if(!b.rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
     const q=await pool.query("insert into vehicle_assignments(booking_id,vehicle_id,assignment_type,staff_user_id,status,scheduled_at) values($1,$2,$3,$4,'assigned',$5) returning *",[bookingId,vehicleId,assignmentType,staffUserId,scheduledAt||null]);await pool.query('update bookings set assigned_staff_user_id=$2,scheduled_fulfillment_at=coalesce($3,scheduled_fulfillment_at),updated_at=now() where id=$1',[bookingId,staffUserId,scheduledAt||null]);await pool.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,details) values($1,$2,$3,\'assignment_created\',$4)',[vehicleId,bookingId,actorUserId||null,JSON.stringify({staffUserId,assignmentType})]);return q.rows[0];
   }
 
   async function listAssignedDeliveryJobs(staffUserId,{limit=50,offset=0}={}) {
-    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);if(!useDatabase)return [...memory.bookings.values()].filter(b=>String(b.assignedStaffUserId||'')===String(staffUserId)).slice(safeOffset,safeOffset+safeLimit);const q=await pool.query('select b.*,v.name as v_name,v.type as v_type,v.make,v.model,v.image_urls,v.description,v.delivery_available from bookings b join vehicles v on v.id=b.vehicle_id where b.assigned_staff_user_id=$1 order by coalesce(b.scheduled_fulfillment_at,b.created_at) asc limit $2 offset $3',[staffUserId,safeLimit,safeOffset]);return q.rows.map(row=>mapBooking({...row,vehicle:{id:String(row.vehicle_id),name:row.v_name,type:String(row.v_type),make:row.make,model:row.model,imageUrls:row.image_urls||[],description:row.description||'',deliveryAvailable:row.delivery_available!==false}}));
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);if(!useDatabase)return [...memory.bookings.values()].filter(b=>String(b.assignedStaffUserId||'')===String(staffUserId)&&b.vendorId==null).slice(safeOffset,safeOffset+safeLimit);const q=await pool.query('select b.*,v.name as v_name,v.type as v_type,v.make,v.model,v.image_urls,v.description,v.delivery_available from bookings b join vehicles v on v.id=b.vehicle_id where b.assigned_staff_user_id=$1 and v.owner_id is null and v.type::text<>'car' and coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter') order by coalesce(b.scheduled_fulfillment_at,b.created_at) asc limit $2 offset $3',[staffUserId,safeLimit,safeOffset]);return q.rows.map(row=>mapBooking({...row,vehicle:{id:String(row.vehicle_id),name:row.v_name,type:String(row.v_type),make:row.make,model:row.model,imageUrls:row.image_urls||[],description:row.description||'',deliveryAvailable:row.delivery_available!==false}}));
   }
 
   const RENTAL_LIFECYCLE = new Set(['CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED','READY_FOR_PICKUP','HANDED_OVER','ACTIVE_RENTAL','RETURN_REQUESTED','RETURNED','INSPECTION','COMPLETED','DAMAGE_REVIEW_REQUIRED','OVERDUE']);
@@ -975,7 +975,7 @@ export function createRepository({ databaseUrl, fleet }) {
     }
     const q=await pool.query(`select b.*,v.name as v_name,v.type as v_type,v.make,v.model,v.registration_number,v.operational_state,c.full_name as customer_name,c.phone as customer_phone
       from bookings b join vehicles v on v.id=b.vehicle_id join customers c on c.id=b.customer_id
-      where b.lifecycle_state not in ('COMPLETED') and b.status not in ('cancelled','rejected')
+      where v.owner_id is null and v.type::text<>'car' and coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter') and b.lifecycle_state not in ('COMPLETED') and b.status not in ('cancelled','rejected')
       order by b.end_at asc limit $1`,[safeLimit]);
     return q.rows.map(row=>({...mapBooking({...row,vehicle:{id:String(row.vehicle_id),name:row.v_name,type:String(row.v_type),make:row.make,model:row.model}}),customer:{id:String(row.customer_id),name:row.customer_name,phone:row.customer_phone},operationalState:row.operational_state,registrationNumber:row.registration_number}));
   }
