@@ -606,7 +606,7 @@ app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (re
   }).safeParse(req.body||{});
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid fleet checkout details.',details:parsed.error.flatten()}});
   const idempotencyKey=req.get('Idempotency-Key')?.trim()||null;
-  if(idempotencyKey&&idempotencyKey.length>128)return res.status(400).json({error:{code:'INVALID_IDEMPOTENCY_KEY'}});
+  if(!idempotencyKey||idempotencyKey.length<8||idempotencyKey.length>128)return res.status(400).json({error:{code:'INVALID_IDEMPOTENCY_KEY',message:'A valid Idempotency-Key is required for fleet checkout.'}});
   try{
     const order=await repository.createFleetOrder({customerId:req.user.id,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
     res.status(201).json({order,data:order});
@@ -624,7 +624,7 @@ app.post('/api/v1/reservations', supabaseRequireAuth, requireCustomer, async (re
     const reservation=await repository.createFleetReservation({vehicleIds:parsed.data.vehicleIds,customerId:req.user.id,startAt:parsed.data.startAt,endAt:parsed.data.endAt,idempotencyKey:key});
     res.status(201).json({reservation});
   }catch(error){
-    const status=error?.code==='INVALID_BOOKING_WINDOW'||error?.code==='INVALID_RESERVATION'?400:error?.code==='VEHICLE_UNAVAILABLE'?409:503;
+    const status=['INVALID_BOOKING_WINDOW','INVALID_RESERVATION','INVALID_IDEMPOTENCY_KEY'].includes(error?.code)?400:error?.code==='VEHICLE_UNAVAILABLE'?409:503;
     res.status(status).json({error:{code:error?.code||'RESERVATION_FAILED',message:error?.message||'Vehicle reservation could not be created.'}});
   }
 });
