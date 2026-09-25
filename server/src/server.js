@@ -12,8 +12,10 @@ import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
 import { createTrackingRealtimeServer } from './trackingRealtime.js';
+import { createPricingService } from './pricing.js';
 
 const fleet = [];
+const pricingService = createPricingService();
 
 const app = express();
 
@@ -87,43 +89,27 @@ function normalizeBookingInput(body = {}) {
 
 
 function validateBookingWindow(startAt,endAt) {
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
-    const error = new Error('Pickup and return must form a valid booking window.');
-    error.code = 'INVALID_BOOKING_WINDOW';
-    throw error;
-  }
-  if (start.getTime() < Date.now()) {
-    const error = new Error('Pickup cannot be in the past.');
-    error.code = 'INVALID_BOOKING_WINDOW';
-    throw error;
-  }
-  const days = Math.ceil((end.getTime() - start.getTime()) / 86400000);
-  if (days < 1 || days > 30) {
-    const error = new Error('Booking duration must be between 1 and 30 days.');
-    error.code = 'INVALID_BOOKING_WINDOW';
-    throw error;
-  }
-  return { start, end, days };
+  const parsed=pricingService.parseWindow(startAt,endAt);
+  return {start:parsed.start,end:parsed.end,days:parsed.days};
 }
 
 function pricing(vehicle, startAt, endAt, delivery) {
-  const start = new Date(startAt);
-  const end = new Date(endAt);
-  const durationMs = end.getTime() - start.getTime();
-  const days = Math.ceil(durationMs / 86400000);
-  if (!Number.isFinite(days) || days < 1 || days > 30) {
-    const error = new Error('Booking duration must be between 1 and 30 days.');
-    error.code = 'INVALID_BOOKING_WINDOW';
-    throw error;
-  }
-  const rental = vehicle.pricePerDay * days;
-  const deliveryFee = delivery ? 199 : 0;
-  const platformFee = Math.round(rental * 0.05);
-  const securityDeposit = Number(vehicle.securityDeposit || 0);
-  const total = rental + deliveryFee + platformFee + securityDeposit;
-  return { days, rental, deliveryFee, platformFee, securityDeposit, total, currency: 'INR', currencyUnit: 'rupees' };
+  const result = pricingService.calculateVehicle({ vehicle, startAt, endAt, delivery });
+  return {
+    days: result.days,
+    rental: result.rentalSubtotal,
+    deliveryFee: result.deliveryFee,
+    platformFee: result.platformFee,
+    tax: result.tax,
+    discount: result.discount,
+    securityDeposit: result.securityDeposit,
+    total: result.totalPayable,
+    totalPayable: result.totalPayable,
+    refundableSecurityDeposit: result.refundableSecurityDeposit,
+    payableExcludingDeposit: result.payableExcludingDeposit,
+    currency: result.currency,
+    currencyUnit: 'rupees',
+  };
 }
 
 const mobileVehicle = (v) => ({
@@ -354,7 +340,7 @@ const supabaseRequireAuth = async (req, res, next) => {
       });
     }
 
-    if (!identity?.id || !['customer','vendor','support','admin'].includes(identity.role)) {
+    if (!identity?.id || !['customer','vendor','support','admin','delivery_staff'].includes(identity.role)) {
       return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
     }
 
@@ -436,6 +422,13 @@ const fleetVehicleOpsSchema=z.object({
 });
 
 app.get('/api/v1/fleet-ops/dashboard',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{try{res.json({dashboard:await repository.getRideOnFleetDashboard()});}catch(error){res.status(503).json({error:{code:'FLEET_OPS_UNAVAILABLE',message:'Fleet operations dashboard is temporarily unavailable.'}});}});
+app.get('/api/v1/fleet-ops/vehicles/:id/pricing-history',supabaseRequireAuth,requireFleetOps,async(req,res)=>{
+  try{
+    const history=await repository.listRideOnPricingHistory(req.params.id,{limit:req.query.limit});
+    res.json({history,data:history});
+  }catch(error){res.status(503).json({error:{code:'PRICING_HISTORY_UNAVAILABLE',message:'Pricing history is temporarily unavailable.'}});}
+});
+
 app.get('/api/v1/fleet-ops/vehicles',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const vehicles=await repository.listRideOnFleetAdmin({q:req.query.q,type:req.query.type,city:req.query.city,status:req.query.status,registration:req.query.registration,model:req.query.model,limit:req.query.limit,offset:req.query.offset});res.json({vehicles,data:vehicles,meta:{count:vehicles.length}});}catch(error){res.status(400).json({error:{code:error?.code||'FLEET_LIST_FAILED',message:error?.message||'Could not load fleet.'}});}});
 app.post('/api/v1/fleet-ops/vehicles',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=fleetVehicleOpsSchema.safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid fleet vehicle details.',details:p.error.flatten()}});try{const v=await repository.createRideOnFleetVehicle(p.data,req.user.id);res.status(201).json({vehicle:v,data:v});}catch(error){res.status(error?.code==='VEHICLE_EXISTS'?409:400).json({error:{code:error?.code||'INVALID_FLEET_VEHICLE',message:error?.message||'Could not create fleet vehicle.'}});}});
 app.get('/api/v1/fleet-ops/vehicles/:id',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const v=(await repository.listRideOnFleetAdmin({q:req.params.id,limit:100})).find(x=>String(x.id)===String(req.params.id));if(!v)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Fleet vehicle not found.'}});res.json({vehicle:v});}catch(error){res.status(503).json({error:{code:'FLEET_VEHICLE_UNAVAILABLE',message:'Fleet vehicle is temporarily unavailable.'}});}});
@@ -639,6 +632,27 @@ app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (re
   }
 });
 
+app.post('/api/v1/reservations', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({vehicleIds:z.array(z.string().trim().min(1).max(64)).min(1).max(10),startAt:z.string().datetime(),endAt:z.string().datetime()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid reservation details.',details:parsed.error.flatten()}});
+  const key=req.get('Idempotency-Key')?.trim()||null;
+  try{
+    const reservation=await repository.createFleetReservation({vehicleIds:parsed.data.vehicleIds,customerId:req.user.id,startAt:parsed.data.startAt,endAt:parsed.data.endAt,idempotencyKey:key});
+    res.status(201).json({reservation});
+  }catch(error){
+    const status=error?.code==='INVALID_BOOKING_WINDOW'||error?.code==='INVALID_RESERVATION'?400:error?.code==='VEHICLE_UNAVAILABLE'?409:503;
+    res.status(status).json({error:{code:error?.code||'RESERVATION_FAILED',message:error?.message||'Vehicle reservation could not be created.'}});
+  }
+});
+
+app.post('/api/v1/reservations/:id/release', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    const reservation=await repository.releaseVehicleReservation(req.params.id,{customerId:req.user.id,status:'released'});
+    if(!reservation)return res.status(404).json({error:{code:'RESERVATION_NOT_FOUND',message:'Reservation not found.'}});
+    res.json({reservation});
+  }catch(error){res.status(409).json({error:{code:error?.code||'RESERVATION_RELEASE_FAILED',message:error?.message||'Reservation could not be released.'}});}
+});
+
 app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async (req,res)=>{
   try{
     if(!repository.getFleetOrder) return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
@@ -646,6 +660,27 @@ app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async 
     if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
     res.json({order});
   }catch(error){res.status(503).json({error:{code:'FLEET_ORDER_UNAVAILABLE',message:'Fleet booking is temporarily unavailable. Please retry.'}});}
+});
+
+app.post('/api/v1/pricing/preview', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({
+    vehicleId:z.string().trim().min(1).max(64),
+    startAt:z.string().datetime(),
+    endAt:z.string().datetime(),
+    delivery:z.boolean().default(false),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid pricing details.',details:parsed.error.flatten()}});
+  try{
+    const vehicle=await repository.getRideOnFleetVehicle(parsed.data.vehicleId);
+    if(!vehicle)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found or unavailable.'}});
+    const availability=await repository.checkVehicleAvailability(parsed.data.vehicleId,parsed.data.startAt,parsed.data.endAt);
+    if(!availability.available)return res.status(409).json({error:{code:'VEHICLE_UNAVAILABLE',message:'Vehicle is unavailable for the selected dates.'}});
+    const quote=pricingService.calculateVehicle({vehicle,startAt:parsed.data.startAt,endAt:parsed.data.endAt,delivery:parsed.data.delivery});
+    res.json({quote});
+  }catch(error){
+    const status=error?.code==='INVALID_BOOKING_WINDOW'?400:503;
+    res.status(status).json({error:{code:error?.code||'PRICING_PREVIEW_FAILED',message:error?.message||'Pricing is temporarily unavailable.'}});
+  }
 });
 
 app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustomer, async (req,res)=>{
@@ -656,7 +691,12 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
     if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
     if(order.paymentStatus==='paid')return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This fleet booking is already paid.'}});
     if(new Date(order.quoteExpiresAt)<=new Date())return res.status(409).json({error:{code:'QUOTE_EXPIRED',message:'This fleet quote has expired. Please recheck availability.'}});
-    const amountPaise=Math.round(Number(order.total)*100);
+    const fresh=await repository.recalculateFleetOrderPricing(order.id,req.user.id);
+    if(fresh.code==='QUOTE_STALE')return res.status(409).json({error:{code:'QUOTE_STALE',message:'Vehicle pricing or availability changed. Please regenerate the fleet quote.'}});
+    if(fresh.code==='VEHICLE_UNAVAILABLE')return res.status(409).json({error:{code:'VEHICLE_UNAVAILABLE',message:'One or more vehicles are no longer available.'}});
+    const amountPaise=fresh.totalPaise;
+    const requestedAmountPaise=req.body?.amountPaise==null?amountPaise:Number(req.body.amountPaise);
+    if(!Number.isInteger(requestedAmountPaise)||requestedAmountPaise!==amountPaise)return res.status(409).json({error:{code:'PAYMENT_AMOUNT_MISMATCH',message:'The payment amount does not match the current RideOn price.'}});
     const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise});
     const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
     res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:paymentRequest.paymentUrl,amount:result.payment.amountPaise,currency:'INR'},order});
@@ -895,9 +935,9 @@ app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async
 
 const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false});
 
-app.post('/api/v1/fleet-ops/bookings/:id/delivery/start',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const booking=await repository.getRentalBookingForCustomer(req.params.id,req.body?.customerId);if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});const session=await repository.startDelivery(null,req.params.id);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});}});
-app.post('/api/v1/fleet-ops/bookings/:id/delivery/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});try{const session=await repository.updateDeliveryLocation(null,req.params.id,p.data);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_LOCATION_FAILED',message:error?.message||'Delivery location could not be updated.'}});}});
-app.post('/api/v1/fleet-ops/bookings/:id/delivery/complete',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{try{const result=await repository.completeDelivery(null,req.params.id,req.body||{});res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:error?.message||'Delivery could not be completed.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/start',supabaseRequireAuth,requireRole('admin','support','delivery_staff'),async(req,res)=>{try{const session=await repository.startDelivery(req.user.id,req.params.id,{actorRole:req.user.role==='delivery_staff'?'delivery_staff':'ops'});res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});try{const session=await repository.updateDeliveryLocation(req.user.id,req.params.id,p.data);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_LOCATION_FAILED',message:error?.message||'Delivery location could not be updated.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/complete',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{try{const result=await repository.completeDelivery(req.user.id,req.params.id,req.body||{});res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:error?.message||'Delivery could not be completed.'}});}});
 app.post('/api/v1/vendor/bookings/:id/delivery/start', supabaseRequireAuth, requireVendor, async (req,res)=>{
   try{
     const session=await repository.startDelivery(req.vendor.id,req.params.id);
@@ -1499,7 +1539,7 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
 });
 
 app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
-  const parsed=z.object({ bookingId:z.string().uuid(), idempotencyKey:z.string().trim().min(8).max(128).optional() }).safeParse(req.body);
+  const parsed=z.object({ bookingId:z.string().uuid(), amountPaise:z.number().int().min(0).optional(), idempotencyKey:z.string().trim().min(8).max(128).optional() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'bookingId is required.',details:parsed.error.flatten()}});
   const booking=await repository.getBooking(parsed.data.bookingId, req.user.id);
   if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
@@ -1507,7 +1547,14 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
   if(booking.paymentStatus==='paid') return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This booking is already paid.'}});
   try {
     return await repository.withPaymentLock(booking.id, async () => {
-      const amountPaise=Math.round(Number(booking.pricing.total)*100);
+      const authoritative=await repository.getAuthoritativeBookingPrice(booking.id,req.user.id);
+      if(!authoritative) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+      const storedTotalPaise=Math.round(Number(booking.pricing.total)*100);
+      const currentTotalPaise=Math.round(Number(authoritative.totalPayable)*100);
+      if(storedTotalPaise!==currentTotalPaise) return res.status(409).json({error:{code:'QUOTE_STALE',message:'Vehicle pricing has changed. Please refresh your quote before payment.'}});
+      const requestedAmountPaise=req.body?.amountPaise==null?currentTotalPaise:Number(req.body.amountPaise);
+      if(!Number.isInteger(requestedAmountPaise)||requestedAmountPaise!==currentTotalPaise) return res.status(409).json({error:{code:'PAYMENT_AMOUNT_MISMATCH',message:'The payment amount does not match the current RideOn price.'}});
+      const amountPaise=currentTotalPaise;
       const existing=await repository.findPaymentByBooking(booking.id);
       if(existing && ['unpaid','pending'].includes(existing.status)) {
         return res.json({payment:{
