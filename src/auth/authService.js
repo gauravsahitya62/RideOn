@@ -68,12 +68,12 @@ export const authService = {
     try {
       const result=await rideOnApi.me();
       const user=result?.user;
-      if(!user?.id||!['customer','vendor'].includes(user.role)) throw new Error('Your RideOn account has no valid role.');
+      if(!user?.id||!['customer','vendor','support','admin','delivery_staff'].includes(user.role)) throw new Error('Your RideOn account has no valid role.');
       return user;
     } catch(apiError) {
       const token=await restoreAccessToken();
       if(!SUPABASE_URL||!SUPABASE_PUBLISHABLE_KEY||!token) throw apiError;
-      // A Supabase-only fallback is intentionally NOT allowed to invent a RideOn role.
+      // A Supabase-only fallback is intentionally NOT allowed to invent a RideOn role; operational roles must come from the RideOn backend.
       // The backend is the authority for customer/vendor identity.
       const response=await fetch(SUPABASE_URL+'/auth/v1/user',{headers:{apikey:SUPABASE_PUBLISHABLE_KEY,Authorization:'Bearer '+token}});
       const payload=await response.json().catch(()=>({}));
