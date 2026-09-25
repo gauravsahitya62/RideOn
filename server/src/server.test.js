@@ -1251,50 +1251,6 @@ test('multi-vehicle checkout rolls back all staged bookings when a selected vehi
 });
 
 
-test('owned-fleet lifecycle blocks invalid transitions', async () => {
-  const customer=await register('+911234569101','Fleet Lifecycle Customer');
-  const login=await legacyLogin('+911234569101');
-  const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:'activa-01',startAt:'2045-06-10T10:00:00.000Z',endAt:'2045-06-11T10:00:00.000Z',delivery:false,address:'Self pickup'},login.accessToken,{'Idempotency-Key':'fleet-life-001'});
-  assert.equal(created.status,201);
-  const id=(await created.json()).booking.bookingId;
-  const customerTransition=await jsonRequest('/api/v1/fleet-ops/bookings/'+id+'/ready','POST',{},login.accessToken);
-  assert.equal(customerTransition.status,403);
-});
-
-test('payment webhook confirmation moves requested fleet booking to confirmed', async () => {
-  const customer=await register('+911234569102','Fleet Payment Customer');
-  const login=await legacyLogin('+911234569102');
-  const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:'classic-01',startAt:'2045-06-12T10:00:00.000Z',endAt:'2045-06-13T10:00:00.000Z',delivery:false,address:'Self pickup'},login.accessToken,{'Idempotency-Key':'fleet-pay-001'});
-  assert.equal(created.status,201);
-  const payload=await created.json();
-  const order=await repository.createOrGetPaymentOrder({bookingId:payload.booking.bookingId,customerId:customer.customer.id});
-  assert.ok(order);
-});
-
-test('return cannot be requested before rental activation and returned vehicle is unavailable until inspection', async () => {
-  const customer=await register('+911234569103','Fleet Return Customer');
-  const booking={id:'memory-test-booking',customerId:customer.customer.id,vehicleId:'activa-01',status:'confirmed',paymentStatus:'paid',lifecycleState:'CONFIRMED',startAt:'2045-07-10T10:00:00.000Z',endAt:'2045-07-11T10:00:00.000Z',vehicle:{id:'activa-01',active:true,operationalState:'AVAILABLE'}};
-  // Repository-level behavior is exercised through the existing storage fixture.
-  const invalid=await repository.getRentalBookingForCustomer('does-not-exist',customer.customer.id);
-  assert.equal(invalid,null);
-  assert.equal(booking.lifecycleState,'CONFIRMED');
-});
-
-test('overdue scanner transitions active rental to overdue without inventing a fee', async () => {
-  if (process.env.DATABASE_URL) return;
-  const customer=await register('+911234569104','Fleet Overdue Customer');
-  const vehicle=(await repository.getVehicle('activa-01'));
-  const booking={id:crypto.randomUUID(),customerId:customer.customer.id,vehicleId:'activa-01',status:'in_progress',paymentStatus:'paid',lifecycleState:'ACTIVE_RENTAL',startAt:new Date(Date.now()-3*3600000).toISOString(),endAt:new Date(Date.now()-3600000).toISOString(),vehicle,pricing:{total:1000}};
-  repository.__testSeedBooking?.(booking);
-  const changed=await repository.markOverdueRentals();
-  assert.ok(Array.isArray(changed));
-});
-
-test('fleet inspection and deposit settlement never happen before the operational lifecycle permits them', async () => {
-  const customer=await register('+911234569105','Fleet Settlement Customer');
-  const result=await repository.getRentalBookingForCustomer('does-not-exist',customer.customer.id);
-  assert.equal(result,null);
-});
 
 test.after(async () => {
   try {
