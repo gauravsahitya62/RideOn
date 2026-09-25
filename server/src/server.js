@@ -135,7 +135,7 @@ const mobileVehicle = (v) => ({
   images: Array.isArray(v.imageUrls) ? v.imageUrls : [],
 });
 
-function publicBooking(booking) {
+function publicBooking(booking, { includeDeliveryLocation = false } = {}) {
   return {
     id: booking.id,
     bookingId: booking.id,
@@ -174,6 +174,10 @@ function publicBooking(booking) {
     deliveryStatus: booking.deliveryStatus || 'scheduled',
     deliveryStartedAt: booking.deliveryStartedAt,
     deliveredAt: booking.deliveredAt,
+    ...(includeDeliveryLocation && booking.deliveryStatus === 'in_delivery' && booking.deliveryLatitude != null && booking.deliveryLongitude != null ? {
+      deliveryLatitude: booking.deliveryLatitude,
+      deliveryLongitude: booking.deliveryLongitude,
+    } : {}),
   };
 }
 
@@ -710,7 +714,7 @@ app.get('/api/v1/vendor/bookings', supabaseRequireAuth, requireVendor, async (re
 app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async (req,res)=>{
   const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
   if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
-  res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+  res.json({data:publicBooking(booking,{includeDeliveryLocation:true}),booking:publicBooking(booking,{includeDeliveryLocation:true})});
 });
 
 const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false});
@@ -790,7 +794,7 @@ app.get('/api/v1/bookings/:id/tracking', supabaseRequireAuth, requireCustomer, a
     const last=result.session?.lastLocationAt?new Date(result.session.lastLocationAt).getTime():0;
     const stale=!last||Date.now()-last>staleThresholdSeconds*1000;
     const active=Boolean(result.session?.status==='active'&&result.booking.deliveryStatus==='in_delivery'&&!stale);
-    res.json({tracking:{active,stale,staleThresholdSeconds,session:result.session,booking:publicBooking(result.booking)}});
+    res.json({tracking:{active,stale,staleThresholdSeconds,session:result.session,booking:publicBooking(result.booking,{includeDeliveryLocation:active})}});
   }catch(error){
     res.status(error?.code==='BOOKING_NOT_FOUND'?404:500).json({error:{code:error?.code||'TRACKING_UNAVAILABLE',message:error?.code==='BOOKING_NOT_FOUND'?'Booking not found.':'We could not load live delivery tracking right now. Please retry.'}});
   }
@@ -813,7 +817,7 @@ app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVend
     const booking=await repository.updateVendorBookingStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
     const refund=(parsed.data.status==='rejected'&&['paid','refund_pending'].includes(String(booking.paymentStatus))) ? await requestRefundForBooking(booking.id) : {status:'not_applicable'};
     const latest=await repository.getVendorBooking(req.vendor.id,req.params.id);
-    res.json({data:publicBooking(latest||booking),booking:publicBooking(latest||booking),refund});
+    res.json({data:publicBooking(latest||booking,{includeDeliveryLocation:true}),booking:publicBooking(latest||booking,{includeDeliveryLocation:true}),refund});
   }catch(error){
     if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
     if(error.code==='INVALID_BOOKING_TRANSITION') return res.status(409).json({error:{code:error.code,message:'Booking cannot move to that status.'}});
