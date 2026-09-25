@@ -7,11 +7,11 @@ ALTER TABLE bookings
     'CONFIRMED','DELIVERY_ASSIGNED','PICKUP_ASSIGNED','DELIVERY_STARTED',
     'READY_FOR_PICKUP','HANDED_OVER','ACTIVE_RENTAL','RETURN_REQUESTED',
     'RETURNED','INSPECTION','COMPLETED','DAMAGE_REVIEW_REQUIRED','OVERDUE'
-  ));
+  ) NOT VALID;
 
 ALTER TABLE fleet_damage_cases
   ADD CONSTRAINT fleet_damage_cases_approved_within_estimate
-  CHECK (approved_deduction_paise <= estimated_amount_paise);
+  CHECK (approved_deduction_paise <= estimated_amount_paise) NOT VALID;
 
 CREATE INDEX IF NOT EXISTS bookings_fleet_active_window_idx
   ON bookings(vehicle_id,start_at,end_at)
