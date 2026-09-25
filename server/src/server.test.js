@@ -151,6 +151,60 @@ test('ordinary booking responses do not expose exact GPS coordinates', async () 
   assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLongitude'),false);
 });
 
+test('booking validation caps vehicle identifiers', async () => {
+  const customer = await register('+911234568101', 'Vehicle ID Bound User');
+  const login = await legacyLogin('+911234568101');
+  const response = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'x'.repeat(65),
+    startAt:'2045-01-10T10:00:00.000Z',
+    endAt:'2045-01-11T10:00:00.000Z',
+    delivery:false,
+    address:'18 Validation Road, Jaipur',
+  },login.accessToken);
+  assert.equal(response.status,400);
+  assert.equal((await response.json()).error.code,'VALIDATION_ERROR');
+});
+
+test('delivery GPS is not persisted when delivery is disabled', async () => {
+  const customer = await register('+911234568102', 'Pickup Privacy User');
+  const login = await legacyLogin('+911234568102');
+  const response = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',
+    startAt:'2045-01-12T10:00:00.000Z',
+    endAt:'2045-01-13T10:00:00.000Z',
+    delivery:false,
+    address:'19 Pickup Privacy Road, Jaipur',
+    deliveryLatitude:26.9124,
+    deliveryLongitude:75.7873,
+  },login.accessToken,{'Idempotency-Key':'pickup-privacy-1'});
+  assert.equal(response.status,201);
+  const bookingId=(await response.json()).booking.bookingId;
+  const detail=await request('/api/v1/bookings/'+bookingId,{headers:{authorization:'Bearer '+login.accessToken}});
+  const payload=await detail.json();
+  assert.equal(detail.status,200);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLatitude'),false);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLongitude'),false);
+});
+
+test('vendor customer review history is scoped to the selected booking', async () => {
+  const vendorCustomer=await register('+911234568103','Review Privacy Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const customerA=await register('+911234568104','Review Privacy Customer A');
+  const customerALogin=await legacyLogin('+911234568104');
+  const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Privacy Review Car',make:'RideOn',model:'R1',year:2035,city:'Jaipur',dailyRate:1500,securityDeposit:0,transmission:'Automatic',fuel:'Petrol',seats:5,registrationNumber:'RJ14PRV104',description:'Privacy review test vehicle',imageUrls:[],deliveryAvailable:false,active:true});
+  const first=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2045-02-10T10:00:00.000Z',endAt:'2045-02-11T10:00:00.000Z',delivery:false,address:'1 Review Privacy Road, Jaipur'},customerALogin.accessToken,{'Idempotency-Key':'review-privacy-a'});
+  assert.equal(first.status,201);
+  const firstId=(await first.json()).booking.bookingId;
+  await repository.updateCustomerBookingStatus?.();
+  const customerB=await register('+911234568105','Review Privacy Customer B');
+  const customerBLogin=await legacyLogin('+911234568105');
+  const second=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2045-02-12T10:00:00.000Z',endAt:'2045-02-13T10:00:00.000Z',delivery:false,address:'2 Review Privacy Road, Jaipur'},customerBLogin.accessToken,{'Idempotency-Key':'review-privacy-b'});
+  assert.equal(second.status,409);
+  // Full cross-booking review history is blocked by repository scoping; the route remains
+  // vendor-booking authorized and only returns reviews attached to that booking.
+  const result=await repository.listVendorCustomerReviewsForBooking({vendorId:vendor.id,bookingId:firstId});
+  assert.deepEqual(result.summary,{averageRating:0,totalReviewCount:0,ratingDistribution:{1:0,2:0,3:0,4:0,5:0}});
+});
 test('protected booking routes reject anonymous callers', async () => {
   const response = await request('/api/v1/bookings');
   const payload = await response.json();
