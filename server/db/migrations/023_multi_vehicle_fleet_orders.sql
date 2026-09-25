@@ -4,6 +4,7 @@
 
 CREATE TABLE IF NOT EXISTS fleet_orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  fleet_owner VARCHAR(32) NOT NULL DEFAULT 'rideon',
   customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
   fleet_owner VARCHAR(32) NOT NULL DEFAULT 'rideon',
   start_at TIMESTAMPTZ NOT NULL,
