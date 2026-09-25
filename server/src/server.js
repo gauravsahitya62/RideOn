@@ -1118,7 +1118,7 @@ app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || !payload?.access_token) {
-      return res.status(response.status===429?429:401).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:payload?.msg || payload?.error_description || 'The verification code is invalid or expired.' } });
+      return res.status(response.status===429?429:401).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:'The verification code is invalid or expired.' } });
     }
     return res.json({ data:{ accessToken:payload.access_token, refreshToken:payload.refresh_token, expiresIn:payload.expires_in }, accessToken:payload.access_token });
   } catch (error) {
