@@ -422,6 +422,13 @@ const fleetVehicleOpsSchema=z.object({
 });
 
 app.get('/api/v1/fleet-ops/dashboard',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{try{res.json({dashboard:await repository.getRideOnFleetDashboard()});}catch(error){res.status(503).json({error:{code:'FLEET_OPS_UNAVAILABLE',message:'Fleet operations dashboard is temporarily unavailable.'}});}});
+app.get('/api/v1/fleet-ops/vehicles/:id/pricing-history',supabaseRequireAuth,requireFleetOps,async(req,res)=>{
+  try{
+    const history=await repository.listRideOnPricingHistory(req.params.id,{limit:req.query.limit});
+    res.json({history,data:history});
+  }catch(error){res.status(503).json({error:{code:'PRICING_HISTORY_UNAVAILABLE',message:'Pricing history is temporarily unavailable.'}});}
+});
+
 app.get('/api/v1/fleet-ops/vehicles',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const vehicles=await repository.listRideOnFleetAdmin({q:req.query.q,type:req.query.type,city:req.query.city,status:req.query.status,registration:req.query.registration,model:req.query.model,limit:req.query.limit,offset:req.query.offset});res.json({vehicles,data:vehicles,meta:{count:vehicles.length}});}catch(error){res.status(400).json({error:{code:error?.code||'FLEET_LIST_FAILED',message:error?.message||'Could not load fleet.'}});}});
 app.post('/api/v1/fleet-ops/vehicles',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=fleetVehicleOpsSchema.safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid fleet vehicle details.',details:p.error.flatten()}});try{const v=await repository.createRideOnFleetVehicle(p.data,req.user.id);res.status(201).json({vehicle:v,data:v});}catch(error){res.status(error?.code==='VEHICLE_EXISTS'?409:400).json({error:{code:error?.code||'INVALID_FLEET_VEHICLE',message:error?.message||'Could not create fleet vehicle.'}});}});
 app.get('/api/v1/fleet-ops/vehicles/:id',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const v=(await repository.listRideOnFleetAdmin({q:req.params.id,limit:100})).find(x=>String(x.id)===String(req.params.id));if(!v)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Fleet vehicle not found.'}});res.json({vehicle:v});}catch(error){res.status(503).json({error:{code:'FLEET_VEHICLE_UNAVAILABLE',message:'Fleet vehicle is temporarily unavailable.'}});}});
