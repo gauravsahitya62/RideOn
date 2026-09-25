@@ -1232,13 +1232,13 @@ export function createRepository({ databaseUrl, fleet }) {
     if (!useDatabase) {
       const vehicle = memory.vehicles.get(vehicleId) || fleet.find(v => v.id === vehicleId);
       if (!vehicle) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-      if (vehicle.active === false) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
+      if (vehicle.active === false || String(vehicle.operationalState||'AVAILABLE')!=='AVAILABLE') return { vehicleId:String(vehicleId), exists:true, active:vehicle.active!==false, operationalState:String(vehicle.operationalState||'AVAILABLE'), available:false };
       const overlap = [...memory.bookings.values()].some(b => b.vehicleId===vehicleId && ['requested','confirmed','in_progress'].includes(b.status) && start < new Date(b.endAt) && end > new Date(b.startAt));
       return { vehicleId:String(vehicleId), exists:true, active:true, available:!overlap };
     }
-    const vehicleResult = await pool.query('select id,active from vehicles where id=$1',[vehicleId]);
+    const vehicleResult = await pool.query('select id,active,operational_state from vehicles where id=$1',[vehicleId]);
     if (!vehicleResult.rows[0]) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-    if (!vehicleResult.rows[0].active) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
+    if (!vehicleResult.rows[0].active || String(vehicleResult.rows[0].operational_state||'AVAILABLE')!=='AVAILABLE') return { vehicleId:String(vehicleId), exists:true, active:Boolean(vehicleResult.rows[0].active), operationalState:String(vehicleResult.rows[0].operational_state||'AVAILABLE'), available:false };
     const bookingResult = await pool.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",[vehicleId,startAt,endAt]);
     return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0 };
   }
@@ -3676,7 +3676,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     if(!useDatabase){
       const booking=memory.bookings.get(String(bookingId));
       if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
-      if(booking.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
+      if(String(booking.lifecycleState||'').toUpperCase()!=='COMPLETED'){const e=new Error('Reviews are available only after the rental is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
       const vendor=[...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(booking.vendorId));
       const vendorOwnerId=vendor?.ownerCustomerId||vendor?.owner_customer_id;
       let reviewType,revieweeId;
