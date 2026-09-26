@@ -401,14 +401,14 @@ const loadFleet=async()=>{try{const result=await rideOnApi.listFleet({city:selec
        setPaymentError('Online UPI checkout is not available for the configured provider. Your booking remains unpaid.');
      }
    }catch(error){
-     if(error?.code==='PAYTM_ONBOARDING_REQUIRED'||error?.code==='PAYMENT_NOT_CONFIGURED')setPaymentError('Online payment is not available yet. Your booking remains unpaid until Paytm checkout is enabled.');
+     if(error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error?.code==='PAYMENT_NOT_CONFIGURED')setPaymentError('Online payment is not available yet. Your booking remains unpaid until Razorpay checkout is enabled.');
      else setPaymentError(friendlyError(error, 'We could not start the payment. Your booking is still safe. Please try again.'));
      setPaymentState('blocked');
    }finally{setPaymentBusy(false);}
  };
  const retryPayment=()=>{setPaymentError('');setPaymentState(null);startPayment();};
  useEffect(()=>{
-   if(screen!=='payment'||!selectedBooking?.id) return;
+   if((screen!=='payment'||!selectedBooking?.id)&&(screen!=='fleetPayment'||!fleetCheckoutOrder?.id)) return;
    const subscription=AppState.addEventListener('change', state=>{
      if(state==='active'){if(screen==='payment')refreshPaymentStatus();if(screen==='fleetPayment')refreshFleetPayment();}
    });
@@ -444,7 +444,7 @@ const loadFleet=async()=>{try{const result=await rideOnApi.listFleet({city:selec
      if(event?.url?.startsWith('rideon://payment-return')){if(screen==='payment'&&selectedBooking?.id)refreshPaymentStatus();if(screen==='fleetPayment'&&fleetCheckoutOrder?.id)refreshFleetPayment();}
    });
    return()=>subscription.remove();
- },[screen,selectedBooking?.id]);
+ },[screen,selectedBooking?.id,fleetCheckoutOrder?.id]);
  useEffect(()=>{const handler=()=>{if(screen==='payment'){setScreen('review');return true;}if(screen==='success'){setScreen('');setSelected(null);setSelectedBooking(null);setPage('Trips');return true;}if(screen){setScreen('');return true;}return false;};const sub=BackHandler.addEventListener('hardwareBackPress',handler);return()=>sub.remove();},[screen]);
  const closeFlow=()=>{setScreen('');setSelected(null);setSelectedBooking(null);setBookingError('');setPaymentError('');setPaymentState(null);setPaymentRecord(null);setPaymentReferenceDraft('');setQuote(null);setDeliveryLocation(null);};
  const Header=({title,back=true})=><View style={s.innerHeader}>{back&&<TouchableOpacity onPress={()=>screen?closeFlow():setPage('Explore')}><Text style={s.back}>‹</Text></TouchableOpacity>}<Text style={s.innerTitle}>{title}</Text><View style={{width:24}}/></View>;
