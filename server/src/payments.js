@@ -317,6 +317,12 @@ export function createPaymentService({
     return safeEqualHex(expected, signature);
   }
 
+  function getCheckoutConfig({providerOrderId, amountPaise, callbackUrl} = {}) {
+    if (selectedProvider !== 'razorpay' || !razorpayConfigured) throw errorWithCode('Razorpay payment provider is not configured.', 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
+    const amount = validateAmount(amountPaise);
+    return {provider:'razorpay',keyId:String(keyId),orderId:String(providerOrderId),amountPaise:amount,currency:'INR',callbackUrl:String(callbackUrl || '')};
+  }
+
   function verifyCheckoutSignature({providerOrderId, providerPaymentId, signature} = {}) {
     if (selectedProvider !== 'razorpay' || !razorpayConfigured || !providerOrderId || !providerPaymentId || !signature) return false;
     const expected = razorpayCheckoutSignature(providerOrderId, providerPaymentId, keySecret);
@@ -383,6 +389,7 @@ export function createPaymentService({
     verifyWebhook,
     parseWebhook,
     verifyCheckoutSignature,
+    getCheckoutConfig,
     canTransition:transition,
     createCustomerPayment,
     verifyPayment,
