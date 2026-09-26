@@ -301,6 +301,7 @@ async function requestRefundForBooking(bookingId) {
     const providerResult=await payments.refundPayment({paymentId:payment.id,amountPaise:payment.amountPaise,providerOrderId:payment.providerOrderId,idempotencyKey:claim.idempotencyKey});
     if(providerResult?.confirmed && providerResult?.providerReference){
       const refunded=await repository.completePaymentRefund({paymentId:payment.id,providerReference:providerResult.providerReference});
+      console.log(JSON.stringify({level:'info',event:'payment_refund_result',bookingId,paymentId:payment.id,provider:payments.name,providerReference:providerResult.providerReference,status:'refunded'}));
       return {status:'refunded',payment:refunded,idempotencyKey:claim.idempotencyKey};
     }
     return {status:'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
@@ -1540,6 +1541,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       }
       const paymentReference = `rideon_${booking.id}`;
       const paymentRequest=await payments.createCustomerPayment({ orderId:paymentReference, amountPaise });
+      console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',bookingId:booking.id}));
       const result=await repository.createOrGetPaymentOrder({
         bookingId:booking.id,
         customerId:req.user.id,
@@ -1637,6 +1639,7 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, pa
   if(String(payment.status).toLowerCase()==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
   try {
     const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
+    console.log(JSON.stringify({level:'info',event:'payment_verification_result',requestId:req.requestId,provider:payments.name,paymentId:payment.id,providerOrderId:payment.providerOrderId,providerPaymentId:verified?.providerPaymentId||undefined,status:verified?.status||'pending',verified:Boolean(verified?.verified)}));
     if(!verified?.verified) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The provider has not authoritatively confirmed this payment yet.'}});
     if(verified.status==='failed'){
       const failed=await repository.applyPaymentEvent({eventId:`verify-failed:${payment.id}:${verified.providerPaymentId||verified.providerReference||'unknown'}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
