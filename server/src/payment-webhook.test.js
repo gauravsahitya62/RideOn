@@ -70,13 +70,23 @@ test('valid signed Cashfree webhook with no local RideOn payment is acknowledged
 });
 
 test('valid signed Cashfree webhook for a matching RideOn payment uses the existing lifecycle', async () => {
-  await repository.seedMemoryVehicles([{
-    id: 'webhook-test-bike', type: 'bike', name: 'Webhook Test Bike',
-    city: 'Jaipur', pricePerDay: 100, active: true,
-  }]);
+  if (!process.env.DATABASE_URL) {
+    await repository.seedMemoryVehicles([{
+      id: 'webhook-test-bike', type: 'bike', name: 'Webhook Test Bike',
+      city: 'Jaipur', pricePerDay: 100, active: true,
+    }]);
+  }
+  const vehicle = await repository.getVehicle(process.env.DATABASE_URL ? 'activa-01' : 'webhook-test-bike');
+  assert.ok(vehicle);
+  const customer = await repository.createCustomer({
+    fullName: 'Webhook Test Customer',
+    phone: '+911234569991',
+    email: 'webhook-test-9991@example.com',
+    passwordHash: 'test-password-hash',
+  });
   const booking = await repository.createBooking({
-    customerId: 'webhook-test-customer',
-    vehicle: { id: 'webhook-test-bike', pricePerDay: 100, ownerId: null },
+    customerId: customer.id,
+    vehicle: { ...vehicle, pricePerDay: 100, ownerId: vehicle.ownerId || null },
     startAt: '2050-01-10T10:00:00.000Z',
     endAt: '2050-01-11T10:00:00.000Z',
     delivery: false,
