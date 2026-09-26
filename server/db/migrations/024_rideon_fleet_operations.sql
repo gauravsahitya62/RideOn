@@ -111,6 +111,9 @@ CREATE INDEX IF NOT EXISTS fleet_operation_audit_vehicle_idx ON fleet_operation_
 CREATE INDEX IF NOT EXISTS fleet_operation_audit_booking_idx ON fleet_operation_audit(booking_id,created_at DESC);
 
 -- New RideOn fleet bookings must never depend on vendor ownership.
+-- The production database may already contain fleet_orders without fleet_owner.
+ALTER TABLE fleet_orders
+  ADD COLUMN IF NOT EXISTS fleet_owner VARCHAR(32) NOT NULL DEFAULT 'rideon';
 UPDATE fleet_orders SET fleet_owner='rideon' WHERE fleet_owner IS NULL;
 
 CREATE TABLE IF NOT EXISTS rental_handovers (
