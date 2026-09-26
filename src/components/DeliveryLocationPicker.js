@@ -5,7 +5,7 @@ import * as Location from 'expo-location';
 import { rideOnApi } from '../services/api';
 
 const C={ink:'#111827',muted:'#6B7280',orange:'#E56A3D',bg:'#F7F5F1',white:'#FFFFFF',line:'#E7E2DA',blue:'#2D7FF9'};
-const DEFAULT_REGION={latitude:26.9124,longitude:75.7873,latitudeDelta:0.12,longitudeDelta:0.12};
+const CITY_REGIONS={udaipur:{latitude:24.5854,longitude:73.7125,latitudeDelta:0.12,longitudeDelta:0.12},jaipur:{latitude:26.9124,longitude:75.7873,latitudeDelta:0.12,longitudeDelta:0.12}};
 
 export default function DeliveryLocationPicker({value,onChange,city}){
   const [draftAddress,setDraftAddress]=useState(value?.address||'');
@@ -51,7 +51,8 @@ export default function DeliveryLocationPicker({value,onChange,city}){
     }finally{setSearchBusy(false);}
   };
 
-  const region=currentPoint?{...currentPoint,latitudeDelta:.05,longitudeDelta:.05}:DEFAULT_REGION;
+  const cityKey=String(city||'').trim().toLowerCase();
+  const region=currentPoint?{...currentPoint,latitudeDelta:.05,longitudeDelta:.05}:(CITY_REGIONS[cityKey]||CITY_REGIONS.udaipur);
 
   return <View style={styles.wrap}>
     <View style={styles.row}><TextInput value={draftAddress} onChangeText={text=>{setDraftAddress(text);setError('');}} placeholder="Delivery address or landmark" placeholderTextColor="#A0A7B1" style={styles.input} multiline/><TouchableOpacity onPress={search} disabled={searchBusy} style={styles.find}>{searchBusy?<ActivityIndicator color={C.white}/>:<Text style={styles.findText}>Find</Text>}</TouchableOpacity></View>
