@@ -1569,7 +1569,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if (paymentRecord) {
         paymentRecord.status = event.status;
         paymentRecord.providerReference = event.providerReference;
-        paymentRecord.providerPaymentId = event.providerReference;
+        paymentRecord.providerPaymentId = event.providerPaymentId || event.providerReference;
         paymentRecord.updatedAt = new Date().toISOString();
       }
       booking.updatedAt = new Date().toISOString();
@@ -1615,7 +1615,7 @@ export function createRepository({ databaseUrl, fleet }) {
         return { applied:false, duplicate:true };
       }
       await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where id=$1',[resolvedBookingId,event.status,event.providerReference]);
-      await client.query('update payments set status=$2,provider_payment_id=coalesce(provider_payment_id,$3),provider_reference=$3,provider_order_id=coalesce(provider_order_id,$4),updated_at=now() where id=$1',[payment.id,event.status,event.providerReference,event.providerOrderId||null]);
+      await client.query('update payments set status=$2,provider_payment_id=coalesce($3,provider_payment_id),provider_reference=$4,provider_order_id=coalesce(provider_order_id,$5),updated_at=now() where id=$1',[payment.id,event.status,event.providerPaymentId||event.providerReference,event.providerReference,event.providerOrderId||null]);
       if(fleetOrder){
         await client.query('update fleet_orders set payment_status=$2,updated_at=now() where id=$1',[fleetOrder.id,event.status]);
         await client.query('update bookings set payment_status=$2,payment_provider_reference=$3,updated_at=now() where fleet_order_id=$1',[fleetOrder.id,event.status,event.providerReference]);
