@@ -413,7 +413,7 @@ const loadFleet=async()=>{try{const result=await rideOnApi.listFleet({city:selec
      if(state==='active'){if(screen==='payment')refreshPaymentStatus();if(screen==='fleetPayment')refreshFleetPayment();}
    });
    return()=>subscription.remove();
- },[screen,selectedBooking?.id]);
+ },[screen,selectedBooking?.id,fleetCheckoutOrder?.id]);
 
  const refreshPaymentStatus=async()=>{
    if(!selectedBooking?.id||paymentBusy)return;
