@@ -107,6 +107,7 @@ export function createRepository({ databaseUrl, fleet }) {
       q(`select count(*)::int count from vendors`),
       q(`select count(*)::int count from vehicles where active=true`),
       q(`select round(avg(rating),2) average from reviews`),
+      q(`select count(*) filter(where status='held' and updated_at between $1 and $2)::int held,count(*) filter(where status='refunded' and updated_at between $1 and $2)::int released,count(*) filter(where status='deducted' and updated_at between $1 and $2)::int deducted from security_deposits`),
     ]);
     return {from:start.toISOString(),to:end.toISOString(),bookings:{today:bookings.today||0,week:bookings.week||0,month:bookings.month||0,created:bookings.created||0,completed:bookings.completed||0,cancelled:bookings.cancelled||0},payments:{success:payments.success||0,failed:payments.failed||0},refunds:refunds.count||0,securityDeposits:{held:deposits.held||0,released:deposits.released||0,deducted:deposits.deducted||0},supportTickets:support.count||0,openSupportTickets:support.open||0,reviews:reviews.count||0,activeDeliveries:deliveries.active||0,customers:customers.count||0,vendors:vendors.count||0,activeVehicles:vehicles.count||0,averageRating:rating.average==null?null:Number(rating.average)};
   }
@@ -140,17 +141,22 @@ export function createRepository({ databaseUrl, fleet }) {
     if (pool) await pool.end();
   }
 
-  async function listVehicles({ type, city, q } = {}) {
+  async function listVehicles({ type, city, q, limit = 100, offset = 0 } = {}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||100));
+    const safeOffset=Math.max(0,Number(offset)||0);
     if (!useDatabase) {
       const typeValue = type?.toLowerCase();
       const cityValue = city?.trim().toLowerCase();
       const qValue = q?.trim().toLowerCase();
-      return [...fleet, ...memory.vehicles.values()].filter((v) =>
+      const rows = [...fleet, ...memory.vehicles.values()].filter((v) =>
         v.active !== false &&
         (!typeValue || typeValue === 'all' || String(v.type).toLowerCase() === typeValue) &&
         (!cityValue || String(v.city || '').trim().toLowerCase() === cityValue) &&
         (!qValue || `${v.name || ''} ${v.subtitle || ''} ${v.make || ''} ${v.model || ''}`.toLowerCase().includes(qValue))
-      );
+      ).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+      const page=rows.slice(safeOffset,safeOffset+safeLimit);
+      Object.defineProperty(page,'hasMore',{value:safeOffset+safeLimit<rows.length,enumerable:false});
+      return page;
     }
 
     // Public marketplace inventory is intentionally city-agnostic. A vendor's
@@ -187,11 +193,13 @@ export function createRepository({ databaseUrl, fleet }) {
       from vehicles
       where ${where.join(' and ')}
       order by name asc
+      limit ${safeLimit+1} offset ${safeOffset}
     `;
 
+    const queryParams=params;
     let rows;
     try {
-      ({ rows } = await pool.query(baseSql, params));
+      ({ rows } = await pool.query(baseSql, queryParams));
     } catch (primaryError) {
       // Schema drift can leave optional columns unavailable in an older
       // production database. Retry with only the immutable core catalogue
@@ -209,10 +217,11 @@ export function createRepository({ databaseUrl, fleet }) {
         from vehicles
         where ${where.join(' and ')}
         order by name asc
+        limit ${safeLimit+1} offset ${safeOffset}
       `;
 
       try {
-        ({ rows } = await pool.query(coreSql, params));
+        ({ rows } = await pool.query(coreSql, queryParams));
         rows = rows.map(row => ({
           ...row,
           transmission: null,
@@ -270,7 +279,9 @@ export function createRepository({ databaseUrl, fleet }) {
       }));
     }
 
-    return rows.map((row) => {
+    const hasMore=rows.length>safeLimit;
+    rows=rows.slice(0,safeLimit);
+    const result=rows.map((row) => {
       const extra = optionalById.get(String(row.id)) || {};
       const vendor = vendorByVehicleId.get(String(row.id)) || {};
       return {
@@ -302,6 +313,8 @@ export function createRepository({ databaseUrl, fleet }) {
         active: Boolean(row.active),
       };
     });
+    Object.defineProperty(result,'hasMore',{value:hasMore,enumerable:false});
+    return result;
   }
 
   async function listLocations() {
@@ -576,15 +589,24 @@ export function createRepository({ databaseUrl, fleet }) {
     return rows[0] ? mapVendor(rows[0]) : null;
   }
 
-  async function listVendorVehicles(vendorId, { active } = {}) {
-    if (!useDatabase) return [...(memory.vehicles?.values() || [])].filter(v => String(v.ownerId) === String(vendorId) && (active === undefined || v.active === active));
+  async function listVendorVehicles(vendorId, { active, limit=50, offset=0 } = {}) {
+    const safeLimit=Math.max(1,Math.min(50,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
+    if (!useDatabase) {
+      const rows=[...(memory.vehicles?.values() || [])].filter(v => String(v.ownerId) === String(vendorId) && (active === undefined || v.active === active)).sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
+      const page=rows.slice(safeOffset,safeOffset+safeLimit);
+      Object.defineProperty(page,'hasMore',{value:safeOffset+safeLimit<rows.length,enumerable:false});
+      return page;
+    }
     const params=[vendorId];
     const where=['owner_id=$1'];
     if (active !== undefined) { params.push(active); where.push(`active=$${params.length}`); }
     const { rows } = await pool.query(
       `select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,active,created_at,updated_at
-       from vehicles where ${where.join(' and ')} order by created_at desc`, params);
-    return rows.map(mapManagedVehicle);
+       from vehicles where ${where.join(' and ')} order by created_at desc limit ${safeLimit+1} offset ${safeOffset}`, params);
+    const hasMore=rows.length>safeLimit;
+    const result=rows.slice(0,safeLimit).map(mapManagedVehicle);
+    Object.defineProperty(result,'hasMore',{value:hasMore,enumerable:false});
+    return result;
   }
 
   async function getVendorVehicle(vendorId, vehicleId) {
@@ -907,11 +929,10 @@ export function createRepository({ databaseUrl, fleet }) {
       const overlap = [...memory.bookings.values()].some(b => b.vehicleId===vehicleId && ['requested','confirmed','in_progress'].includes(b.status) && start < new Date(b.endAt) && end > new Date(b.startAt));
       return { vehicleId:String(vehicleId), exists:true, active:true, available:!overlap };
     }
-    const vehicleResult = await pool.query('select id,active from vehicles where id=$1',[vehicleId]);
-    if (!vehicleResult.rows[0]) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
-    if (!vehicleResult.rows[0].active) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
-    const bookingResult = await pool.query("select 1 from bookings where vehicle_id=$1 and status in ('requested','confirmed','in_progress') and start_at<$3 and end_at>$2 limit 1",[vehicleId,startAt,endAt]);
-    return { vehicleId:String(vehicleId), exists:true, active:true, available:bookingResult.rowCount === 0 };
+    const availabilityResult = await pool.query("select v.id,v.active,not exists(select 1 from bookings b where b.vehicle_id=v.id and b.status in ('requested','confirmed','in_progress') and b.start_at<$2 and b.end_at>$1) as available from vehicles v where v.id=$3",[startAt,endAt,vehicleId]);
+    if (!availabilityResult.rows[0]) return { vehicleId:String(vehicleId), exists:false, active:false, available:false };
+    if (!availabilityResult.rows[0].active) return { vehicleId:String(vehicleId), exists:true, active:false, available:false };
+    return { vehicleId:String(vehicleId), exists:true, active:true, available:Boolean(availabilityResult.rows[0].available) };
   }
 
   async function createBooking(input) {
@@ -2055,9 +2076,8 @@ export function createRepository({ databaseUrl, fleet }) {
       const rows=[...memory.notifications.values()].filter(n=>String(n.recipientUserId)===String(userId)).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
       return {notifications:rows.slice(safeOffset,safeOffset+safeLimit),pagination:{limit:safeLimit,offset:safeOffset,count:rows.length,hasMore:safeOffset+safeLimit<rows.length}};
     }
-    const q=await pool.query('select * from notifications where recipient_user_id=$1 order by created_at desc limit $2 offset $3',[userId,safeLimit,safeOffset]);
-    const count=await pool.query('select count(*)::int as count from notifications where recipient_user_id=$1',[userId]);
-    const total=Number(count.rows[0]?.count||0);
+    const q=await pool.query(`select id,recipient_user_id,type,title,body,booking_id,ticket_id,read_at,created_at,updated_at,count(*) over()::int as total_count from notifications where recipient_user_id=$1 order by created_at desc limit $2 offset $3`,[userId,safeLimit,safeOffset]);
+    const total=Number(q.rows[0]?.total_count||0);
     return {notifications:q.rows.map(mapNotification),pagination:{limit:safeLimit,offset:safeOffset,count:q.rows.length,total,hasMore:safeOffset+q.rows.length<total}};
   }
 
