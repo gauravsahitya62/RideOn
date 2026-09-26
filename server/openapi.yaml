@@ -2,10 +2,54 @@ openapi: 3.0.3
 info:
   title: RideOn API
   version: 1.0.0
-  description: Demo API contract for RideOn vehicle discovery and rental booking requests. Not production-ready.
+  description: RideOn API contract for vehicle discovery, bookings, payments, support, delivery tracking and notifications.
 servers:
   - url: http://localhost:4000
 paths:
+  /health:
+    get:
+      summary: API liveness
+      responses:
+        '200':
+          description: API process is alive
+  /health/ready:
+    get:
+      summary: Production readiness
+      responses:
+        '200':
+          description: Critical production dependencies are ready
+        '503':
+          description: One or more critical dependencies are not ready
+  /api/v1/admin/metrics:
+    get:
+      summary: Server-side operational metrics
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Aggregated operational metrics
+        '403':
+          description: Admin access required
+  /api/v1/admin/reconciliation:
+    get:
+      summary: Read-only financial reconciliation
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Reconciliation findings
+        '403':
+          description: Admin access required
+  /api/v1/admin/operational-alerts:
+    get:
+      summary: Operational attention items
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Operational alerts
+        '403':
+          description: Admin access required
   /health:
     get:
       summary: API health check
@@ -89,6 +133,71 @@ paths:
         '200': { description: Booking cancelled }
         '404': { description: Booking not found }
         '409': { description: Booking cannot be cancelled }
+  /api/v1/notifications:
+    get:
+      summary: List authenticated user's notifications
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200': { description: Notification page }
+  /api/v1/notifications/unread-count:
+    get:
+      summary: Get authenticated user's unread notification count
+      responses:
+        '200': { description: Unread count }
+  /api/v1/notifications/{id}/read:
+    patch:
+      summary: Mark one owned notification read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Notification marked read }
+        '404': { description: Notification not found }
+  /api/v1/notifications/read-all:
+    patch:
+      summary: Mark all authenticated user's notifications read
+      responses:
+        '200': { description: Updated count }
+  /api/v1/notifications/push-token:
+    post:
+      summary: Register an Expo push token for the authenticated device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, platform]
+              properties:
+                token: { type: string }
+                platform: { type: string, enum: [ios, android, web, unknown] }
+                deviceId: { type: string, nullable: true }
+      responses:
+        '201': { description: Push token registered }
+    delete:
+      summary: Disable an owned Expo push token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200': { description: Push token disabled }
+  /api/v1/notifications/preferences:
+    get:
+      summary: Get authenticated user's notification preferences
+      responses:
+        '200': { description: Notification preferences }
+    patch:
+      summary: Update authenticated user's notification preferences
+      responses:
+        '200': { description: Updated notification preferences }
+
 components:
   schemas:
     BookingInput:

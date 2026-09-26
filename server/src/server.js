@@ -12,6 +12,8 @@ import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
 import { createTrackingRealtimeServer } from './trackingRealtime.js';
+import { createNotificationService } from './notifications.js';
+import { createObservability } from './observability.js';
 
 const fleet = [];
 
@@ -30,12 +32,12 @@ app.use((req, res, next) => {
   res.setHeader('X-Request-Id', requestId);
   res.on('finish', () => {
     const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
-    console.log(JSON.stringify({
-      level:'info', event:'http_request', requestId, timestamp:new Date().toISOString(),
-      method:req.method, route:req.path, status:res.statusCode,
-      durationMs:Math.round(durationMs * 100) / 100,
-      userId:req.user?.id || undefined,
-    }));
+    const rounded=Math.round(durationMs * 100) / 100;
+    observability.log('info','http_request',{requestId,method:req.method,route:req.path,status:res.statusCode,durationMs:rounded,userId:req.user?.id||undefined});
+    if(res.statusCode>=500 || res.statusCode===401 || res.statusCode===403){
+      observability.log(res.statusCode>=500?'error':'warn','request_failure',{requestId,method:req.method,route:req.path,status:res.statusCode,durationMs:rounded,category:res.statusCode>=500?'internal_error':'authorization'});
+    }
+    if(rounded>=Number(process.env.SLOW_REQUEST_MS||1000)) observability.log('warn','slow_request',{requestId,method:req.method,route:req.path,status:res.statusCode,durationMs:rounded});
   });
   next();
 });
@@ -184,8 +186,10 @@ function publicBooking(booking) {
 }
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
-console.log('[RideOnServer][ROUTES_READY]', JSON.stringify({ routes:['GET /health','GET /api/v1/version','GET /api/v1/me','POST /api/v1/auth/request-otp','POST /api/v1/auth/verify-otp','POST /api/v1/auth/complete-registration'] }));
-console.log('[RideOnServer][BOOT]', JSON.stringify({
+const notifications = createNotificationService({ repository });
+const observability = createObservability({ repository });
+observability.log('info','routes_ready',{routes:['GET /health','GET /api/v1/version','GET /api/v1/me','POST /api/v1/auth/request-otp','POST /api/v1/auth/verify-otp','POST /api/v1/auth/complete-registration']});
+observability.log('info','server_boot',{
   nodeEnv: process.env.NODE_ENV || 'development',
   port: Number(process.env.PORT) || 4000,
   buildCommit,
@@ -220,7 +224,7 @@ function normalizeOtpDestination({ channel, value }) {
 }
 
 function generateOtpCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 function hashOtpCode(code) {
@@ -290,6 +294,7 @@ async function requestRefundForBooking(bookingId) {
     const providerResult=await payments.refundPayment({paymentId:payment.id,amountPaise:payment.amountPaise,providerOrderId:payment.providerOrderId,idempotencyKey:claim.idempotencyKey});
     if(providerResult?.confirmed && providerResult?.providerReference){
       const refunded=await repository.completePaymentRefund({paymentId:payment.id,providerReference:providerResult.providerReference});
+      void observability.track({name:'refund_completed',eventKey:`refund:${payment.id}:${providerResult.providerReference}`,bookingId:bookingId,properties:{status:'refunded'}});
       return {status:'refunded',payment:refunded,idempotencyKey:claim.idempotencyKey};
     }
     return {status:'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
@@ -421,7 +426,69 @@ const requireRole = (...roles) => (req, res, next) => {
 };
 
 const requireCustomer = requireRole('customer');
+const requireAdmin = requireRole('admin');
 const requireSupport = requireRole('support','admin');
+
+app.get('/api/v1/notifications', supabaseRequireAuth, async (req,res)=>{
+  try {
+    const limit=Math.min(50,Math.max(1,Number(req.query.limit)||20));
+    const offset=Math.max(0,Number(req.query.offset)||0);
+    res.json(await repository.listNotifications({userId:req.user.id,limit,offset}));
+  } catch(error) { res.status(503).json({error:{code:'NOTIFICATIONS_UNAVAILABLE',message:'Notifications are temporarily unavailable. Please retry.'}}); }
+});
+
+app.get('/api/v1/notifications/unread-count', supabaseRequireAuth, async (req,res)=>{
+  try { res.json({count:await repository.countUnreadNotifications(req.user.id)}); }
+  catch { res.status(503).json({error:{code:'NOTIFICATIONS_UNAVAILABLE',message:'Notifications are temporarily unavailable. Please retry.'}}); }
+});
+
+app.patch('/api/v1/notifications/:id/read', supabaseRequireAuth, async (req,res)=>{
+  try {
+    const notification=await repository.markNotificationRead({userId:req.user.id,notificationId:req.params.id});
+    if(!notification) return res.status(404).json({error:{code:'NOTIFICATION_NOT_FOUND',message:'Notification not found.'}});
+    res.json({notification});
+  } catch { res.status(503).json({error:{code:'NOTIFICATIONS_UNAVAILABLE',message:'Notifications are temporarily unavailable. Please retry.'}}); }
+});
+
+app.patch('/api/v1/notifications/read-all', supabaseRequireAuth, async (req,res)=>{
+  try { res.json({updated:await repository.markAllNotificationsRead(req.user.id)}); }
+  catch { res.status(503).json({error:{code:'NOTIFICATIONS_UNAVAILABLE',message:'Notifications are temporarily unavailable. Please retry.'}}); }
+});
+
+app.post('/api/v1/notifications/push-token', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({token:z.string().trim().min(10).max(512),platform:z.enum(['ios','android','web','unknown']).default('unknown'),deviceId:z.string().trim().max(255).nullable().optional()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_PUSH_TOKEN',message:'Invalid notification device registration.'}});
+  try {
+    const device=await notifications.notifyPushRegistration({userId:req.user.id,...parsed.data});
+    res.status(201).json({device:{id:device.id,platform:device.platform,enabled:device.enabled}});
+  } catch(error) { res.status(error?.code==='INVALID_PUSH_TOKEN'?400:503).json({error:{code:error?.code||'PUSH_REGISTRATION_FAILED',message:error?.code==='INVALID_PUSH_TOKEN'?'Invalid notification device registration.':'Push notifications are temporarily unavailable.'}}); }
+});
+
+app.delete('/api/v1/notifications/push-token', supabaseRequireAuth, async (req,res)=>{
+  const token=String(req.body?.token||'').trim();
+  if(!token) return res.status(400).json({error:{code:'INVALID_PUSH_TOKEN',message:'Push token is required.'}});
+  try {
+    const device=await repository.listEnabledPushDevices(req.user.id);
+    const target=device.find(x=>x.pushToken===token);
+    if(target) await repository.disablePushDevice(target.id);
+    res.json({removed:Boolean(target)});
+  } catch { res.status(503).json({error:{code:'PUSH_REGISTRATION_FAILED',message:'Push notifications are temporarily unavailable.'}}); }
+});
+
+app.get('/api/v1/notifications/preferences', supabaseRequireAuth, async (req,res)=>{
+  try { res.json({preferences:await repository.getNotificationPreferences(req.user.id)}); }
+  catch { res.status(503).json({error:{code:'NOTIFICATION_PREFERENCES_UNAVAILABLE',message:'Notification preferences are temporarily unavailable.'}}); }
+});
+
+app.patch('/api/v1/notifications/preferences', supabaseRequireAuth, async (req,res)=>{
+  const parsed=z.object({transactionalEnabled:z.boolean().optional(),promotionalEnabled:z.boolean().optional()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_NOTIFICATION_PREFERENCES',message:'Invalid notification preferences.'}});
+  try {
+    const current=await repository.getNotificationPreferences(req.user.id);
+    const preferences=await repository.updateNotificationPreferences(req.user.id,{transactionalEnabled:parsed.data.transactionalEnabled??current.transactionalEnabled,promotionalEnabled:parsed.data.promotionalEnabled??current.promotionalEnabled});
+    res.json({preferences});
+  } catch { res.status(503).json({error:{code:'NOTIFICATION_PREFERENCES_UNAVAILABLE',message:'Notification preferences are temporarily unavailable.'}}); }
+});
 
 const requireVendor = async (req, res, next) => {
   if (!req.user || req.user.role !== 'vendor') {
@@ -444,17 +511,37 @@ app.get('/api/v1/version', (_req, res) => {
 
 app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => { res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...(payments.capabilities||{})}}); });
 
-app.get('/health', async (_req, res) => {
-  const storage = await repository.health();
-  const healthy = storage.mode === 'memory' || storage.reachable !== false;
-  res.status(healthy ? 200 : 503).json({
-    status: healthy ? 'ok' : 'degraded',
-    service: 'rideon-api',
-    storage,
-    paymentProvider: payments.name,
-    buildCommit,
-    timestamp: new Date().toISOString(),
-  });
+app.get('/health', (_req, res) => {
+  res.status(200).json({status:'ok',service:'rideon-api',buildCommit,timestamp:new Date().toISOString()});
+});
+app.get('/health/ready', async (_req,res)=>{
+  const storage=await repository.health();
+  const checks={
+    database:storage.mode==='memory'?process.env.NODE_ENV!=='production':storage.reachable===true,
+    paymentProvider:!isProduction || payments.liveIntegrationReady===true,
+    routing:!isProduction || Boolean(process.env.GOOGLE_ROUTES_API_KEY),
+    auth:!isProduction || Boolean(process.env.SUPABASE_URL&&process.env.SUPABASE_PUBLISHABLE_KEY),
+  };
+  const ready=Object.values(checks).every(Boolean);
+  res.status(ready?200:503).json({status:ready?'ready':'not_ready',service:'rideon-api',checks,buildCommit,timestamp:new Date().toISOString()});
+});
+
+app.get('/api/v1/admin/metrics', supabaseRequireAuth, requireAdmin, async (req,res)=>{
+  try{
+    observability.log('info','admin_action',{action:'view_metrics',actorUserId:req.user.id});
+    const result=await repository.getAdminMetrics({from:req.query.from,to:req.query.to});
+    res.json({metrics:result});
+  }catch(error){
+    res.status(error?.code==='INVALID_ANALYTICS_RANGE'?400:503).json({error:{code:error?.code||'ADMIN_METRICS_UNAVAILABLE',message:error?.code==='INVALID_ANALYTICS_RANGE'?'Invalid analytics date range.':'Operational metrics are temporarily unavailable. Please retry.'}});
+  }
+});
+app.get('/api/v1/admin/reconciliation', supabaseRequireAuth, requireAdmin, async (req,res)=>{
+  try{observability.log('info','admin_action',{action:'view_reconciliation',actorUserId:req.user.id});res.json({reconciliation:await repository.getFinancialReconciliation({limit:req.query.limit})});}
+  catch{res.status(503).json({error:{code:'RECONCILIATION_UNAVAILABLE',message:'Financial reconciliation is temporarily unavailable. Please retry.'}});}
+});
+app.get('/api/v1/admin/operational-alerts', supabaseRequireAuth, requireAdmin, async (req,res)=>{
+  try{observability.log('info','admin_action',{action:'view_operational_alerts',actorUserId:req.user.id});res.json({alerts:await repository.getOperationalAlerts({limit:req.query.limit})});}
+  catch{res.status(503).json({error:{code:'OPERATIONAL_ALERTS_UNAVAILABLE',message:'Operational alerts are temporarily unavailable. Please retry.'}});}
 });
 
 app.get('/api/v1/geocoding/search', supabaseRequireAuth, requireCustomer, async (req,res) => {
@@ -737,6 +824,9 @@ const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeader
 app.post('/api/v1/vendor/bookings/:id/delivery/start', supabaseRequireAuth, requireVendor, async (req,res)=>{
   try{
     const session=await repository.startDelivery(req.vendor.id,req.params.id);
+    void observability.track({name:'delivery_started',eventKey:`delivery_started:${req.params.id}`,actorUserId:req.vendor.id,bookingId:req.params.id});
+    void notifications.notifyBooking({bookingId:req.params.id,type:'delivery_started',title:'Delivery started',body:'Your vehicle delivery has started. Live tracking is now active.',audience:'customer',dedupeKey:`delivery_started:${req.params.id}`});
+    void notifications.notifyBooking({bookingId:req.params.id,type:'vehicle_in_delivery',title:'Vehicle is on the way',body:'Your RideOn vehicle is now in delivery.',audience:'customer',dedupeKey:`vehicle_in_delivery:${req.params.id}`});
     res.json({tracking:{session,status:'in_delivery',active:true}});
   }catch(error){
     const map={BOOKING_NOT_FOUND:404,DELIVERY_START_NOT_ALLOWED:409,DELIVERY_LOCATION_REQUIRED:409,PAYMENT_REQUIRED_FOR_DELIVERY:409,DELIVERY_ALREADY_ACTIVE:409};
@@ -782,12 +872,39 @@ app.post('/api/v1/vendor/bookings/:id/delivery/complete', supabaseRequireAuth, r
   if(!parsed.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'The final delivery location is invalid.'}});
   try{
     const result=await repository.completeDelivery(req.vendor.id,req.params.id,parsed.data);
+    void observability.track({name:'delivery_completed',eventKey:`delivery_completed:${req.params.id}`,actorUserId:req.vendor.id,bookingId:req.params.id});
     trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    void notifications.notifyBooking({bookingId:req.params.id,type:'vehicle_delivered',title:'Vehicle delivered',body:'Your RideOn vehicle has been delivered.',audience:'customer',dedupeKey:`vehicle_delivered:${req.params.id}`});
     res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
   }catch(error){
     const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,DELIVERY_COMPLETION_NOT_ALLOWED:409,INVALID_DELIVERY_LOCATION:400};
     const messages={TRACKING_NOT_ACTIVE:'Live delivery tracking is not active.',TRACKING_SESSION_EXPIRED:'This delivery session has expired.',DELIVERY_COMPLETION_NOT_ALLOWED:'Delivery cannot be completed in the current booking state.',INVALID_DELIVERY_LOCATION:'The final delivery location is invalid.'};
     res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:messages[error?.code]||'We could not mark the vehicle delivered right now. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/security-deposit/inspection', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({
+    deductionPaise:z.coerce.number().int().min(0).optional().default(0),
+    reason:z.string().trim().max(1000).optional().default(''),
+    evidenceReference:z.string().trim().max(500).optional().default(''),
+    refundProviderReference:z.string().trim().max(255).optional().default(''),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_SECURITY_DEPOSIT_INSPECTION',message:'Please provide valid deposit inspection details.'}});
+  try{
+    const result=await repository.recordSecurityDepositInspection(req.vendor.id,req.params.id,parsed.data);
+    void observability.track({name:`security_deposit_${result.deposit?.status||'updated'}`,eventKey:`security_deposit:${req.params.id}:${result.deposit?.status||'updated'}`,actorUserId:req.vendor.id,bookingId:req.params.id,properties:{status:result.deposit?.status||'updated'}});
+    const deposit=result.deposit;
+    if(deposit?.status==='refund_pending'){
+      void notifications.notifyBooking({bookingId:req.params.id,type:'refund_initiated',title:'Security deposit refund initiated',body:'Your security deposit is awaiting refund processing.',audience:'customer',dedupeKey:`security_deposit_refund_pending:${req.params.id}`});
+    }
+    if(deposit?.status==='deducted'){
+      void notifications.notifyBooking({bookingId:req.params.id,type:'dispute_created',title:'Security deposit deduction recorded',body:'A security deposit deduction was recorded after vehicle return. Review the booking for details.',audience:'customer',dedupeKey:`security_deposit_deducted:${req.params.id}`});
+    }
+    res.json({booking:publicBooking(result.booking),deposit});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,DEPOSIT_INSPECTION_NOT_ALLOWED:409,DEPOSIT_DEDUCTION_INVALID:400,DEPOSIT_DEDUCTION_REASON_REQUIRED:400,DEPOSIT_EVIDENCE_REQUIRED:400};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'SECURITY_DEPOSIT_INSPECTION_FAILED',message:error?.message||'We could not record the security deposit inspection. Please retry.'}});
   }
 });
 
@@ -832,7 +949,18 @@ app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVend
     const booking=await repository.updateVendorBookingStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
     const refund=(parsed.data.status==='rejected'&&['paid','refund_pending'].includes(String(booking.paymentStatus))) ? await requestRefundForBooking(booking.id) : {status:'not_applicable'};
     const latest=await repository.getVendorBooking(req.vendor.id,req.params.id);
-    res.json({data:publicBooking(latest||booking),booking:publicBooking(latest||booking),refund});
+    const finalBooking=latest||booking;
+    const notificationMap={confirmed:{type:'booking_confirmed',title:'Booking confirmed',body:'Your RideOn booking has been confirmed.'},rejected:{type:'booking_rejected',title:'Booking declined',body:'The vendor declined your RideOn booking.'},cancelled:{type:'booking_cancelled',title:'Booking cancelled',body:'Your RideOn booking has been cancelled.'},in_progress:{type:'booking_confirmed',title:'Rental started',body:'Your RideOn rental is now active.'},completed:{type:'booking_completed',title:'Booking completed',body:'Your RideOn booking is complete. You can now review your experience.'}};
+    const event=notificationMap[parsed.data.status];
+    void observability.track({name:`booking_${parsed.data.status}`,eventKey:`booking_status:${finalBooking.id}:${parsed.data.status}`,actorUserId:req.vendor.id,bookingId:finalBooking.id,properties:{status:parsed.data.status}});
+    if(event) void notifications.notifyBooking({bookingId:finalBooking.id,...event,audience:'customer',dedupeKey:`booking_status:${finalBooking.id}:${parsed.data.status}`});
+    if(parsed.data.status==='confirmed' && finalBooking.delivery){
+      void notifications.notifyBooking({bookingId:finalBooking.id,type:'delivery_assigned',title:'Delivery assigned',body:'Your vehicle delivery has been assigned and will be coordinated by the vendor.',audience:'customer',dedupeKey:`delivery_assigned:${finalBooking.id}`});
+      void notifications.notifyBooking({bookingId:finalBooking.id,type:'delivery_required',title:'Delivery required',body:'This confirmed booking includes vehicle delivery.',audience:'vendor',dedupeKey:`delivery_required:${finalBooking.id}`});
+    }
+    if(parsed.data.status==='completed') void (async()=>{try{const status=await repository.getReviewStatus({bookingId:finalBooking.id,userId:finalBooking.customerId,role:'customer'});if(!status?.review) await notifications.notifyBooking({bookingId:finalBooking.id,type:'review_reminder',title:'Share your RideOn experience',body:'Your booking is complete. Leave a review when you are ready.',audience:'customer',dedupeKey:`review_reminder:${finalBooking.id}`});}catch{}})();
+    if(parsed.data.status==='completed') void notifications.notifyBooking({bookingId:finalBooking.id,type:'vehicle_returned',title:'Vehicle returned',body:'The vehicle has been marked returned and the booking is complete.',audience:'vendor',dedupeKey:`vehicle_returned:${finalBooking.id}`});
+    res.json({data:publicBooking(finalBooking),booking:publicBooking(finalBooking),refund});
   }catch(error){
     if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
     if(error.code==='INVALID_BOOKING_TRANSITION') return res.status(409).json({error:{code:error.code,message:'Booking cannot move to that status.'}});
@@ -894,6 +1022,13 @@ app.post('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer',
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please check the support request details.',details:parsed.error.flatten()}});
   try{
     const result=await repository.createSupportTicket({...parsed.data,raisedByUserId:req.user.id,raisedByRole:req.user.role,idempotencyKey:req.get('Idempotency-Key')||null});
+    if(!result.idempotentReplay){
+      void notifications.notifySupport({type:'new_support_ticket',title:'New support ticket',body:'A new customer or vendor support request needs attention.',ticketId:result.ticket.id,bookingId:result.ticket.bookingId||null,dedupeKey:`new_support_ticket:${result.ticket.id}`});
+      const categoryMap={Payment:'payment_issue',Refund:'refund_issue','Security Deposit':'payment_issue',Delivery:'delivery_issue','Damage':'dispute_created',Cancellation:'dispute_created'};
+      const issueType=categoryMap[result.ticket.category];
+      if(issueType) void notifications.notifySupport({type:issueType,title:'Support issue requires attention',body:`A ${result.ticket.category.toLowerCase()} support issue was created.`,ticketId:result.ticket.id,bookingId:result.ticket.bookingId||null,dedupeKey:`${issueType}:${result.ticket.id}`});
+    }
+    if(!result.idempotentReplay) void observability.track({name:'support_ticket_created',eventKey:`support_ticket:${result.ticket.id}`,actorUserId:req.user.id,bookingId:result.ticket.bookingId||null,properties:{category:result.ticket.category,priority:result.ticket.priority}});
     res.status(result.idempotentReplay?200:201).json({ticket:result.ticket,idempotentReplay:result.idempotentReplay});
   }catch(error){return supportResponse(res,error);}
 });
@@ -926,6 +1061,9 @@ app.post('/api/v1/support/tickets/:id/messages', supabaseRequireAuth, requireRol
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
   try{
     const message=await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal});
+    const supportContext=await repository.getSupportTicketNotificationContext(req.params.id);
+    if(['support','admin'].includes(req.user.role) && !parsed.data.isInternal && supportContext?.ownerUserId) void notifications.notify({recipientUserId:supportContext.ownerUserId,type:'support_reply',title:'Support replied',body:'RideOn support has replied to your ticket.',ticketId:req.params.id,bookingId:supportContext.bookingId,dedupeKey:`support_reply:${message.id}`});
+    if(['customer','vendor'].includes(req.user.role)) void notifications.notifySupport({type:'new_support_ticket',title:'Customer support reply',body:'A customer or vendor replied to a support ticket.',ticketId:req.params.id,bookingId:supportContext?.bookingId||null,dedupeKey:`support_customer_reply:${message.id}`});
     res.status(201).json({message});
   }catch(error){return supportResponse(res,error);}
 });
@@ -957,15 +1095,22 @@ app.patch('/api/v1/support/admin/tickets/:id/assignment', supabaseRequireAuth, r
 app.patch('/api/v1/support/admin/tickets/:id/status', supabaseRequireAuth, requireSupport, async (req,res)=>{
   const parsed=z.object({status:z.enum(['open','in_progress','waiting_for_user','resolved','closed']),resolution:z.string().trim().max(5000).optional().nullable()}).safeParse(req.body||{});
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid status and optional resolution.'}});
-  try{res.json({ticket:await repository.updateSupportTicketStatus({ticketId:req.params.id,userId:req.user.id,role:req.user.role,status:parsed.data.status,resolution:parsed.data.resolution})});}
-  catch(error){return supportResponse(res,error);}
+  try{
+    const ticket=await repository.updateSupportTicketStatus({ticketId:req.params.id,userId:req.user.id,role:req.user.role,status:parsed.data.status,resolution:parsed.data.resolution});
+    if(['resolved','closed'].includes(parsed.data.status)) void notifications.notify({recipientUserId:ticket.raisedByUserId,type:'support_reply',title:'Support ticket updated',body:'Your RideOn support ticket has been updated.',ticketId:ticket.id,bookingId:ticket.bookingId||null,dedupeKey:`support_status:${ticket.id}:${parsed.data.status}`});
+    res.json({ticket});
+  }catch(error){return supportResponse(res,error);}
 });
 
 app.post('/api/v1/support/admin/tickets/:id/messages', supabaseRequireAuth, requireSupport, supportRateLimit, async (req,res)=>{
   const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
-  try{res.status(201).json({message:await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal})});}
-  catch(error){return supportResponse(res,error);}
+  try{
+    const message=await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal});
+    const context=await repository.getSupportTicketNotificationContext(req.params.id);
+    if(!parsed.data.isInternal && context?.ownerUserId) void notifications.notify({recipientUserId:context.ownerUserId,type:'support_reply',title:'Support replied',body:'RideOn support has replied to your ticket.',ticketId:req.params.id,bookingId:context.bookingId,dedupeKey:`support_reply:${message.id}`});
+    res.status(201).json({message});
+  }catch(error){return supportResponse(res,error);}
 });
 
 app.post('/api/v1/support/admin/tickets/:id/resolve', supabaseRequireAuth, requireSupport, async (req,res)=>{
@@ -980,6 +1125,8 @@ app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCu
   if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
   try{
     const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'customer',...parsed.data});
+    if(review?.revieweeUserId) void notifications.notify({recipientUserId:review.revieweeUserId,type:'customer_review',title:'New customer review',body:'A customer has left a review for your RideOn service.',bookingId:req.params.id,dedupeKey:`customer_review:${review.id}`});
+    void observability.track({name:'review_created',eventKey:`review:${review.id}`,actorUserId:req.user.id,bookingId:req.params.id,properties:{reviewType:'customer_to_vendor'}});
     res.status(201).json({review});
   }catch(error){return reviewResponse(res,error);}
 });
@@ -987,7 +1134,7 @@ app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCu
 app.post('/api/v1/vendor/bookings/:id/review', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
   const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
   if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
-  try{const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});res.status(201).json({review});}catch(error){return reviewResponse(res,error);}
+  try{const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});if(review?.revieweeUserId) void notifications.notify({recipientUserId:review.revieweeUserId,type:'customer_review',title:'New vendor review',body:'Your vendor has left a review for your RideOn booking.',bookingId:req.params.id,dedupeKey:`vendor_review:${review.id}`});res.status(201).json({review});}catch(error){return reviewResponse(res,error);}
 });
 
 app.post('/api/v1/vendor/bookings/:id/reviews/customer', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
@@ -1044,11 +1191,7 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
       const providerPayload = await response.text().catch(() => '');
       let providerError = {};
       try { providerError = providerPayload ? JSON.parse(providerPayload) : {}; } catch {}
-      console.error('[rideon-auth] Supabase OTP request failed', {
-        status: response.status,
-        code: providerError?.error_code || providerError?.error,
-        message: providerError?.msg || providerError?.message || providerError?.error_description,
-      });
+      observability.log('error','supabase_otp_request_failed',{requestId:req.requestId,status:response.status,code:providerError?.error_code||providerError?.error});
       return res.status(response.status === 429 ? 429 : 502).json({
         error:{
           code:'OTP_REQUEST_FAILED',
@@ -1065,17 +1208,7 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
 });
 
 app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) => {
-  console.log('[RideOnAuth][COMPLETE_REGISTRATION_REQUEST]', JSON.stringify({
-    requestId:req.requestId,
-    method:req.method,
-    path:req.path,
-    hasAuthorization:Boolean(req.get('Authorization')),
-    bodyKeys:Object.keys(req.body || {}),
-    accountType:req.body?.accountType || null,
-    fullNameLength:String(req.body?.fullName || '').length,
-    hasPhone:Boolean(req.body?.phone),
-    buildCommit
-  }));
+  observability.log('info','registration_request',{requestId:req.requestId,accountType:req.body?.accountType||null,fullNameLength:String(req.body?.fullName||'').length,hasPhone:Boolean(req.body?.phone),buildCommit});
   const header=req.get('Authorization')||'';
   const token=header.startsWith('Bearer ')?header.slice(7).trim():'';
   if(!token) return res.status(401).json({error:{code:'AUTH_REQUIRED',message:'Authentication required.'}});
@@ -1103,11 +1236,11 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
       });
       if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
     }
+    void observability.track({name:'registration_completed',eventKey:`registration:${customer.id}`,actorUserId:customer.id,properties:{role:customer.role}});
     return res.json({user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},customer,vendor});
   }catch(error){
-    console.error('[RideOnAuth][COMPLETE_REGISTRATION_ERROR]', JSON.stringify({requestId:req.requestId, code:error?.code, message:error?.message, buildCommit}));
+    observability.log('error','registration_completion_failed',{requestId:req.requestId,code:error?.code||'REGISTRATION_COMPLETION_FAILED'});
     if(error.code==='ACCOUNT_TYPE_CONFLICT') return res.status(409).json({error:{code:error.code,message:error.message}});
-    console.error(JSON.stringify({level:'error',event:'registration_completion_failed',requestId:req.requestId,code:error?.code||'REGISTRATION_COMPLETION_FAILED'}));
     return res.status(500).json({error:{code:'REGISTRATION_COMPLETION_FAILED',message:'We could not complete your RideOn registration right now.'}});
   }
 });
@@ -1130,7 +1263,7 @@ app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
     }
     return res.json({ data:{ accessToken:payload.access_token, refreshToken:payload.refresh_token, expiresIn:payload.expires_in }, accessToken:payload.access_token });
   } catch (error) {
-    console.error('[rideon-auth] OTP verification failed', { message:error?.message, code:error?.code });
+    observability.log('warn','otp_verification_failed',{requestId:req.requestId,code:error?.code||'OTP_VERIFICATION_FAILED'});
     return res.status(502).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:'Unable to verify the RideOn code right now.' } });
   }
 });
@@ -1247,6 +1380,9 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
       pricing: pricingData,
       idempotencyKey,
     });
+    void observability.track({name:'booking_created',eventKey:`booking_created:${booking.id}`,actorUserId:req.user.id,bookingId:booking.id,properties:{delivery:Boolean(booking.delivery)}});
+    void notifications.notifyBooking({bookingId:booking.id,type:'booking_created',title:'Booking request sent',body:'Your RideOn booking request has been sent to the vendor.',audience:'customer',dedupeKey:`booking_created:${booking.id}`});
+    void notifications.notifyBooking({bookingId:booking.id,type:'new_booking',title:'New booking request',body:'A customer has requested your vehicle.',audience:'vendor',dedupeKey:`new_booking:${booking.id}`});
     res.status(201).json({ data: publicBooking(booking), booking: publicBooking(booking) });
   } catch (error) {
     if (error.code === 'IDEMPOTENCY_REPLAY') return res.status(200).json({ data: publicBooking(error.booking), booking: publicBooking(error.booking) });
@@ -1294,6 +1430,10 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
     const result=await repository.cancelBooking(req.params.id,req.user.id,{reason:parsed.data.reason||'customer_cancelled'});
     const refund=result.calculation.totalRefund>0 ? await requestRefundForBooking(req.params.id) : {status:'not_applicable'};
     const latest=await repository.getBooking(req.params.id,req.user.id);
+    void notifications.notifyBooking({bookingId:req.params.id,type:'booking_cancelled',title:'Booking cancelled',body:'Your RideOn booking has been cancelled.',audience:'customer',dedupeKey:`booking_cancelled:${req.params.id}:customer`});
+    void notifications.notifyBooking({bookingId:req.params.id,type:'booking_cancelled',title:'Booking cancelled',body:'A customer cancelled a RideOn booking.',audience:'vendor',dedupeKey:`booking_cancelled:${req.params.id}:vendor`});
+    void observability.track({name:'booking_cancelled',eventKey:`booking_cancelled:${req.params.id}`,actorUserId:req.user.id,bookingId:req.params.id,properties:{refundAmount:result.calculation.totalRefund>0}});
+    if(result.calculation.totalRefund>0) void notifications.notifyBooking({bookingId:req.params.id,type:'refund_initiated',title:'Refund initiated',body:'Your RideOn refund has been initiated.',audience:'customer',dedupeKey:`refund_initiated:${req.params.id}`});
     res.json({data:publicBooking(latest||result.booking),booking:publicBooking(latest||result.booking),cancellation:result.calculation,refund});
   } catch(error) {
     if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
@@ -1324,6 +1464,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       }
       const paymentReference = `rideon_${booking.id}`;
       const paymentRequest=await payments.createCustomerPayment({ orderId:paymentReference, amountPaise });
+      void observability.track({name:'payment_creation_requested',eventKey:`payment_creation:${booking.id}:${req.get('Idempotency-Key')||'default'}`,actorUserId:req.user.id,bookingId:booking.id});
       const result=await repository.createOrGetPaymentOrder({
         bookingId:booking.id,
         customerId:req.user.id,
@@ -1368,8 +1509,11 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, as
     if(!providerReference) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The payment is awaiting an authoritative provider reference.'}});
     const applied=await repository.applyPaymentEvent({eventId:`verify:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'paid'});
     if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
+    void observability.track({name:'payment_verified',eventKey:`payment_verified:${payment.id}:${providerReference}`,actorUserId:req.user.id,bookingId:payment.bookingId});
     const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
     const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
+    void notifications.notifyBooking({bookingId:payment.bookingId,type:'payment_success',title:'Payment confirmed',body:'Your RideOn payment has been verified.',audience:'customer',dedupeKey:`payment_verified:${payment.id}:${providerReference}`});
+    void notifications.notifyBooking({bookingId:payment.bookingId,type:'payment_received',title:'Payment received',body:'Payment for a RideOn booking has been confirmed.',audience:'vendor',dedupeKey:`payment_verified_vendor:${payment.id}:${providerReference}`});
     return res.json({payment:latestPayment,verification:'verified',bookingPaymentStatus:latestBooking?.paymentStatus||'pending'});
   }catch(error){
     if(error.code==='PAYTM_ONBOARDING_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI payment verification is not enabled for the configured provider yet. No payment has been marked successful.'}});
@@ -1406,15 +1550,26 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
   if (!event.bookingId) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT'} });
   const result = await repository.applyPaymentEvent(event);
   if (result.invalid) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT',message:'Payment event does not match the booking payment.'} });
+  if(result.applied && !result.duplicate){
+    const paymentEventMap={paid:{type:'payment_success',title:'Payment confirmed',body:'Your RideOn payment has been verified.'},failed:{type:'payment_failed',title:'Payment failed',body:'Your RideOn payment could not be confirmed.'},refund_pending:{type:'refund_initiated',title:'Refund initiated',body:'Your RideOn refund has been initiated.'},refunded:{type:'refund_completed',title:'Refund completed',body:'Your RideOn refund has been completed.'}};
+    const eventInfo=paymentEventMap[event.status];
+    if(eventInfo) void notifications.notifyBooking({bookingId:event.bookingId,...eventInfo,audience:'customer',dedupeKey:`payment:${event.eventId}:${event.status}:customer`});
+    if(event.status==='paid'){
+      void notifications.notifyBooking({bookingId:event.bookingId,type:'payment_received',title:'Payment received',body:'Payment for a RideOn booking has been confirmed.',audience:'vendor',dedupeKey:`payment:${event.eventId}:vendor`});
+      void notifications.notifyBooking({bookingId:event.bookingId,type:'security_deposit_held',title:'Security deposit held',body:'Your refundable security deposit has been held with the booking payment.',audience:'customer',dedupeKey:`security_deposit_held:${event.eventId}`});
+    }
+    if(event.status==='refunded'){
+      void notifications.notifyBooking({bookingId:event.bookingId,type:'security_deposit_released',title:'Security deposit released',body:'Your refundable security deposit has been released with the completed refund.',audience:'customer',dedupeKey:`security_deposit_released:${event.eventId}`});
+    }
+    if(event.status==='failed') void notifications.notifySupport({type:'payment_issue',title:'Payment issue',body:'A RideOn payment failed provider verification and may require support attention.',bookingId:event.bookingId,dedupeKey:`payment_issue:${event.eventId}`});
+  }
+  if(result.applied&&!result.duplicate) void observability.track({name:`payment_${event.status}`,eventKey:`payment_event:${event.eventId}`,bookingId:event.bookingId,properties:{status:event.status}});
   res.json({received:true,applied:result.applied,duplicate:result.duplicate});
 });
 
 app.use((req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found', requestId:req.requestId } }));
 app.use((err, req, res, _next) => {
-  console.error(JSON.stringify({
-    level:'error', event:'api_error', requestId:req.requestId, timestamp:new Date().toISOString(),
-    method:req.method, route:req.path, status:500, code:err?.code || 'INTERNAL_ERROR', userId:req.user?.id || undefined,
-  }));
+  observability.log('error','api_error',{requestId:req.requestId,method:req.method,route:req.path,status:500,category:err?.code||'INTERNAL_ERROR',userId:req.user?.id||undefined});
   if (err.code === 'CUSTOMER_EXISTS') return res.status(409).json({ error: { code: err.code, message: 'A customer with those credentials already exists.' } });
   if (err.code === 'INVALID_CREDENTIALS') return res.status(401).json({ error: { code: err.code, message: 'Phone or password is incorrect.' } });
   if (err.code === 'PAYMENT_PROVIDER_UNSUPPORTED') return res.status(500).json({ error: { code: err.code, message: 'Unsupported payment provider configuration.' } });
@@ -1427,6 +1582,6 @@ const port = Number(process.env.PORT) || 4000;
 const httpServer=createServer(app);
 const trackingRealtime=createTrackingRealtimeServer({httpServer,repository,authenticate:resolveTrackingUser});
 if (process.env.NODE_ENV !== 'test') {
-  httpServer.listen(port, () => console.log(`RideOn API listening on :${port}`));
+  httpServer.listen(port, () => observability.log('info','api_listening',{port,buildCommit}));
 }
 export { app, repository, httpServer, trackingRealtime };

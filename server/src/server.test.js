@@ -92,6 +92,16 @@ test('health endpoint reports memory storage when DATABASE_URL is absent', async
   assert.equal(payload.storage.persistent, false);
 });
 
+test('readiness endpoint distinguishes memory test mode from production dependency readiness', async () => {
+  const response=await request('/health/ready');
+  const payload=await response.json();
+  assert.equal(response.status,200);
+  assert.equal(payload.status,'ready');
+  assert.equal(payload.checks.database,true);
+  assert.equal(payload.checks.auth,true);
+});
+
+
 test('vehicle list preserves existing aliases and search contract', async () => {
   const response = await request('/api/v1/vehicles?q=CRETA');
   const payload = await response.json();
@@ -888,6 +898,31 @@ test('payment capability model is UPI-first and provider-agnostic', () => {
   assert.equal(service.capabilities.supportsIntent,true);
   assert.equal(service.capabilities.supportsVpa,true);
   assert.deepEqual(service.capabilities.apps.map(x=>x.id),['gpay','phonepe','paytm']);
+});
+
+test('notification inbox is authenticated, paginated, and read-scoped', async () => {
+  const user = await register('+911234567980', 'Notification QA User');
+  const login = await legacyLogin('+911234567980');
+  const created = await repository.createNotification({
+    recipientUserId:user.customer.id,
+    type:'booking_confirmed',
+    title:'Booking confirmed',
+    body:'Your RideOn booking is confirmed.',
+    dedupeKey:'qa-notification-980',
+  });
+  assert.ok(created);
+  const list = await request('/api/v1/notifications?limit=20&offset=0',{headers:{authorization:'Bearer '+login.accessToken}});
+  assert.equal(list.status,200);
+  const payload=await list.json();
+  assert.equal(payload.notifications[0].id,created.id);
+  assert.equal(payload.notifications[0].readAt,null);
+  const read=await request('/api/v1/notifications/'+created.id+'/read',{method:'PATCH',headers:{authorization:'Bearer '+login.accessToken,'content-type':'application/json'},body:'{}'});
+  assert.equal(read.status,200);
+  const unread=await request('/api/v1/notifications/unread-count',{headers:{authorization:'Bearer '+login.accessToken}});
+  assert.equal(unread.status,200);
+  assert.equal((await unread.json()).count,0);
+  const anonymous=await request('/api/v1/notifications');
+  assert.equal(anonymous.status,401);
 });
 
 test('request correlation is returned on a 404 response', async () => {

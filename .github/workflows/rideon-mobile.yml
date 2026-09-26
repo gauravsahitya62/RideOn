@@ -9,13 +9,17 @@ on:
       - 'app.config.js'
       - 'eas.json'
       - 'package.json'
+      - 'package-lock.json'
       - 'src/**'
       - '.github/workflows/rideon-mobile.yml'
   pull_request:
     paths:
       - 'App.js'
       - 'app.json'
+      - 'app.config.js'
+      - 'eas.json'
       - 'package.json'
+      - 'package-lock.json'
       - 'src/**'
       - '.github/workflows/rideon-mobile.yml'
   workflow_dispatch:
@@ -31,6 +35,12 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm install --no-audit --no-fund
+      - name: Upload generated lockfile for synchronization
+        uses: actions/upload-artifact@v4
+        with:
+          name: rideon-generated-package-lock
+          path: package-lock.json
+          if-no-files-found: error
       - run: npx expo-doctor
       - name: Validate production Expo configuration
         env:
@@ -38,4 +48,8 @@ jobs:
           EAS_BUILD_PROFILE: production
           EAS_UPDATE_CHANNEL: production
           EXPO_PUBLIC_API_URL: https://production-api.invalid
+          EXPO_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: public-validation-placeholder
+          EXPO_PUBLIC_GOOGLE_MAPS_ANDROID_KEY: public-validation-placeholder
+          EXPO_PUBLIC_GOOGLE_MAPS_IOS_KEY: public-validation-placeholder
         run: npx expo config --type public

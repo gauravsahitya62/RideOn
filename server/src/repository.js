@@ -13,7 +13,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
+  const memory = { analyticsEvents:new Map(), customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map(),notifications:new Map(),pushDevices:new Map() };
 
   const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', accountStatus:row.account_status || row.accountStatus || 'active', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
   const mapBooking = (row) => {
@@ -72,6 +72,63 @@ export function createRepository({ databaseUrl, fleet }) {
       updatedAt:iso(row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt)
     };
   };
+
+  async function recordAnalyticsEvent({eventName,eventKey,actorUserId=null,bookingId=null,properties={}}={}){
+    if(!eventName||!eventKey) return {recorded:false};
+    if(!useDatabase){
+      const key=String(eventKey);
+      if(!memory.analyticsEvents) memory.analyticsEvents=new Map();
+      if(memory.analyticsEvents.has(key)) return {recorded:false,duplicate:true};
+      const event={id:crypto.randomUUID(),eventName:String(eventName),eventKey:key,actorUserId,bookingId,properties,occurredAt:new Date().toISOString()};
+      memory.analyticsEvents.set(key,event); return {recorded:true,event};
+    }
+    const r=await pool.query(`insert into analytics_events(event_name,event_key,actor_user_id,booking_id,properties) values($1,$2,$3,$4,$5::jsonb) on conflict(event_key) do nothing returning id,event_name,event_key,occurred_at`,[String(eventName),String(eventKey),actorUserId,bookingId,JSON.stringify(properties||{})]);
+    return r.rows[0]?{recorded:true,event:r.rows[0]}:{recorded:false,duplicate:true};
+  }
+  async function getAdminMetrics({from,to}={}){
+    const end=to?new Date(to):new Date();
+    const start=from?new Date(from):new Date(end.getTime()-30*86400000);
+    if(Number.isNaN(start.getTime())||Number.isNaN(end.getTime())||start>end){const e=new Error('Invalid analytics date range');e.code='INVALID_ANALYTICS_RANGE';throw e;}
+    if(!useDatabase){
+      const events=[...(memory.analyticsEvents?.values()||[])].filter(e=>new Date(e.occurredAt)>=start&&new Date(e.occurredAt)<=end);
+      const count=n=>events.filter(e=>e.eventName===n).length;
+      return {from:start.toISOString(),to:end.toISOString(),bookings:{today:count('booking_created'),week:count('booking_created'),month:count('booking_created'),completed:count('booking_completed'),cancelled:count('booking_cancelled')},payments:{success:count('payment_success'),failed:count('payment_failed')},refunds:count('refund_completed'),securityDeposits:count('security_deposit_held')+count('security_deposit_released'),supportTickets:count('support_ticket_created'),reviews:count('review_created'),activeDeliveries:0,customers:0,vendors:0,activeVehicles:0,averageRating:null};
+    }
+    const p=[start,end];
+    const q=async(sql)=>{const r=await pool.query(sql,p);return r.rows[0]||{};};
+    const [bookings,payments,refunds,support,reviews,deliveries,customers,vendors,vehicles,rating,deposits]=await Promise.all([
+      q(`select count(*) filter(where created_at >= current_date)::int today,count(*) filter(where created_at >= date_trunc('week',now()))::int week,count(*) filter(where created_at >= date_trunc('month',now()))::int month,count(*) filter(where status='completed' and created_at between $1 and $2)::int completed,count(*) filter(where status='cancelled' and created_at between $1 and $2)::int cancelled,count(*) filter(where created_at between $1 and $2)::int created from bookings`),
+      q(`select count(*) filter(where status='paid' and updated_at between $1 and $2)::int success,count(*) filter(where status='failed' and updated_at between $1 and $2)::int failed from payments`),
+      q(`select count(*) filter(where transaction_type='refund' and status='completed' and created_at between $1 and $2)::int count from financial_transactions`),
+      q(`select count(*) filter(where created_at between $1 and $2)::int count,count(*) filter(where status in ('open','in_progress','waiting_for_user'))::int open from support_tickets`),
+      q(`select count(*) filter(where created_at between $1 and $2)::int count from reviews`),
+      q(`select count(*) filter(where delivery_status='in_delivery')::int active from bookings`),
+      q(`select count(*)::int count from customers`),
+      q(`select count(*)::int count from vendors`),
+      q(`select count(*)::int count from vehicles where active=true`),
+      q(`select round(avg(rating),2) average from reviews`),
+    ]);
+    return {from:start.toISOString(),to:end.toISOString(),bookings:{today:bookings.today||0,week:bookings.week||0,month:bookings.month||0,created:bookings.created||0,completed:bookings.completed||0,cancelled:bookings.cancelled||0},payments:{success:payments.success||0,failed:payments.failed||0},refunds:refunds.count||0,securityDeposits:{held:deposits.held||0,released:deposits.released||0,deducted:deposits.deducted||0},supportTickets:support.count||0,openSupportTickets:support.open||0,reviews:reviews.count||0,activeDeliveries:deliveries.active||0,customers:customers.count||0,vendors:vendors.count||0,activeVehicles:vehicles.count||0,averageRating:rating.average==null?null:Number(rating.average)};
+  }
+  async function getFinancialReconciliation({limit=100}={}){
+    if(!useDatabase) return {generatedAt:new Date().toISOString(),items:[],limitations:['Provider-side state cannot be queried without a live provider reconciliation API.']};
+    const r=await pool.query(`select b.id as booking_id,b.status as booking_status,b.payment_status,p.id as payment_id,p.status as payment_record_status,p.provider_order_id,p.provider_reference,sd.status as deposit_status,ft.status as refund_transaction_status
+      from bookings b left join payments p on p.booking_id=b.id left join security_deposits sd on sd.booking_id=b.id left join financial_transactions ft on ft.booking_id=b.id and ft.transaction_type='refund'
+      where (p.status='pending' or b.payment_status='pending' or b.payment_status='refund_pending' or ft.status='pending' or (b.payment_status='paid' and p.id is null) or (p.status='paid' and b.payment_status not in ('paid','settlement_pending','settled')))
+      order by b.updated_at asc limit $1`,[Math.min(500,Math.max(1,Number(limit)||100))]);
+    return {generatedAt:new Date().toISOString(),items:r.rows.map(x=>({...x})),limitations:['Provider-side state cannot be queried without a live provider reconciliation API.','This report is read-only and does not mutate financial records.']};
+  }
+  async function getOperationalAlerts({limit=100}={}){
+    if(!useDatabase) return {generatedAt:new Date().toISOString(),alerts:[]};
+    const max=Math.min(500,Math.max(1,Number(limit)||100));
+    const [pending,stale,expired,notificationsFailed]=await Promise.all([
+      pool.query(`select id as booking_id,'payment_stuck_pending' as type,updated_at from bookings where payment_status in ('pending','refund_pending') and updated_at < now()-interval '30 minutes' order by updated_at asc limit $1`,[max]),
+      pool.query(`select booking_id,'tracking_stale' as type,last_location_at as updated_at from tracking_sessions where status='active' and (last_location_at is null or last_location_at < now()-interval '3 minutes') order by last_location_at asc nulls first limit $1`,[max]),
+      pool.query(`select booking_id,'tracking_session_expired' as type,expires_at as updated_at from tracking_sessions where status='active' and expires_at < now() order by expires_at asc limit $1`,[max]),
+      pool.query(`select id as notification_id,'notification_delivery_failed' as type,updated_at from push_devices where failure_count >= 5 and enabled=true order by updated_at asc limit $1`,[max]),
+    ]);
+    return {generatedAt:new Date().toISOString(),alerts:[...pending.rows,...stale.rows,...expired.rows,...notificationsFailed.rows].sort((a,b)=>new Date(a.updated_at)-new Date(b.updated_at))};
+  }
 
   async function health() {
     if (!pool) return { mode:'memory', persistent:false };
@@ -354,6 +411,7 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function ensureVendorForCustomer(customerId, input = {}) {
+    const serviceCity = input.serviceCity || (process.env.NODE_ENV === 'test' ? (process.env.TEST_SERVICE_CITY || 'Test City') : null);
     if (!useDatabase) {
       if (!memory.vendors) memory.vendors = new Map();
       const existing = memory.vendors.get(customerId);
@@ -367,7 +425,7 @@ export function createRepository({ databaseUrl, fleet }) {
         email: input.email || '',
         address: input.address || input.serviceCity || '',
         status: 'active',
-        serviceCity: input.serviceCity || 'Jaipur',
+        serviceCity: serviceCity || '',
         serviceArea: input.serviceArea || {},
       };
       memory.vendors.set(customerId, vendor);
@@ -387,7 +445,7 @@ export function createRepository({ databaseUrl, fleet }) {
         input.phone || (customer.phone?.startsWith('supa-') ? '' : customer.phone) || '',
         input.email || customer.email || '',
         input.address || input.serviceCity || '',
-        input.serviceCity || 'Jaipur',
+        serviceCity,
         input.serviceArea || {},
       ]
     );
@@ -1955,5 +2013,153 @@ export function createRepository({ databaseUrl, fleet }) {
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
+  const mapNotification = (row) => row && ({
+    id: String(row.id),
+    recipientUserId: String(row.recipient_user_id ?? row.recipientUserId),
+    type: row.type,
+    title: row.title,
+    body: row.body,
+    bookingId: row.booking_id ? String(row.booking_id) : null,
+    ticketId: row.ticket_id ? String(row.ticket_id) : null,
+    readAt: iso(row.read_at ?? row.readAt),
+    createdAt: iso(row.created_at ?? row.createdAt),
+    updatedAt: iso(row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt),
+  });
+
+  async function createNotification({recipientUserId,type,title,body,bookingId=null,ticketId=null,dedupeKey=null}={}) {
+    const recipient = await findCustomerById(recipientUserId);
+    if (!recipient) { const e=new Error('Notification recipient not found.'); e.code='NOTIFICATION_RECIPIENT_NOT_FOUND'; throw e; }
+    if (!['customer','vendor','support','admin'].includes(recipient.role)) { const e=new Error('Notification recipient is invalid.'); e.code='NOTIFICATION_RECIPIENT_INVALID'; throw e; }
+    if (!useDatabase) {
+      const existing = dedupeKey ? [...memory.notifications.values()].find(n => String(n.recipientUserId)===String(recipientUserId) && n.dedupeKey===dedupeKey) : null;
+      if (existing) return null;
+      const now=new Date().toISOString();
+      const notification={id:crypto.randomUUID(),recipientUserId:String(recipientUserId),type,title,body,bookingId:bookingId?String(bookingId):null,ticketId:ticketId?String(ticketId):null,readAt:null,dedupeKey:dedupeKey||null,createdAt:now,updatedAt:now};
+      memory.notifications.set(notification.id,notification);
+      return notification;
+    }
+    const q=await pool.query(
+      `insert into notifications(recipient_user_id,type,title,body,booking_id,ticket_id,dedupe_key)
+       values($1,$2,$3,$4,$5,$6,$7)
+       on conflict (recipient_user_id,dedupe_key) where dedupe_key is not null do nothing
+       returning *`,
+      [recipientUserId,type,title,body,bookingId,ticketId,dedupeKey]
+    );
+    return q.rows[0] ? mapNotification(q.rows[0]) : null;
+  }
+
+  async function listNotifications({userId,limit=20,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(50,Number(limit)||20));
+    const safeOffset=Math.max(0,Number(offset)||0);
+    if (!useDatabase) {
+      const rows=[...memory.notifications.values()].filter(n=>String(n.recipientUserId)===String(userId)).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      return {notifications:rows.slice(safeOffset,safeOffset+safeLimit),pagination:{limit:safeLimit,offset:safeOffset,count:rows.length,hasMore:safeOffset+safeLimit<rows.length}};
+    }
+    const q=await pool.query('select * from notifications where recipient_user_id=$1 order by created_at desc limit $2 offset $3',[userId,safeLimit,safeOffset]);
+    const count=await pool.query('select count(*)::int as count from notifications where recipient_user_id=$1',[userId]);
+    const total=Number(count.rows[0]?.count||0);
+    return {notifications:q.rows.map(mapNotification),pagination:{limit:safeLimit,offset:safeOffset,count:q.rows.length,total,hasMore:safeOffset+q.rows.length<total}};
+  }
+
+  async function countUnreadNotifications(userId) {
+    if (!useDatabase) return [...memory.notifications.values()].filter(n=>String(n.recipientUserId)===String(userId)&&!n.readAt).length;
+    const q=await pool.query('select count(*)::int as count from notifications where recipient_user_id=$1 and read_at is null',[userId]);
+    return Number(q.rows[0]?.count||0);
+  }
+
+  async function markNotificationRead({userId,notificationId}={}) {
+    if (!useDatabase) {
+      const n=memory.notifications.get(String(notificationId));
+      if (!n || String(n.recipientUserId)!==String(userId)) return null;
+      n.readAt=n.readAt||new Date().toISOString(); n.updatedAt=new Date().toISOString(); return n;
+    }
+    const q=await pool.query('update notifications set read_at=coalesce(read_at,now()),updated_at=now() where id=$1 and recipient_user_id=$2 returning *',[notificationId,userId]);
+    return q.rows[0] ? mapNotification(q.rows[0]) : null;
+  }
+
+  async function markAllNotificationsRead(userId) {
+    if (!useDatabase) {
+      let count=0; for(const n of memory.notifications.values()) if(String(n.recipientUserId)===String(userId)&&!n.readAt){n.readAt=new Date().toISOString();n.updatedAt=n.readAt;count++;} return count;
+    }
+    const q=await pool.query('update notifications set read_at=coalesce(read_at,now()),updated_at=now() where recipient_user_id=$1 and read_at is null',[userId]);
+    return q.rowCount||0;
+  }
+
+  async function registerPushDevice({userId,pushToken,platform='unknown',deviceId=null}={}) {
+    const normalizedPlatform=['ios','android','web'].includes(String(platform))?String(platform):'unknown';
+    if(!useDatabase){
+      for(const device of memory.pushDevices.values()) if(device.pushToken===pushToken) { device.userId=String(userId);device.platform=normalizedPlatform;device.deviceId=deviceId;device.enabled=true;device.failureCount=0;device.updatedAt=new Date().toISOString();return device; }
+      const now=new Date().toISOString(); const device={id:crypto.randomUUID(),userId:String(userId),pushToken,platform:normalizedPlatform,deviceId,enabled:true,failureCount:0,lastSeenAt:now,createdAt:now,updatedAt:now};memory.pushDevices.set(device.id,device);return device;
+    }
+    const q=await pool.query(`insert into push_devices(user_id,push_token,platform,device_id,enabled,failure_count,last_seen_at,updated_at)
+      values($1,$2,$3,$4,true,0,now(),now())
+      on conflict(push_token) do update set user_id=excluded.user_id,platform=excluded.platform,device_id=excluded.device_id,enabled=true,failure_count=0,last_seen_at=now(),updated_at=now()
+      returning id,user_id,push_token,platform,device_id,enabled,failure_count,last_seen_at,created_at,updated_at`,[userId,pushToken,normalizedPlatform,deviceId]);
+    const r=q.rows[0]; return {id:String(r.id),userId:String(r.user_id),pushToken:r.push_token,platform:r.platform,deviceId:r.device_id,enabled:r.enabled,failureCount:r.failure_count,lastSeenAt:iso(r.last_seen_at),createdAt:iso(r.created_at),updatedAt:iso(r.updated_at)};
+  }
+
+  async function listEnabledPushDevices(userId) {
+    if(!useDatabase) return [...memory.pushDevices.values()].filter(d=>String(d.userId)===String(userId)&&d.enabled).map(d=>({...d}));
+    const q=await pool.query('select id,user_id,push_token,platform,device_id,enabled,failure_count,last_seen_at,created_at,updated_at from push_devices where user_id=$1 and enabled=true order by updated_at desc',[userId]);
+    return q.rows.map(r=>({id:String(r.id),userId:String(r.user_id),pushToken:r.push_token,platform:r.platform,deviceId:r.device_id,enabled:r.enabled,failureCount:r.failure_count,lastSeenAt:iso(r.last_seen_at),createdAt:iso(r.created_at),updatedAt:iso(r.updated_at)}));
+  }
+
+  async function disablePushDevice(deviceId) {
+    if(!useDatabase){const d=memory.pushDevices.get(String(deviceId));if(d){d.enabled=false;d.updatedAt=new Date().toISOString();}return Boolean(d);}
+    const q=await pool.query('update push_devices set enabled=false,updated_at=now() where id=$1',[deviceId]); return (q.rowCount||0)>0;
+  }
+
+  async function recordPushDeliverySuccess(deviceId) {
+    if(!useDatabase){const d=memory.pushDevices.get(String(deviceId));if(d){d.failureCount=0;d.lastSeenAt=new Date().toISOString();d.updatedAt=d.lastSeenAt;}return;}
+    await pool.query('update push_devices set failure_count=0,last_seen_at=now(),updated_at=now() where id=$1',[deviceId]);
+  }
+
+  async function recordPushDeliveryFailure(deviceId) {
+    if(!useDatabase){const d=memory.pushDevices.get(String(deviceId));if(d){d.failureCount=(d.failureCount||0)+1;if(d.failureCount>=5)d.enabled=false;d.updatedAt=new Date().toISOString();}return;}
+    await pool.query('update push_devices set failure_count=failure_count+1,enabled=case when failure_count+1>=5 then false else enabled end,updated_at=now() where id=$1',[deviceId]);
+  }
+
+  async function getNotificationPreferences(userId) {
+    if(!useDatabase) return {userId:String(userId),transactionalEnabled:true,promotionalEnabled:false};
+    const q=await pool.query('select user_id,transactional_enabled,promotional_enabled,updated_at from notification_preferences where user_id=$1',[userId]);
+    if(!q.rows[0]) return {userId:String(userId),transactionalEnabled:true,promotionalEnabled:false};
+    return {userId:String(q.rows[0].user_id),transactionalEnabled:Boolean(q.rows[0].transactional_enabled),promotionalEnabled:Boolean(q.rows[0].promotional_enabled),updatedAt:iso(q.rows[0].updated_at)};
+  }
+
+  async function updateNotificationPreferences(userId,{transactionalEnabled=true,promotionalEnabled=false}={}) {
+    if(!useDatabase) return {userId:String(userId),transactionalEnabled:true,promotionalEnabled:false};
+    const q=await pool.query(`insert into notification_preferences(user_id,transactional_enabled,promotional_enabled)
+      values($1,$2,$3) on conflict(user_id) do update set transactional_enabled=excluded.transactional_enabled,promotional_enabled=excluded.promotional_enabled,updated_at=now()
+      returning user_id,transactional_enabled,promotional_enabled,updated_at`,[userId,Boolean(transactionalEnabled),Boolean(promotionalEnabled)]);
+    return {userId:String(q.rows[0].user_id),transactionalEnabled:Boolean(q.rows[0].transactional_enabled),promotionalEnabled:Boolean(q.rows[0].promotional_enabled),updatedAt:iso(q.rows[0].updated_at)};
+  }
+
+  async function getBookingNotificationRecipients(bookingId) {
+    if(!useDatabase){
+      const b=memory.bookings.get(String(bookingId)); if(!b) return {customerId:null,vendorUserId:null};
+      const vendor=[...(memory.vendors?.values()||[])].find(v=>String(v.id)===String(b.vendorId));
+      return {customerId:b.customerId?String(b.customerId):null,vendorUserId:vendor?.ownerCustomerId?String(vendor.ownerCustomerId):null};
+    }
+    const q=await pool.query(`select b.customer_id, v.owner_id as vendor_id, ven.owner_customer_id as vendor_user_id
+      from bookings b left join vehicles v on v.id=b.vehicle_id left join vendors ven on ven.id=coalesce(b.vendor_id,v.owner_id)
+      where b.id=$1 limit 1`,[bookingId]);
+    const r=q.rows[0]; return {customerId:r?.customer_id?String(r.customer_id):null,vendorUserId:r?.vendor_user_id?String(r.vendor_user_id):null};
+  }
+
+  async function listSupportUserIds() {
+    if(!useDatabase) return [...memory.customers.values()].filter(c=>['support','admin'].includes(c.role)).map(c=>String(c.id));
+    const q=await pool.query("select id from customers where role in ('support','admin') and coalesce(account_status,'active')='active'");
+    return q.rows.map(r=>String(r.id));
+  }
+
+  async function getSupportTicketNotificationContext(ticketId) {
+    if(!useDatabase) {
+      const t=memory.supportTickets.get(String(ticketId)); return t ? {ticketId:String(t.id),ownerUserId:String(t.raisedByUserId),bookingId:t.bookingId?String(t.bookingId):null,assignedToUserId:t.assignedToUserId?String(t.assignedToUserId):null} : null;
+    }
+    const q=await pool.query('select id,raised_by_user_id,booking_id,assigned_to_user_id from support_tickets where id=$1',[ticketId]);
+    if(!q.rows[0]) return null;
+    const r=q.rows[0]; return {ticketId:String(r.id),ownerUserId:String(r.raised_by_user_id),bookingId:r.booking_id?String(r.booking_id):null,assignedToUserId:r.assigned_to_user_id?String(r.assigned_to_user_id):null};
+  }
+
+  return {health,close,recordAnalyticsEvent,getAdminMetrics,getFinancialReconciliation,getOperationalAlerts,createNotification,listNotifications,countUnreadNotifications,markNotificationRead,markAllNotificationsRead,registerPushDevice,listEnabledPushDevices,disablePushDevice,recordPushDeliverySuccess,recordPushDeliveryFailure,getNotificationPreferences,updateNotificationPreferences,getBookingNotificationRecipients,listSupportUserIds,getSupportTicketNotificationContext,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
 }

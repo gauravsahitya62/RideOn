@@ -8,16 +8,6 @@ import { rideOnApi } from '../services/api';
 const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',white:'#FFFFFF',line:'#E8EAF0',green:'#258565'};
 const isExpoGo=Constants.appOwnership==='expo';
 
-const CITY_CENTERS={
-  udaipur:{latitude:24.5854,longitude:73.7125},
-  jaipur:{latitude:26.9124,longitude:75.7873},
-};
-const DEFAULT_REGION={latitude:24.5854,longitude:73.7125,latitudeDelta:0.16,longitudeDelta:0.16};
-const defaultRegionForCity=(value)=>{
-  const key=String(value||'').trim().toLowerCase();
-  const center=CITY_CENTERS[key]||CITY_CENTERS.udaipur;
-  return {...center,latitudeDelta:0.16,longitudeDelta:0.16};
-};
 const pointFromLocation=(location)=>location?.coords ? {latitude:Number(location.coords.latitude),longitude:Number(location.coords.longitude)} : null;
 
 export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
@@ -109,7 +99,7 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
 
   const region=useMemo(()=>{
     const points=[...vendors.map(v=>({latitude:Number(v.latitude),longitude:Number(v.longitude)})),userPoint,deliveryPoint].filter(p=>p && Number.isFinite(p.latitude) && Number.isFinite(p.longitude));
-    if(!points.length)return defaultRegionForCity(city);
+    if(!points.length)return null;
     const lats=points.map(p=>p.latitude),lons=points.map(p=>p.longitude);
     return {latitude:(Math.min(...lats)+Math.max(...lats))/2,longitude:(Math.min(...lons)+Math.max(...lons))/2,latitudeDelta:Math.max(.04,Math.min(1,(Math.max(...lats)-Math.min(...lats))*.9+.04)),longitudeDelta:Math.max(.04,Math.min(1,(Math.max(...lons)-Math.min(...lons))*.9+.04))};
   },[vendors,userPoint,deliveryPoint,city]);
@@ -118,6 +108,7 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
     <View style={styles.top}><TouchableOpacity onPress={onBack} style={styles.back}><Text style={styles.backGlyph}>‹</Text></TouchableOpacity><View><Text style={styles.kicker}>RIDEON MAP</Text><Text style={styles.title}>Vendors in {city}</Text></View><View style={{width:42}}/></View>
     <View style={styles.mapWrap}>
       {loading?<View style={styles.mapState}><ActivityIndicator color={C.orange}/><Text style={styles.muted}>Loading vendor locations…</Text></View>:
+      !region?<View style={styles.mapState}><Text style={styles.sectionTitle}>Map location unavailable</Text><Text style={styles.muted}>No location data is available for {city || 'this city'} yet.</Text></View>:
       <MapView provider={!isExpoGo && (Platform.OS==='android'||Platform.OS==='ios') ? PROVIDER_GOOGLE : undefined} style={StyleSheet.absoluteFill} initialRegion={region} region={region} showsUserLocation={Boolean(userPoint)} showsMyLocationButton={false} onPress={event=>{const c=event.nativeEvent.coordinate;setDeliveryPoint(c);if(!deliveryAddress)setDeliveryAddress('Map selected location');}}>
         {vendors.map(v=><Marker key={v.vendorId} coordinate={{latitude:Number(v.latitude),longitude:Number(v.longitude)}} onPress={()=>loadVendorVehicles(v)}>
           <View style={[styles.marker,selectedVendor?.vendorId===v.vendorId&&styles.markerSelected]}><Text style={styles.markerText}>⌖</Text></View>
