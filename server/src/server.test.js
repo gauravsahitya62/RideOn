@@ -958,9 +958,9 @@ test('payment webhook signature and payload are validated', () => {
   assert.equal(service.parseWebhook({...valid,amountPaise:0}),null);
 });
 
-test('real provider without implemented checkout fails closed', async () => {
-  const service = createPaymentService({ provider:'razorpay',keyId:'rzp_test_m',keySecret:'s',webhookSecret:'w' });
-  assert.equal(service.configured,true);
+test('Razorpay without checkout credentials fails closed', async () => {
+  const service = createPaymentService({ provider:'razorpay' });
+  assert.equal(service.configured,false);
   await assert.rejects(() => service.createCustomerPayment({orderId:'rideon-test',amountPaise:10000}),(error)=>error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
 });
 
