@@ -677,7 +677,8 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
     const amountPaise=Math.round(Number(order.total)*100);
     const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise});
     const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
-    res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:paymentRequest.paymentUrl,amount:result.payment.amountPaise,currency:'INR'},order});
+    const checkoutUrl=paymentProvider==='razorpay'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
+    res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:checkoutUrl,amount:result.payment.amountPaise,currency:'INR'},order});
   }catch(error){
     const map={FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,PAYMENT_PROVIDER_REQUEST_FAILED:502,PAYMENT_PROVIDER_TIMEOUT:504};
     res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'?'Razorpay checkout is not configured on the RideOn server.':'We could not start fleet checkout right now. Please retry.'}});
