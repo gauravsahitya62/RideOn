@@ -109,6 +109,9 @@ export function createPaymentService({
   if (selectedProvider === 'razorpay' && isProduction && String(keyId).startsWith('rzp_test_')) {
     throw errorWithCode('A Razorpay test key cannot be used in production.', 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
   }
+  if (selectedProvider === 'razorpay' && !isProduction && String(keyId).startsWith('rzp_live_')) {
+    throw errorWithCode('A Razorpay live key cannot be used in the test environment.', 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
+  }
 
   const capabilities = selectedProvider === 'razorpay'
     ? {
