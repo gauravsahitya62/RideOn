@@ -78,10 +78,11 @@ test('valid signed Cashfree webhook for a matching RideOn payment uses the exist
   }
   const vehicle = await repository.getVehicle(process.env.DATABASE_URL ? 'activa-01' : 'webhook-test-bike');
   assert.ok(vehicle);
+  const suffix = String(Date.now()).slice(-9);
   const customer = await repository.createCustomer({
     fullName: 'Webhook Test Customer',
-    phone: '+911234569991',
-    email: 'webhook-test-9991@example.com',
+    phone: '+91' + suffix,
+    email: 'webhook-test-' + suffix + '@example.com',
     passwordHash: 'test-password-hash',
   });
   const booking = await repository.createBooking({
