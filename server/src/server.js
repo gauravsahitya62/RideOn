@@ -268,10 +268,13 @@ const auth = createAuth({
 });
 const payments = createPaymentService({
   provider: paymentProvider,
-  keyId: razorpayKeyId,
-  keySecret: razorpayKeySecret,
-  webhookSecret: razorpayWebhookSecret,
-  environment: razorpayEnvironment,
+  clientId: cashfreeClientId,
+  clientSecret: cashfreeClientSecret,
+  webhookSecret: cashfreeWebhookSecret,
+  environment: cashfreeEnvironment,
+  apiBaseUrl: cashfreeApiBaseUrl,
+  defaultReturnUrl: cashfreeReturnUrl,
+  defaultNotifyUrl: cashfreeNotifyUrl,
 });
 
 function createCheckoutToken({paymentId,customerId}) {
@@ -1647,7 +1650,7 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
     console.error(JSON.stringify({level:'warn',event:'payment_webhook_rejected',requestId:req.requestId,provider:payments.name,reason:'invalid_signature'}));
     return res.status(401).json({error:{code:'INVALID_WEBHOOK_SIGNATURE'}});
   }
-  const event=payments.parseWebhook(req.body,{eventId:req.get('X-Cashfree-Event-Id')||req.get('x-razorpay-event-id')||undefined,eventName:req.body?.event});
+  const event=payments.parseWebhook(req.body,{eventId:req.get('X-Cashfree-Event-Id')||req.get('x-cashfree-event-id')||undefined,eventName:req.body?.event});
   if(!event)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT'}});
   if(!event.bookingId&&event.providerOrderId){
     const payment=await repository.findPaymentByProviderOrder(event.providerOrderId);
