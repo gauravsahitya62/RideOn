@@ -306,7 +306,10 @@ async function requestRefundForBooking(bookingId) {
     return {status:'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
   } catch(error) {
     await repository.markRefundRetryable(payment.id).catch(()=>{});
-    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return {status:'refund_pending',payment,providerUnavailable:true,idempotencyKey:claim.idempotencyKey};
+    if(['PAYMENT_PROVIDER_CONFIGURATION_REQUIRED','PAYMENT_PROVIDER_REQUEST_FAILED','PAYMENT_PROVIDER_TIMEOUT','REFUND_PROVIDER_FAILED','REFUND_PROVIDER_PAYMENT_NOT_FOUND'].includes(error?.code)){
+      console.error(JSON.stringify({level:'warn',event:'payment_refund_pending',bookingId,paymentId:payment.id,provider:payments.name,code:error?.code||'REFUND_FAILED'}));
+      return {status:'refund_pending',payment,providerUnavailable:true,idempotencyKey:claim.idempotencyKey};
+    }
     throw error;
   }
 }
