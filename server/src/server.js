@@ -676,8 +676,8 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
     const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
     res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:paymentRequest.paymentUrl,amount:result.payment.amountPaise,currency:'INR'},order});
   }catch(error){
-    const map={FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,UPI_PROVIDER_INTEGRATION_REQUIRED:503};
-    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'?'Verified UPI payment integration is not enabled for the configured provider yet.':'We could not start fleet checkout right now. Please retry.'}});
+    const map={FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,PAYMENT_PROVIDER_REQUEST_FAILED:502,PAYMENT_PROVIDER_TIMEOUT:504};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'?'Razorpay checkout is not configured on the RideOn server.':'We could not start fleet checkout right now. Please retry.'}});
   }
 });
 
@@ -1561,8 +1561,9 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
   } catch(error) {
     if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED',message:'Online payment is not configured on the RideOn server.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
-    if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI checkout is not enabled for the configured payment provider yet.'}});
-    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Verified UPI payment integration is not enabled for the configured provider. No payment has been marked successful.'}});
+    if(error.code==='PAYMENT_PROVIDER_REQUEST_FAILED') return res.status(502).json({error:{code:error.code,message:'The payment provider could not create the checkout order. Please retry.'}});
+    if(error.code==='PAYMENT_PROVIDER_TIMEOUT') return res.status(504).json({error:{code:error.code,message:'The payment provider took too long to respond. Please retry.'}});
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Razorpay payment integration is not configured on the RideOn server. No payment has been marked successful.'}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
   }
@@ -1698,7 +1699,6 @@ app.use((err, req, res, _next) => {
   if (err.code === 'INVALID_CREDENTIALS') return res.status(401).json({ error: { code: err.code, message: 'Phone or password is incorrect.' } });
   if (err.code === 'PAYMENT_PROVIDER_UNSUPPORTED') return res.status(500).json({ error: { code: err.code, message: 'Unsupported payment provider configuration.' } });
   if (err.code === 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Payment provider configuration is required.' } });
-  if (err.code === 'PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Payment provider onboarding/integration is not enabled.' } });
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Unexpected server error' } });
 });
 
