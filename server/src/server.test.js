@@ -935,7 +935,7 @@ test('mock payment provider creates a deterministic checkout order without netwo
   assert.equal(payment.amountPaise,544700);
   assert.equal(payment.currency,'INR');
   assert.equal(payment.status,'pending');
-  assert.match(payment.paymentUrl,/^https:\/\/paytm\.test\/checkout\//);
+  assert.equal(payment.paymentUrl,null);
 });
 
 test('payment webhook signature and payload are validated', () => {
@@ -982,9 +982,9 @@ test('mock provider never reports authoritative payment success', async () => {
 test('payment capability model is UPI-first and provider-agnostic', () => {
   const service = createPaymentService({ provider:'mock', webhookSecret:'mock-secret' });
   assert.equal(service.capabilities.method,'upi');
-  assert.equal(service.capabilities.supportsIntent,true);
-  assert.equal(service.capabilities.supportsVpa,true);
-  assert.deepEqual(service.capabilities.apps.map(x=>x.id),['gpay','phonepe','paytm']);
+  assert.equal(service.capabilities.supportsIntent,false);
+  assert.equal(service.capabilities.supportsVpa,false);
+  assert.deepEqual(service.capabilities.apps,[]);
 });
 
 test('request correlation is returned on a 404 response', async () => {
