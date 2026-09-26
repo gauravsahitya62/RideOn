@@ -56,6 +56,7 @@ export default function VehicleDetailScreen({
   onRetryQuote,
   onEditDates,
   onEditLocation,
+  onWriteReview,
 }) {
   const [activeImage, setActiveImage] = useState(0);
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
