@@ -306,7 +306,7 @@ async function requestRefundForBooking(bookingId) {
     return {status:'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
   } catch(error) {
     await repository.markRefundRetryable(payment.id).catch(()=>{});
-    if(error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return {status:'refund_pending',payment,providerUnavailable:true,idempotencyKey:claim.idempotencyKey};
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return {status:'refund_pending',payment,providerUnavailable:true,idempotencyKey:claim.idempotencyKey};
     throw error;
   }
 }
@@ -1633,9 +1633,15 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, pa
   try {
     const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
     if(!verified?.verified) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The provider has not authoritatively confirmed this payment yet.'}});
+    if(verified.status==='failed'){
+      const failed=await repository.applyPaymentEvent({eventId:`verify-failed:${payment.id}:${verified.providerPaymentId||verified.providerReference||'unknown'}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
+      if(failed.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking payment.'}});
+      const latestFailed=await repository.findPaymentById(payment.id,req.user.id);
+      return res.json({payment:latestFailed,verification:'failed',bookingPaymentStatus:'failed'});
+    }
     const providerReference=String(verified.providerReference||payment.providerReference||payment.providerPaymentId||'').trim();
-    if(!providerReference) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The payment is awaiting an authoritative provider reference.'}});
-    const applied=await repository.applyPaymentEvent({eventId:`verify:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'paid'});
+    if(!verified.verified||!providerReference) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The provider has not authoritatively confirmed this payment yet.'}});
+    const applied=await repository.applyPaymentEvent({eventId:`verify:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(verified.amountPaise||payment.amountPaise),currency:'INR',status:'paid'});
     if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
     const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
     const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
@@ -1663,18 +1669,22 @@ app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req
 });
 
 app.post('/api/v1/payments/webhook', async (req, res) => {
-  const signature = req.get('X-Payment-Signature') || req.get('X-Paytm-Signature');
-  const body = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
-  if (!payments.verifyWebhook(body, signature)) return res.status(401).json({ error:{code:'INVALID_WEBHOOK_SIGNATURE'} });
-  const event = payments.parseWebhook(req.body, { eventId: req.get('X-Payment-Event-Id') || req.get('X-Paytm-Event-Id') || undefined });
-  if (!event) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT'} });
-  if (!event.bookingId && event.providerOrderId) {
-    const payment = await repository.findPaymentByProviderOrder(event.providerOrderId);
-    if (payment) event.bookingId = payment.bookingId;
+  const signature=req.get('X-Razorpay-Signature') || '';
+  const body=req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
+  if(!payments.verifyWebhook(body,signature)){
+    console.error(JSON.stringify({level:'warn',event:'payment_webhook_rejected',requestId:req.requestId,provider:payments.name,reason:'invalid_signature'}));
+    return res.status(401).json({error:{code:'INVALID_WEBHOOK_SIGNATURE'}});
   }
-  if (!event.bookingId) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT'} });
-  const result = await repository.applyPaymentEvent(event);
-  if (result.invalid) return res.status(400).json({ error:{code:'INVALID_PAYMENT_EVENT',message:'Payment event does not match the booking payment.'} });
+  const event=payments.parseWebhook(req.body,{eventId:req.get('X-Razorpay-Event-Id')||req.get('x-razorpay-event-id')||undefined,eventName:req.body?.event});
+  if(!event)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT'}});
+  if(!event.bookingId&&event.providerOrderId){
+    const payment=await repository.findPaymentByProviderOrder(event.providerOrderId);
+    if(payment)event.bookingId=payment.bookingId;
+  }
+  if(!event.bookingId)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT'}});
+  const result=await repository.applyPaymentEvent(event);
+  console.log(JSON.stringify({level:'info',event:'payment_webhook_processed',requestId:req.requestId,provider:payments.name,providerOrderId:event.providerOrderId,providerPaymentId:event.providerPaymentId,status:event.status,applied:result.applied,duplicate:result.duplicate,invalid:result.invalid}));
+  if(result.invalid)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT',message:'Payment event does not match the booking payment.'}});
   res.json({received:true,applied:result.applied,duplicate:result.duplicate});
 });
 
