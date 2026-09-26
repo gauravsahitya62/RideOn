@@ -374,7 +374,7 @@ const loadFleet=async()=>{try{const result=await rideOnApi.listFleet({city:selec
      setPaymentError(payment.paymentUrl?'':'Payment checkout is not available from the current provider configuration.');
    }catch(error){
      setPaymentRecord(null);setPaymentState('blocked');
-     if(error?.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error?.code==='PAYTM_ONBOARDING_REQUIRED'||error?.code==='PAYMENT_NOT_CONFIGURED')setPaymentError('Online UPI payment is not available yet. Your booking is saved, but it has not been paid. A verified UPI checkout provider must be enabled before payment can be completed.');
+     if(error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error?.code==='PAYMENT_NOT_CONFIGURED')setPaymentError('Online UPI payment is not available yet. Your booking is saved, but it has not been paid. Razorpay checkout must be configured before payment can be completed.');
      else setPaymentError(friendlyError(error, 'We could not start payment for this booking. Your booking is saved and remains unpaid.'));
    }finally{setPaymentBusy(false);}
    setScreen('payment');
