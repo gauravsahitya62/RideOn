@@ -429,6 +429,12 @@ const loadFleet=async()=>{try{const result=await rideOnApi.listFleet({city:selec
    }catch(error){setPaymentError(friendlyError(error,'We could not refresh payment status. Please try again.'));}
    finally{setPaymentBusy(false);}
  };
+ useEffect(()=>{
+   const subscription=Linking.addEventListener('url', event=>{
+     if(event?.url?.startsWith('rideon://payment-return') && screen==='payment' && selectedBooking?.id) refreshPaymentStatus();
+   });
+   return()=>subscription.remove();
+ },[screen,selectedBooking?.id]);
  useEffect(()=>{const handler=()=>{if(screen==='payment'){setScreen('review');return true;}if(screen==='success'){setScreen('');setSelected(null);setSelectedBooking(null);setPage('Trips');return true;}if(screen){setScreen('');return true;}return false;};const sub=BackHandler.addEventListener('hardwareBackPress',handler);return()=>sub.remove();},[screen]);
  const closeFlow=()=>{setScreen('');setSelected(null);setSelectedBooking(null);setBookingError('');setPaymentError('');setPaymentState(null);setPaymentRecord(null);setPaymentReferenceDraft('');setQuote(null);setDeliveryLocation(null);};
  const Header=({title,back=true})=><View style={s.innerHeader}>{back&&<TouchableOpacity onPress={()=>screen?closeFlow():setPage('Explore')}><Text style={s.back}>‹</Text></TouchableOpacity>}<Text style={s.innerTitle}>{title}</Text><View style={{width:24}}/></View>;
