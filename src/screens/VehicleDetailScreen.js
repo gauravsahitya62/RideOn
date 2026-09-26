@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { ReviewsSection } from '../components';
 
-const COLORS = { ink: '#17202D', muted: '#78818E', orange: '#E85D35', bg: '#F6F7F9', line: '#E8EAF0', white: '#FFFFFF' };
+const COLORS = { ink: '#111827', muted: '#6B7280', orange: '#E56A3D', bg: '#F7F5F1', line: '#E7E2DA', white: '#FFFFFF' };
 const money = value => `₹${Number(value || 0).toLocaleString('en-IN')}`;
 const asText = value => value == null || value === '' ? null : String(value);
 const optimizeVehicleImageUrl = (url, width = 1200) => {
