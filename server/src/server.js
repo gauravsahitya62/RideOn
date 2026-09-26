@@ -1652,11 +1652,18 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
   }
   const event=payments.parseWebhook(req.body,{eventId:req.get('X-Cashfree-Event-Id')||req.get('x-cashfree-event-id')||undefined,eventName:req.body?.event});
   if(!event)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT'}});
-  if(!event.bookingId&&event.providerOrderId){
-    const payment=await repository.findPaymentByProviderOrder(event.providerOrderId);
-    if(payment)event.bookingId=payment.bookingId;
+  let matchingPayment=null;
+  if(event.providerOrderId){
+    matchingPayment=await repository.findPaymentByProviderOrder(event.providerOrderId);
+    if(matchingPayment && !event.bookingId)event.bookingId=matchingPayment.bookingId;
   }
-  if(!event.bookingId)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT'}});
+  if(!matchingPayment&&event.bookingId){
+    matchingPayment=await repository.findPaymentByBooking(event.bookingId);
+  }
+  // Cashfree may send valid provider events that were not created by RideOn
+  // (for example, webhook endpoint tests or unrelated orders). Acknowledge
+  // those events without creating local payment state.
+  if(!matchingPayment)return res.json({received:true,applied:false});
   const result=await repository.applyPaymentEvent(event);
   console.log(JSON.stringify({level:'info',event:'payment_webhook_processed',requestId:req.requestId,provider:payments.name,providerOrderId:event.providerOrderId,providerPaymentId:event.providerPaymentId,status:event.status,applied:result.applied,duplicate:result.duplicate,invalid:result.invalid}));
   if(result.invalid)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT',message:'Payment event does not match the booking payment.'}});
