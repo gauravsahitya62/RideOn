@@ -1578,6 +1578,11 @@ export function createRepository({ databaseUrl, fleet }) {
     const client = await pool.connect();
     try {
       await client.query('begin');
+      const existingEvent = await client.query('select id from payment_events where provider_event_id=$1 limit 1',[event.eventId]);
+      if(existingEvent.rows[0]){
+        await client.query('commit');
+        return {applied:false,duplicate:true};
+      }
       const paymentResult = event.providerOrderId
         ? await client.query('select id,booking_id,provider_order_id,amount_paise,status from payments where provider_order_id=$1 for update',[event.providerOrderId])
         : event.bookingId
