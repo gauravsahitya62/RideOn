@@ -161,18 +161,36 @@ Authentication endpoints have a dedicated rate limit in addition to the global A
 
 ## Payments
 
-UPI is the customer-facing payment method; the gateway/provider is a separate server-side concern. The mobile app does not contain merchant secrets and never marks a payment paid from a client callback, deep-link return, or customer-entered UTR.
+RideOn uses **Razorpay** as its single real UPI payment provider. The mobile app receives a short-lived RideOn checkout URL; Razorpay Checkout then presents the UPI methods enabled for the merchant account. Merchant secrets remain server-side.
 
-The server calculates the payable amount from the persisted booking and stores provider order/payment references in PostgreSQL. Payment state advances only through the provider verification/webhook boundary and the existing idempotent payment state machine:
+Payment creation is server-authoritative:
 
-`pending → paid`, `pending → failed`, `paid → held/refund_pending/disputed`, `refund_pending → refunded`.
+- `POST /api/v1/payments/create-order` derives the amount from the persisted booking.
+- `POST /api/v1/fleet-orders/:id/payment` derives the amount from the persisted fleet order.
+- Provider order IDs and exact INR paise amounts are persisted.
+- `POST /api/v1/payments/:id/verify` performs provider-side status/amount/order/currency verification before `paid` can be applied.
+- `POST /api/v1/payments/webhook` verifies the Razorpay webhook HMAC against the raw request body and processes provider events idempotently.
+- Duplicate and out-of-order events cannot downgrade an already confirmed payment.
+- Refunds use Razorpay's refund API and the existing RideOn refund transaction/idempotency flow.
+- Production rejects `PAYMENT_PROVIDER=mock` and requires Razorpay credentials.
 
-The checkout UI is capability-driven. Google Pay, PhonePe, Paytm, other UPI apps, and UPI ID/VPA are shown only when the configured provider explicitly reports support. No provider-specific UPI app availability is faked by the client.
+Required server variables:
 
-The repository currently keeps the real-provider adapter fail-closed because no verified live gateway SDK/API implementation is committed. In production, `PAYMENT_PROVIDER=mock` is rejected. Missing or unimplemented provider configuration returns a safe payment-configuration/integration error and cannot mark a payment successful.
+```dotenv
+PAYMENT_PROVIDER=razorpay
+RAZORPAY_ENVIRONMENT=production
+RAZORPAY_KEY_ID=
+RAZORPAY_KEY_SECRET=
+RAZORPAY_WEBHOOK_SECRET=
+```
 
-There is currently no claim of a live production UPI transaction in CI or from this repository alone. A real provider adapter, merchant credentials, verified callback/webhook configuration, and device-level staging payment test are still required before launch.
+Production webhook:
 
+```text
+https://rideon-api-262g.onrender.com/api/v1/payments/webhook
+```
+
+See [docs/PAYMENTS_RUNBOOK.md](docs/PAYMENTS_RUNBOOK.md) for sandbox setup, production configuration, webhook setup, UPI capability behavior, refunds, and release verification.
 ## Testing
 
 
