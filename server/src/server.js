@@ -56,6 +56,7 @@ app.use(cors({
   credentials: false,
 }));
 app.use(express.json({ limit: '12mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
+app.use(express.urlencoded({ extended:false, limit:'64kb' }));
 app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
@@ -192,19 +193,16 @@ console.log('[RideOnServer][BOOT]', JSON.stringify({
   hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
   hasSupabaseKey: Boolean(process.env.SUPABASE_PUBLISHABLE_KEY)
 }));
-const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'unconfigured' : 'mock')).toLowerCase();
-const paytmMerchantId = process.env.PAYTM_MERCHANT_ID || '';
-const paytmClientId = process.env.PAYTM_CLIENT_ID || '';
-const paytmClientSecret = process.env.PAYTM_CLIENT_SECRET || '';
-const paytmWebsite = process.env.PAYTM_WEBSITE || '';
-const paytmCallbackUrl = process.env.PAYTM_CALLBACK_URL || '';
-const paymentWebhookSecret = process.env.PAYTM_WEBHOOK_SECRET || '';
+const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'razorpay' : 'mock')).toLowerCase();
+const razorpayKeyId = process.env.RAZORPAY_KEY_ID || '';
+const razorpayKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
+const razorpayWebhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+const razorpayEnvironment = String(process.env.RAZORPAY_ENVIRONMENT || (isProduction ? 'production' : 'test')).toLowerCase();
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && paymentProvider === 'mock') throw new Error('PAYMENT_PROVIDER=mock is not allowed in production.');
-// Paytm credentials are intentionally optional at process startup. This keeps health/API deployment available
-// while live payment operations fail closed with PAYTM_ONBOARDING_REQUIRED until merchant onboarding is complete.
+if (isProduction && paymentProvider !== 'razorpay') throw new Error('PAYMENT_PROVIDER must be razorpay in production.');
+if (isProduction && (!razorpayKeyId || !razorpayKeySecret || !razorpayWebhookSecret)) throw new Error('Razorpay production credentials and webhook secret are required.');
 
 
 function normalizeOtpDestination({ channel, value }) {
@@ -267,14 +265,31 @@ const auth = createAuth({
 });
 const payments = createPaymentService({
   provider: paymentProvider,
-  merchantId: paytmMerchantId,
-  clientId: paytmClientId,
-  clientSecret: paytmClientSecret,
-  website: paytmWebsite,
-  callbackUrl: paytmCallbackUrl,
-  webhookSecret: paymentWebhookSecret,
+  keyId: razorpayKeyId,
+  keySecret: razorpayKeySecret,
+  webhookSecret: razorpayWebhookSecret,
+  environment: razorpayEnvironment,
 });
 
+function createCheckoutToken({paymentId,customerId}) {
+  const expiresAt = Math.floor(Date.now()/1000) + 15 * 60;
+  const payload = Buffer.from(JSON.stringify({paymentId:String(paymentId),customerId:String(customerId),exp:expiresAt})).toString('base64url');
+  const signature = crypto.createHmac('sha256', String(process.env.JWT_SECRET || '')).update(payload).digest('base64url');
+  return payload + '.' + signature;
+}
+function verifyCheckoutToken(token) {
+  const [payload,signature] = String(token || '').split('.');
+  if(!payload||!signature)return null;
+  const expected=crypto.createHmac('sha256',String(process.env.JWT_SECRET||'')).update(payload).digest('base64url');
+  const a=Buffer.from(signature),b=Buffer.from(expected);
+  if(a.length!==b.length||!crypto.timingSafeEqual(a,b))return null;
+  try{const data=JSON.parse(Buffer.from(payload,'base64url').toString('utf8'));if(!data?.paymentId||!data?.customerId||Number(data.exp)<=Math.floor(Date.now()/1000))return null;return data;}catch{return null;}
+}
+function checkoutPage({status,title,message,returnUrl}) {
+  const safe=s=>String(s||'').replace(/[&<>\"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[ch]));
+  const icon=status==='paid'?'✓':status==='failed'?'!':'…';
+  return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn payment</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#f7f5f1;color:#111827;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box}.card{background:#fff;border:1px solid #e7e2da;border-radius:24px;padding:28px;max-width:440px;width:100%;box-sizing:border-box;text-align:center}.dot{width:52px;height:52px;border-radius:50%;background:#e56a3d;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:24px;font-weight:900}.title{font-size:26px;font-weight:900;margin:16px 0 8px}.message{font-size:16px;line-height:1.5;color:#6b7280}.button{display:inline-block;margin-top:22px;background:#e56a3d;color:#fff;text-decoration:none;padding:14px 22px;border-radius:14px;font-weight:800}</style></head><body><div class="card"><div class="dot">'+icon+'</div><div class="title">'+safe(title)+'</div><div class="message">'+safe(message)+'</div><a class="button" href="'+safe(returnUrl||'#')+'">Return to RideOn</a></div></body></html>';
+}
 async function requestRefundForBooking(bookingId) {
   const payment=await repository.findPaymentByBooking(bookingId);
   if(!payment) return {status:'not_applicable'};
