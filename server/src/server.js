@@ -1558,7 +1558,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
         currency:'INR',
         status:result.payment.status,
         paymentReference:result.payment.providerOrderId,
-        paymentUrl:checkoutUrl.toString(),
+        paymentUrl:checkoutUrl,
       }});
     });
   } catch(error) {
