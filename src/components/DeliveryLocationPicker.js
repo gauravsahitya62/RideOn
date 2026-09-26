@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { rideOnApi } from '../services/api';
 
-const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',white:'#FFFFFF',line:'#E8EAF0',blue:'#2D7FF9'};
+const C={ink:'#111827',muted:'#6B7280',orange:'#E56A3D',bg:'#F7F5F1',white:'#FFFFFF',line:'#E7E2DA',blue:'#2D7FF9'};
 const DEFAULT_REGION={latitude:26.9124,longitude:75.7873,latitudeDelta:0.12,longitudeDelta:0.12};
 
 export default function DeliveryLocationPicker({value,onChange,city}){
@@ -56,7 +56,7 @@ export default function DeliveryLocationPicker({value,onChange,city}){
   return <View style={styles.wrap}>
     <View style={styles.row}><TextInput value={draftAddress} onChangeText={text=>{setDraftAddress(text);setError('');}} placeholder="Delivery address or landmark" placeholderTextColor="#A0A7B1" style={styles.input} multiline/><TouchableOpacity onPress={search} disabled={searchBusy} style={styles.find}>{searchBusy?<ActivityIndicator color={C.white}/>:<Text style={styles.findText}>Find</Text>}</TouchableOpacity></View>
     <View style={styles.mapWrap}>
-      <MapView provider={PROVIDER_GOOGLE} style={StyleSheet.absoluteFill} initialRegion={region} region={region} showsUserLocation={false} onPress={event=>setPoint(event.nativeEvent.coordinate)}>
+      <MapView provider={Platform.OS==='android'?PROVIDER_GOOGLE:undefined} style={StyleSheet.absoluteFill} initialRegion={region} region={region} showsUserLocation={false} onPress={event=>setPoint(event.nativeEvent.coordinate)} onMapReady={()=>setError('')}>
         {currentPoint&&<Marker coordinate={currentPoint}><View style={styles.pin}><Text style={styles.pinText}>●</Text></View></Marker>}
       </MapView>
       <View style={styles.hint}><Text style={styles.hintText}>Tap the map to place the delivery point.</Text></View>
@@ -68,5 +68,5 @@ export default function DeliveryLocationPicker({value,onChange,city}){
 }
 
 const styles=StyleSheet.create({
-wrap:{marginTop:4},row:{flexDirection:'row',gap:8,alignItems:'stretch'},input:{flex:1,minHeight:50,maxHeight:90,backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:13,paddingHorizontal:13,paddingVertical:10,fontSize:13,color:C.ink},find:{width:64,backgroundColor:C.orange,borderRadius:13,alignItems:'center',justifyContent:'center'},findText:{color:C.white,fontWeight:'900'},mapWrap:{height:190,marginTop:10,borderRadius:18,overflow:'hidden',backgroundColor:'#E7ECF2'},hint:{position:'absolute',left:12,right:12,bottom:10,backgroundColor:'#FFFFFFE8',padding:8,borderRadius:10},hintText:{fontSize:10,color:C.muted},pin:{width:30,height:30,borderRadius:15,backgroundColor:C.blue,borderWidth:3,borderColor:C.white,alignItems:'center',justifyContent:'center'},pinText:{fontSize:11,color:C.white},actions:{flexDirection:'row',alignItems:'center',gap:10,marginTop:9},secondary:{borderWidth:1,borderColor:C.line,backgroundColor:C.white,borderRadius:11,paddingHorizontal:11,paddingVertical:9},secondaryText:{fontSize:10,fontWeight:'900',color:C.ink},status:{flex:1,fontSize:10,color:C.muted,lineHeight:15},error:{marginTop:8,color:'#B23B3B',backgroundColor:'#FFF0F0',borderRadius:10,padding:9,fontSize:10,lineHeight:15},helper:{marginTop:8,color:C.muted,fontSize:9,lineHeight:14}
+wrap:{marginTop:4},row:{flexDirection:'row',gap:8,alignItems:'stretch'},input:{flex:1,minHeight:50,maxHeight:90,backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:13,paddingHorizontal:13,paddingVertical:10,fontSize:13,color:C.ink},find:{width:64,backgroundColor:C.orange,borderRadius:13,alignItems:'center',justifyContent:'center'},findText:{color:C.white,fontWeight:'900'},mapWrap:{height:210,marginTop:10,borderRadius:20,overflow:'hidden',backgroundColor:'#E7ECF2',borderWidth:1,borderColor:C.line},hint:{position:'absolute',left:12,right:12,bottom:10,backgroundColor:'#FFFFFFE8',padding:8,borderRadius:10},hintText:{fontSize:10,color:C.muted,fontWeight:'700'},pin:{width:30,height:30,borderRadius:15,backgroundColor:C.blue,borderWidth:3,borderColor:C.white,alignItems:'center',justifyContent:'center'},pinText:{fontSize:11,color:C.white},actions:{flexDirection:'row',alignItems:'center',gap:10,marginTop:9},secondary:{borderWidth:1,borderColor:C.line,backgroundColor:C.white,borderRadius:11,paddingHorizontal:11,paddingVertical:9},secondaryText:{fontSize:10,fontWeight:'900',color:C.ink},status:{flex:1,fontSize:10,color:C.muted,lineHeight:15},error:{marginTop:8,color:'#B23B3B',backgroundColor:'#FFF0F0',borderRadius:10,padding:9,fontSize:10,lineHeight:15},helper:{marginTop:8,color:C.muted,fontSize:9,lineHeight:14}
 });
