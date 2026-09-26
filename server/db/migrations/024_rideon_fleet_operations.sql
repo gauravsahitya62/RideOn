@@ -111,10 +111,33 @@ CREATE INDEX IF NOT EXISTS fleet_operation_audit_vehicle_idx ON fleet_operation_
 CREATE INDEX IF NOT EXISTS fleet_operation_audit_booking_idx ON fleet_operation_audit(booking_id,created_at DESC);
 
 -- New RideOn fleet bookings must never depend on vendor ownership.
--- The production database may already contain fleet_orders without fleet_owner.
-ALTER TABLE fleet_orders
-  ADD COLUMN IF NOT EXISTS fleet_owner VARCHAR(32) NOT NULL DEFAULT 'rideon';
-UPDATE fleet_orders SET fleet_owner='rideon' WHERE fleet_owner IS NULL;
+-- The production database may already contain fleet_orders created before
+-- fleet_owner was introduced. Use an explicit catalog check so this remains
+-- safe across those schema states.
+DO $
+BEGIN
+  IF to_regclass('public.fleet_orders') IS NULL THEN
+    RAISE EXCEPTION 'fleet_orders table is required before fleet operations migration';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'fleet_orders'
+      AND column_name = 'fleet_owner'
+  ) THEN
+    EXECUTE 'ALTER TABLE public.fleet_orders ADD COLUMN fleet_owner VARCHAR(32) DEFAULT ''rideon''';
+  END IF;
+END $;
+
+UPDATE public.fleet_orders
+SET fleet_owner = 'rideon'
+WHERE fleet_owner IS NULL;
+
+ALTER TABLE public.fleet_orders
+  ALTER COLUMN fleet_owner SET DEFAULT 'rideon',
+  ALTER COLUMN fleet_owner SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS rental_handovers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
