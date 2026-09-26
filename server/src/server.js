@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import { createServer } from 'node:http';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -8,10 +9,16 @@ import { z } from 'zod';
 import { createRepository } from './repository.js';
 import { createAuth } from './auth.js';
 import { createPaymentService } from './payments.js';
+import { getDrivingRoute } from './routing.js';
+import { geocodeAddress } from './geocoding.js';
+import { createTrackingRealtimeServer } from './trackingRealtime.js';
 
 const fleet = [];
 
 const app = express();
+
+// Deployment fingerprint: helps confirm the mobile app is talking to the current Render build.
+const buildCommit = process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'unknown';
 
 // Lightweight request correlation and structured HTTP access logging.
 // Never log request bodies, query strings, credentials, OTPs, or payment data.
@@ -32,7 +39,7 @@ app.use((req, res, next) => {
   });
   next();
 });
-app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? 1 : false);
+// Render terminates TLS and forwards requests through its proxy. Trust exactly one proxy hop in production so\n// express-rate-limit can safely resolve the client address from X-Forwarded-For.\napp.set('trust proxy', process.env.NODE_ENV === 'production' ? 1 : (process.env.TRUST_PROXY === 'true' ? 1 : false));
 app.use(helmet());
 app.disable('x-powered-by');
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || '*')
@@ -48,19 +55,26 @@ app.use(cors({
   },
   credentials: false,
 }));
-app.use(express.json({ limit: '64kb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
+app.use(express.json({ limit: '12mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
+app.use(express.urlencoded({ extended:false, limit:'64kb' }));
 app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const supportRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const paymentRateLimit = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: true, legacyHeaders: false });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
   phone: z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
-  vehicleId: z.string().min(1),
+  vehicleId: z.string().trim().min(1).max(64),
   startAt: z.string().datetime(),
   endAt: z.string().datetime(),
   delivery: z.boolean().default(true),
   address: z.string().trim().min(8).max(300),
   notes: z.string().max(500).optional(),
+  deliveryLatitude: z.union([z.number(), z.string()]).nullable().optional(),
+  deliveryLongitude: z.union([z.number(), z.string()]).nullable().optional(),
+  deliveryAddressSource: z.enum(['manual','geocoded','saved']).optional(),
 }).refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt', path: ['endAt'] });
 
 function normalizeBookingInput(body = {}) {
@@ -123,7 +137,7 @@ const mobileVehicle = (v) => ({
   images: Array.isArray(v.imageUrls) ? v.imageUrls : [],
 });
 
-function publicBooking(booking) {
+function publicBooking(booking, { includeDeliveryLocation = false } = {}) {
   return {
     id: booking.id,
     bookingId: booking.id,
@@ -140,21 +154,58 @@ function publicBooking(booking) {
     total: booking.pricing.total,
     status: booking.status,
     paymentStatus: booking.paymentStatus,
+    paymentId: booking.paymentId,
     createdAt: booking.createdAt,
     updatedAt: booking.updatedAt || booking.createdAt,
+    cancellationFee: booking.cancellationFee || 0,
+    refundAmount: booking.refundAmount || 0,
+    cancelledAt: booking.cancelledAt,
+    cancellationReason: booking.cancellationReason,
+    securityDepositStatus: booking.securityDepositStatus,
+    securityDepositRefundable: booking.securityDepositRefundable || 0,
+    securityDepositDeduction: booking.securityDepositDeduction || 0,
+    securityDepositReason: booking.securityDepositReason,
+    securityDepositEvidence: booking.securityDepositEvidence,
+    securityDepositRefundReference: booking.securityDepositRefundReference,
+    securityDepositInspectedAt: booking.securityDepositInspectedAt,
+    securityDepositInspectedBy: booking.securityDepositInspectedBy,
+    rejectionReason: booking.rejectionReason,
+    routeDistanceMeters: booking.routeDistanceMeters,
+    routeDurationSeconds: booking.routeDurationSeconds,
+    routeProvider: booking.routeProvider,
+    deliveryStatus: booking.deliveryStatus || 'scheduled',
+    deliveryStartedAt: booking.deliveryStartedAt,
+    deliveredAt: booking.deliveredAt,
+    ...(includeDeliveryLocation && booking.deliveryStatus === 'in_delivery' && booking.deliveryLatitude != null && booking.deliveryLongitude != null ? {
+      deliveryLatitude: booking.deliveryLatitude,
+      deliveryLongitude: booking.deliveryLongitude,
+    } : {}),
   };
 }
 
 const repository = createRepository({ databaseUrl: process.env.DATABASE_URL, fleet });
-const paymentProvider = (process.env.PAYMENT_PROVIDER || 'unconfigured').toLowerCase();
-const paymentKeyId = process.env.RAZORPAY_KEY_ID || '';
-const paymentKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
-const paymentWebhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET || '';
+console.log('[RideOnServer][ROUTES_READY]', JSON.stringify({ routes:['GET /health','GET /api/v1/version','GET /api/v1/me','POST /api/v1/auth/request-otp','POST /api/v1/auth/verify-otp','POST /api/v1/auth/complete-registration'] }));
+console.log('[RideOnServer][BOOT]', JSON.stringify({
+  nodeEnv: process.env.NODE_ENV || 'development',
+  port: Number(process.env.PORT) || 4000,
+  buildCommit,
+  hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
+  hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
+  hasSupabaseKey: Boolean(process.env.SUPABASE_PUBLISHABLE_KEY)
+}));
+const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'cashfree' : 'mock')).toLowerCase();
+const cashfreeClientId = process.env.CASHFREE_CLIENT_ID || '';
+const cashfreeClientSecret = process.env.CASHFREE_CLIENT_SECRET || '';
+const cashfreeWebhookSecret = process.env.CASHFREE_WEBHOOK_SECRET || '';
+const cashfreeEnvironment = String(process.env.CASHFREE_ENVIRONMENT || (isProduction ? 'production' : 'sandbox')).toLowerCase();
+const cashfreeApiBaseUrl = process.env.CASHFREE_API_BASE_URL || '';
+const cashfreeReturnUrl = process.env.CASHFREE_RETURN_URL || '';
+const cashfreeNotifyUrl = process.env.CASHFREE_NOTIFY_URL || '';
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && paymentProvider !== 'razorpay') throw new Error('PAYMENT_PROVIDER must be razorpay in production; mock/unconfigured providers are not allowed');
-if (isProduction && paymentProvider === 'razorpay' && (!paymentKeyId || !paymentKeySecret || !paymentWebhookSecret)) throw new Error('Razorpay credentials and webhook secret are required in production');
+if (isProduction && paymentProvider !== 'cashfree') throw new Error('PAYMENT_PROVIDER must be cashfree in production.');
+if (isProduction && (!cashfreeClientId || !cashfreeClientSecret || !cashfreeWebhookSecret)) throw new Error('Cashfree production credentials and webhook secret are required.');
 
 
 function normalizeOtpDestination({ channel, value }) {
@@ -175,8 +226,9 @@ function hashOtpCode(code) {
 
 async function deliverOtp({ channel, destination, code }) {
   if (process.env.NODE_ENV !== 'production') {
-    console.log('[rideon-otp] ' + channel + ' ' + destination + ': ' + code);
-    return { delivered: true, developmentCode: code };
+    // Never print or return authentication secrets, including OTPs.
+    // Local/test environments must use the same delivery contract as production.
+    return { delivered: true };
   }
   if (channel === 'email' && process.env.RESEND_API_KEY && process.env.OTP_FROM_EMAIL) {
     const response = await fetch('https://api.resend.com/emails', {
@@ -216,10 +268,59 @@ const auth = createAuth({
 });
 const payments = createPaymentService({
   provider: paymentProvider,
-  keyId: paymentKeyId,
-  keySecret: paymentKeySecret,
-  webhookSecret: paymentWebhookSecret,
+  clientId: cashfreeClientId,
+  clientSecret: cashfreeClientSecret,
+  webhookSecret: cashfreeWebhookSecret,
+  environment: cashfreeEnvironment,
+  apiBaseUrl: cashfreeApiBaseUrl,
+  defaultReturnUrl: cashfreeReturnUrl,
+  defaultNotifyUrl: cashfreeNotifyUrl,
 });
+
+function createCheckoutToken({paymentId,customerId}) {
+  const expiresAt = Math.floor(Date.now()/1000) + 15 * 60;
+  const payload = Buffer.from(JSON.stringify({paymentId:String(paymentId),customerId:String(customerId),exp:expiresAt})).toString('base64url');
+  const signature = crypto.createHmac('sha256', String(process.env.JWT_SECRET || '')).update(payload).digest('base64url');
+  return payload + '.' + signature;
+}
+function verifyCheckoutToken(token) {
+  const [payload,signature] = String(token || '').split('.');
+  if(!payload||!signature)return null;
+  const expected=crypto.createHmac('sha256',String(process.env.JWT_SECRET||'')).update(payload).digest('base64url');
+  const a=Buffer.from(signature),b=Buffer.from(expected);
+  if(a.length!==b.length||!crypto.timingSafeEqual(a,b))return null;
+  try{const data=JSON.parse(Buffer.from(payload,'base64url').toString('utf8'));if(!data?.paymentId||!data?.customerId||Number(data.exp)<=Math.floor(Date.now()/1000))return null;return data;}catch{return null;}
+}
+function checkoutPage({status,title,message,returnUrl}) {
+  const safe=s=>String(s||'').replace(/[&<>\"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[ch]));
+  const icon=status==='paid'?'✓':status==='failed'?'!':'…';
+  return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn payment</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#f7f5f1;color:#111827;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box}.card{background:#fff;border:1px solid #e7e2da;border-radius:24px;padding:28px;max-width:440px;width:100%;box-sizing:border-box;text-align:center}.dot{width:52px;height:52px;border-radius:50%;background:#e56a3d;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:24px;font-weight:900}.title{font-size:26px;font-weight:900;margin:16px 0 8px}.message{font-size:16px;line-height:1.5;color:#6b7280}.button{display:inline-block;margin-top:22px;background:#e56a3d;color:#fff;text-decoration:none;padding:14px 22px;border-radius:14px;font-weight:800}</style></head><body><div class="card"><div class="dot">'+icon+'</div><div class="title">'+safe(title)+'</div><div class="message">'+safe(message)+'</div><a class="button" href="'+safe(returnUrl||'#')+'">Return to RideOn</a></div></body></html>';
+}
+async function requestRefundForBooking(bookingId) {
+  const payment=await repository.findPaymentByBooking(bookingId);
+  if(!payment) return {status:'not_applicable'};
+  if(payment.status==='refunded') return {status:'refunded',payment};
+  if(!['paid','refund_pending'].includes(String(payment.status))) return {status:'not_eligible',payment};
+  const claim=await repository.claimRefundRequest(payment.id);
+  if(!claim.created) return {status:claim.status==='completed'?'refunded':'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
+  try {
+    const providerResult=await payments.refundPayment({paymentId:payment.id,amountPaise:payment.amountPaise,providerOrderId:payment.providerOrderId,idempotencyKey:claim.idempotencyKey});
+    if(providerResult?.confirmed && providerResult?.providerReference){
+      const refunded=await repository.completePaymentRefund({paymentId:payment.id,providerReference:providerResult.providerReference});
+      console.log(JSON.stringify({level:'info',event:'payment_refund_result',bookingId,paymentId:payment.id,provider:payments.name,providerReference:providerResult.providerReference,status:'refunded'}));
+      return {status:'refunded',payment:refunded,idempotencyKey:claim.idempotencyKey};
+    }
+    return {status:'refund_pending',payment,idempotencyKey:claim.idempotencyKey};
+  } catch(error) {
+    await repository.markRefundRetryable(payment.id).catch(()=>{});
+    if(['PAYMENT_PROVIDER_CONFIGURATION_REQUIRED','PAYMENT_PROVIDER_REQUEST_FAILED','PAYMENT_PROVIDER_TIMEOUT','REFUND_PROVIDER_FAILED','REFUND_PROVIDER_PAYMENT_NOT_FOUND'].includes(error?.code)){
+      console.error(JSON.stringify({level:'warn',event:'payment_refund_pending',bookingId,paymentId:payment.id,provider:payments.name,code:error?.code||'REFUND_FAILED'}));
+      return {status:'refund_pending',payment,providerUnavailable:true,idempotencyKey:claim.idempotencyKey};
+    }
+    throw error;
+  }
+}
+
 
 
 async function verifySupabaseAccessToken(token) {
@@ -237,35 +338,83 @@ const supabaseRequireAuth = async (req, res, next) => {
   const header = req.get('Authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (!token) return res.status(401).json({ error:{ code:'AUTH_REQUIRED', message:'Authentication required.' } });
-  // Legacy phone/password JWT remains available only for the test suite/local compatibility.
-  // Production/mobile authentication continues through Supabase when configured.
+
   if (process.env.NODE_ENV === 'test' && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) {
     return auth.middleware()(req, res, next);
   }
+
   try {
     const user = await verifySupabaseAccessToken(token);
     if (!user?.id || !user?.email) return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+
     const metadata = user.user_metadata || {};
-    const customer = await repository.findCustomerBySupabaseUserId(user.id);
-    const ensured = customer || await repository.createOrLinkCustomerFromSupabase({
-      supabaseUserId: user.id,
-      email: user.email,
-      fullName: metadata.full_name || metadata.name || user.email.split('@')[0],
-    });
-    const identity = await repository.findCustomerById(ensured.id);
-    if (!identity?.id) return res.status(401).json({ error:{ code:'USER_NOT_FOUND', message:'RideOn user identity could not be resolved.' } });
+    let identity = await repository.findCustomerBySupabaseUserId(user.id);
+
+    // Backward-compatible linking for existing RideOn identities that predate
+    // the Supabase user link. Their stored RideOn role remains authoritative.
+    if (!identity) {
+      const existingByEmail = await repository.findCustomerByEmail(user.email);
+      if (existingByEmail) {
+        identity = await repository.createOrLinkCustomerFromSupabase({
+          supabaseUserId:user.id,
+          email:user.email,
+          fullName:existingByEmail.fullName || metadata.full_name || metadata.name || user.email.split('@')[0],
+          phone:existingByEmail.phone,
+          role:existingByEmail.role || 'customer',
+        });
+      }
+    }
+
+    // Repair legacy Supabase accounts that existed before RideOn identity
+    // linking was completed. A token-authenticated user with no RideOn row is
+    // provisioned as a customer; vendor accounts must already have a vendor
+    // profile created by the explicit vendor registration flow.
+    if (!identity?.id) {
+      identity = await repository.createOrLinkCustomerFromSupabase({
+        supabaseUserId:user.id,
+        email:user.email,
+        fullName:metadata.full_name || metadata.name || user.email.split('@')[0],
+        phone:metadata.phone || undefined,
+        role:'customer',
+      });
+    }
+
+    if (!identity?.id || !['customer','vendor','support','admin'].includes(identity.role)) {
+      return res.status(401).json({ error:{ code:'USER_ROLE_UNRESOLVED', message:'Your RideOn account type could not be determined.' } });
+    }
+
     req.user = {
-      id: identity.id,
-      name: identity.fullName,
-      role: identity.role || 'customer',
-      supabaseUserId: user.id,
-      email: identity.email || user.email,
+      id:identity.id,
+      name:identity.fullName,
+      role:identity.role,
+      supabaseUserId:user.id,
+      email:identity.email || user.email,
     };
     next();
-  } catch {
-    return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or expired.' } });
+  } catch (error) {
+    if (error.code==='ACCOUNT_TYPE_CONFLICT') {
+      return res.status(409).json({ error:{code:error.code,message:'A RideOn account already exists under a different account type.'} });
+    }
+    console.error(JSON.stringify({level:'error',event:'supabase_identity_error',requestId:req.requestId,code:error?.code||'INVALID_TOKEN'}));
+    return res.status(401).json({ error:{ code:'INVALID_TOKEN', message:'Session is invalid or could not be mapped to a RideOn account.' } });
   }
 };
+
+async function resolveTrackingUser(token) {
+  if(!token)return null;
+  try{
+    const user=await verifySupabaseAccessToken(token);
+    if(!user?.id||!user?.email)return null;
+    const metadata=user.user_metadata||{};
+    let identity=await repository.findCustomerBySupabaseUserId(user.id);
+    if(!identity)identity=await repository.findCustomerByEmail(user.email);
+    if(!identity?.id){
+      identity=await repository.createOrLinkCustomerFromSupabase({supabaseUserId:user.id,email:user.email,fullName:metadata.full_name||metadata.name||user.email.split('@')[0],phone:metadata.phone||undefined,role:'customer'});
+    }
+    if(!identity?.id||!['customer','vendor'].includes(identity.role))return null;
+    return {id:identity.id,name:identity.fullName,role:identity.role,supabaseUserId:user.id,email:identity.email||user.email};
+  }catch{return null;}
+}
 
 const requireRole = (...roles) => (req, res, next) => {
   if (!req.user || !roles.includes(req.user.role)) {
@@ -275,6 +424,7 @@ const requireRole = (...roles) => (req, res, next) => {
 };
 
 const requireCustomer = requireRole('customer');
+const requireSupport = requireRole('support','admin');
 
 const requireVendor = async (req, res, next) => {
   if (!req.user || req.user.role !== 'vendor') {
@@ -291,6 +441,44 @@ const requireVendor = async (req, res, next) => {
   }
 };
 
+app.get('/api/v1/version', (_req, res) => {
+  res.json({ service:'rideon-api', buildCommit, nodeEnv:process.env.NODE_ENV || 'development', timestamp:new Date().toISOString() });
+});
+
+const requireFleetOps = requireRole('admin','support');
+const requireDeliveryStaff = requireRole('delivery_staff');
+
+const fleetVehicleOpsSchema=z.object({
+  name:z.string().trim().min(2).max(160), make:z.string().trim().max(80).optional().default(''), model:z.string().trim().max(100).optional().default(''),
+  variant:z.string().trim().max(100).optional().default(''), type:z.literal('bike').default('bike'), fleetVehicleClass:z.enum(['bike','scooter']),
+  year:z.number().int().min(1980).max(new Date().getFullYear()+1).nullable().optional(), city:z.string().trim().min(2).max(100),
+  dailyRate:z.number().min(0), securityDeposit:z.number().min(0).default(0), transmission:z.string().trim().max(30).optional().default(''),
+  fuel:z.string().trim().max(30).optional().default(''), seats:z.number().int().min(1).max(4).nullable().optional(), color:z.string().trim().max(40).optional().default(''),
+  registrationNumber:z.string().trim().max(30).optional().default(''), description:z.string().trim().max(2000).optional().default(''), imageUrls:z.array(z.string().url()).max(12).optional().default([]),
+  deliveryAvailable:z.boolean().default(true), pickupLocation:z.string().trim().max(300).optional().default(''), pickupLatitude:z.coerce.number().min(-90).max(90).nullable().optional(),
+  pickupLongitude:z.coerce.number().min(-180).max(180).nullable().optional(), serviceArea:z.record(z.any()).optional().default({}),
+  currentOdometer:z.number().int().min(0).nullable().optional(), currentFuelBattery:z.number().min(0).max(100).nullable().optional(), active:z.boolean().default(true),
+});
+
+app.get('/api/v1/fleet-ops/dashboard',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{try{res.json({dashboard:await repository.getRideOnFleetDashboard()});}catch(error){res.status(503).json({error:{code:'FLEET_OPS_UNAVAILABLE',message:'Fleet operations dashboard is temporarily unavailable.'}});}});
+app.get('/api/v1/fleet-ops/vehicles',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const vehicles=await repository.listRideOnFleetAdmin({q:req.query.q,type:req.query.type,city:req.query.city,status:req.query.status,registration:req.query.registration,model:req.query.model,limit:req.query.limit,offset:req.query.offset});res.json({vehicles,data:vehicles,meta:{count:vehicles.length}});}catch(error){res.status(400).json({error:{code:error?.code||'FLEET_LIST_FAILED',message:error?.message||'Could not load fleet.'}});}});
+app.post('/api/v1/fleet-ops/vehicles',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=fleetVehicleOpsSchema.safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid fleet vehicle details.',details:p.error.flatten()}});try{const v=await repository.createRideOnFleetVehicle(p.data,req.user.id);res.status(201).json({vehicle:v,data:v});}catch(error){res.status(error?.code==='VEHICLE_EXISTS'?409:400).json({error:{code:error?.code||'INVALID_FLEET_VEHICLE',message:error?.message||'Could not create fleet vehicle.'}});}});
+app.get('/api/v1/fleet-ops/vehicles/:id',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const v=(await repository.listRideOnFleetAdmin({q:req.params.id,limit:100})).find(x=>String(x.id)===String(req.params.id));if(!v)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Fleet vehicle not found.'}});res.json({vehicle:v});}catch(error){res.status(503).json({error:{code:'FLEET_VEHICLE_UNAVAILABLE',message:'Fleet vehicle is temporarily unavailable.'}});}});
+app.patch('/api/v1/fleet-ops/vehicles/:id',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=fleetVehicleOpsSchema.partial().safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid fleet vehicle details.',details:p.error.flatten()}});try{const v=await repository.updateRideOnFleetVehicle(req.params.id,p.data,req.user.id);if(!v)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Fleet vehicle not found.'}});res.json({vehicle:v,data:v});}catch(error){res.status(error?.code==='VEHICLE_EXISTS'?409:400).json({error:{code:error?.code||'INVALID_FLEET_VEHICLE',message:error?.message||'Could not update fleet vehicle.'}});}});
+app.post('/api/v1/fleet-ops/vehicles/:id/state',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({state:z.enum(['AVAILABLE','RESERVED','RENTED','RETURNED','INSPECTION','MAINTENANCE','INACTIVE'])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'INVALID_FLEET_STATE',message:'Choose a valid fleet operational state.'}});try{const v=await repository.setRideOnFleetVehicleState(req.params.id,p.data.state,req.user.id);if(!v)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Fleet vehicle not found.'}});res.json({vehicle:v});}catch(error){res.status(error?.code==='INVALID_FLEET_TRANSITION'?409:400).json({error:{code:error?.code||'FLEET_STATE_UPDATE_FAILED',message:error?.message||'Could not change vehicle state.'}});}});
+app.post('/api/v1/fleet-ops/vehicles/:id/maintenance',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({status:z.enum(['required','scheduled','started','completed']),notes:z.string().max(2000).optional(),cost:z.number().min(0).optional().default(0),serviceDate:z.string().datetime().nullable().optional(),nextServiceDate:z.string().datetime().nullable().optional(),odometerAtService:z.number().int().min(0).nullable().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid maintenance details.',details:p.error.flatten()}});try{res.json(await repository.recordFleetMaintenance({vehicleId:req.params.id,...p.data,actorUserId:req.user.id}));}catch(error){res.status(400).json({error:{code:error?.code||'MAINTENANCE_FAILED',message:error?.message||'Could not record maintenance.'}});}});
+app.post('/api/v1/fleet-ops/vehicles/:id/inspection',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({bookingId:z.string().uuid().nullable().optional(),inspectionType:z.enum(['pickup','return','maintenance','routine']).default('routine'),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),exteriorCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),inspectionStatus:z.enum(['pending','passed','failed','damage_review']).default('passed'),conditionPhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid inspection details.',details:p.error.flatten()}});try{res.json(await repository.recordFleetInspection({vehicleId:req.params.id,...p.data,actorUserId:req.user.id}));}catch(error){res.status(400).json({error:{code:error?.code||'INSPECTION_FAILED',message:error?.message||'Could not record inspection.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/assign',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({vehicleId:z.string().min(1).max(64),staffUserId:z.string().uuid(),assignmentType:z.enum(['delivery','pickup','return']).default('delivery'),scheduledAt:z.string().datetime().nullable().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid fulfillment assignment.'}});try{const a=await repository.assignFleetDeliveryStaff({bookingId:req.params.id,...p.data,actorUserId:req.user.id});res.status(201).json({assignment:a});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:400).json({error:{code:error?.code||'ASSIGNMENT_FAILED',message:error?.message||'Could not assign the RideOn operations job.'}});}});
+app.get('/api/v1/delivery/jobs',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{try{const jobs=await repository.listAssignedDeliveryJobs(req.user.id,{limit:req.query.limit,offset:req.query.offset});res.json({jobs,data:jobs});}catch(error){res.status(503).json({error:{code:'DELIVERY_JOBS_UNAVAILABLE',message:'Assigned delivery jobs are temporarily unavailable.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/handover',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({customerConfirmed:z.boolean(),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),vehicleCondition:z.string().max(2000).optional(),existingDamage:z.string().max(2000).optional(),notes:z.string().max(2000).optional(),evidencePhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid handover details.',details:p.error.flatten()}});try{const booking=await repository.prepareVehicleHandover({bookingId:req.params.id,staffUserId:req.user.id,...p.data});res.json({booking,confirmation:{title:'Vehicle Handed Over',bookingId:String(req.params.id)}});}catch(error){const status=['BOOKING_NOT_FOUND'].includes(error?.code)?404:['DEPOSIT_NOT_READY_FOR_HANDOVER','PAYMENT_NOT_CONFIRMED','CUSTOMER_HANDOVER_CONFIRMATION_REQUIRED','HANDOVER_NOT_ALLOWED'].includes(error?.code)?409:403;res.status(status).json({error:{code:error?.code||'HANDOVER_FAILED',message:error?.message||'Vehicle handover could not be completed.'}});}});
+app.post('/api/v1/bookings/:id/return-request',supabaseRequireAuth,requireCustomer,async(req,res)=>{const p=z.object({returnLocation:z.string().trim().max(300).nullable().optional(),notes:z.string().trim().max(2000).nullable().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid return request.'}});try{const booking=await repository.requestRentalReturn({bookingId:req.params.id,customerId:req.user.id,...p.data});res.json({booking});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'RETURN_NOT_ALLOWED',message:error?.message||'Return cannot be requested for this rental.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/return',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({returnLocation:z.string().trim().max(300).nullable().optional(),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),returnedCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),notes:z.string().max(2000).optional(),evidencePhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid return details.',details:p.error.flatten()}});try{const booking=await repository.recordRentalReturn({bookingId:req.params.id,staffUserId:req.user.id,...p.data});res.json({booking});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'RETURN_FAILED',message:error?.message||'Vehicle return could not be recorded.'}});}});
+app.post('/api/v1/fleet-ops/rentals/overdue/check',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{try{const bookings=await repository.markOverdueRentals();res.json({bookings,count:bookings.length});}catch(error){res.status(503).json({error:{code:'OVERDUE_CHECK_FAILED',message:'Overdue rentals could not be checked.'}});}});
+app.get('/api/v1/fleet-ops/bookings',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const bookings=await repository.getFleetBookingOperations({limit:req.query.limit});res.json({bookings,data:bookings});}catch(error){res.status(503).json({error:{code:'FLEET_OPERATIONS_UNAVAILABLE',message:'Rental operations are temporarily unavailable.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/inspection',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({vehicleId:z.string().min(1).max(64),inspectionType:z.enum(['pickup','return','maintenance','routine']).default('return'),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),exteriorCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),inspectionStatus:z.enum(['pending','passed','failed','damage_review']).default('passed'),conditionPhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid inspection details.',details:p.error.flatten()}});try{const result=await repository.recordFleetInspection({bookingId:req.params.id,...p.data,actorUserId:req.user.id});res.json(result);}catch(error){res.status(409).json({error:{code:error?.code||'INSPECTION_FAILED',message:error?.message||'Inspection could not be completed.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/deposit/settle',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({deductionPaise:z.number().int().min(0).default(0),reason:z.string().max(2000).optional().default(''),evidenceReference:z.string().max(500).optional().default(''),refundProviderReference:z.string().max(255).optional().default('')}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid deposit settlement details.',details:p.error.flatten()}});try{const result=await repository.settleFleetSecurityDeposit({bookingId:req.params.id,actorUserId:req.user.id,...p.data});res.json(result);}catch(error){const status=['DEPOSIT_ALREADY_SETTLED','DEPOSIT_SETTLEMENT_NOT_ALLOWED','DEPOSIT_DEDUCTION_INVALID','DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'].includes(error?.code)?409:error?.code==='FORBIDDEN'?403:404;res.status(status).json({error:{code:error?.code||'DEPOSIT_SETTLEMENT_FAILED',message:error?.message||'Security deposit settlement could not be completed.'}});}});
+app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => { res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...(payments.capabilities||{})}}); });
+
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
   const healthy = storage.mode === 'memory' || storage.reachable !== false;
@@ -299,17 +487,223 @@ app.get('/health', async (_req, res) => {
     service: 'rideon-api',
     storage,
     paymentProvider: payments.name,
+    buildCommit,
     timestamp: new Date().toISOString(),
   });
 });
 
+app.get('/api/v1/geocoding/search', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const address=String(req.query.address||'').trim();
+  const city=String(req.query.city||'').trim();
+  if(address.length<4 || address.length>300 || city.length>100) return res.status(400).json({error:{code:'GEOCODE_INVALID_QUERY',message:'Enter a delivery address or landmark.'}});
+  try {
+    const result=await geocodeAddress(address,city);
+    res.json({location:result.location,formattedAddress:result.formattedAddress,provider:result.provider,cached:Boolean(result.cached)});
+  } catch(error) {
+    const statusByCode={GEOCODE_INVALID_QUERY:400,GEOCODE_PROVIDER_NOT_CONFIGURED:503,GEOCODE_PROVIDER_UNAVAILABLE:503,GEOCODE_PROVIDER_TIMEOUT:504,GEOCODE_NOT_FOUND:422};
+    const messages={
+      GEOCODE_INVALID_QUERY:'Enter a delivery address or landmark.',
+      GEOCODE_PROVIDER_NOT_CONFIGURED:'Address search is not configured yet. You can choose a point on the map.',
+      GEOCODE_PROVIDER_UNAVAILABLE:'Address search is temporarily unavailable. Please retry or choose a point on the map.',
+      GEOCODE_PROVIDER_TIMEOUT:'Address search took too long. Please retry.',
+      GEOCODE_NOT_FOUND:'We could not find that address. Try a nearby landmark or choose a point on the map.',
+    };
+    console.error(JSON.stringify({level:'error',event:'geocoding_failed',requestId:req.requestId,code:error?.code||'GEOCODE_FAILED'}));
+    res.status(statusByCode[error?.code]||503).json({error:{code:error?.code||'GEOCODE_FAILED',message:messages[error?.code]||'We could not find that address right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/routing/eta', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const parsed=z.object({
+    vendorId:z.string().uuid(),
+    latitude:z.coerce.number().min(-90).max(90),
+    longitude:z.coerce.number().min(-180).max(180),
+  }).safeParse(req.query);
+  if(!parsed.success) return res.status(400).json({error:{code:'ROUTE_INVALID_COORDINATES',message:'Please provide a valid delivery location.'}});
+  try{
+    const vendors=await repository.listMarketplaceVendors({});
+    const vendor=vendors.find(item=>String(item.vendorId)===String(parsed.data.vendorId));
+    if(!vendor) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor service location is not available.'}});
+    const route=await getDrivingRoute(
+      {latitude:vendor.latitude,longitude:vendor.longitude},
+      {latitude:parsed.data.latitude,longitude:parsed.data.longitude}
+    );
+    res.json({
+      route:{
+        distanceMeters:route.distanceMeters,
+        durationSeconds:route.durationSeconds,
+        estimatedDeliveryMinutes:Math.max(1,Math.round(route.durationSeconds/60)),
+        provider:route.provider,
+        cached:Boolean(route.cached),
+      }
+    });
+  }catch(error){
+    const statusByCode={
+      ROUTE_INVALID_COORDINATES:400,
+      ROUTE_PROVIDER_NOT_CONFIGURED:503,
+      ROUTE_PROVIDER_UNAVAILABLE:503,
+      ROUTE_PROVIDER_TIMEOUT:504,
+      ROUTE_NOT_FOUND:422,
+    };
+    const status=statusByCode[error?.code]||503;
+    const messages={
+      ROUTE_PROVIDER_NOT_CONFIGURED:'Delivery routing is not configured yet.',
+      ROUTE_PROVIDER_UNAVAILABLE:'Delivery routing is temporarily unavailable. Please retry.',
+      ROUTE_PROVIDER_TIMEOUT:'Delivery routing took too long. Please retry.',
+      ROUTE_NOT_FOUND:'No driving route was found for those locations.',
+      ROUTE_INVALID_COORDINATES:'Please provide a valid delivery location.',
+    };
+    console.error(JSON.stringify({level:'error',event:'routing_eta_failed',requestId:req.requestId,code:error?.code||'ROUTE_FAILED'}));
+    res.status(status).json({error:{code:error?.code||'ROUTE_FAILED',message:messages[error?.code]||'We could not estimate delivery time right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/vendors/map', async (req, res) => {
+  try {
+    const cityValue = req.query.city?.toString().trim() || undefined;
+    if (cityValue && cityValue.length > 100) return res.status(400).json({error:{code:'INVALID_CITY',message:'City value is too long.'}});
+    const city = cityValue;
+    const vendors = await repository.listMarketplaceVendors({ city });
+    res.json({ data: vendors, vendors, meta:{ count:vendors.length } });
+  } catch (error) {
+    console.error(JSON.stringify({level:'error',event:'vendor_map_failed',requestId:req.requestId,code:error?.code||'VENDOR_MAP_FAILED',message:error?.message}));
+    res.status(503).json({error:{code:'VENDOR_MAP_UNAVAILABLE',message:'Vendor map data is temporarily unavailable. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/locations', async (_req, res) => {
+  try {
+    const locations = await repository.listLocations();
+    res.json({ data: locations, locations, meta: { count: locations.length } });
+  } catch (error) {
+    console.error(JSON.stringify({ level:'error', event:'locations_failed', requestId:_req.requestId, code:error?.code || 'LOCATIONS_FAILED', message:error?.message }));
+    res.status(503).json({ error:{ code:'LOCATIONS_UNAVAILABLE', message:'Available RideOn locations are temporarily unavailable. Please retry.' } });
+  }
+});
+
 app.get('/api/v1/vehicles', async (req, res) => {
-  const type = req.query.type?.toString().toLowerCase();
-  const city = req.query.city?.toString();
-  const q = req.query.q?.toString();
-  const vehicles = await repository.listVehicles({ type, city, q });
-  const data = vehicles.map(mobileVehicle);
-  res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
+  try {
+    const type = req.query.type?.toString().toLowerCase();
+    const city = req.query.city?.toString().trim();
+    const queryText = req.query.q?.toString() || '';
+    if ((city && city.length > 100) || queryText.length > 100) return res.status(400).json({error:{code:'INVALID_VEHICLE_QUERY',message:'Search filters are too long.'}});
+    const q = req.query.q?.toString().trim();
+    const vehicles = await repository.listVehicles({ type, city, q });
+    const data = vehicles.map(mobileVehicle);
+    res.json({ data, vehicles: data, meta: { count: data.length, currency: 'INR' } });
+  } catch (error) {
+    console.error(JSON.stringify({ level:'error', event:'vehicles_list_failed', requestId:req.requestId, code:error?.code || 'VEHICLES_LIST_FAILED', message:error?.message }));
+    res.status(503).json({ error:{ code:'VEHICLES_UNAVAILABLE', message:'Vehicle inventory is temporarily unavailable. Please retry.' } });
+  }
+});
+
+app.get('/api/v1/vendors/:vendorId', async (req,res)=>{
+  try{
+    const vendor=await repository.getPublicVendorProfile(req.params.vendorId);
+    if(!vendor)return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor not found.'}});
+    res.json({vendor});
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'vendor_profile_failed',requestId:req.requestId,code:error?.code||'VENDOR_PROFILE_FAILED'}));
+    res.status(503).json({error:{code:'VENDOR_PROFILE_UNAVAILABLE',message:'Vendor information is temporarily unavailable. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/vendors/:vendorId/vehicles', async (req,res)=>{
+  try{
+    const vendor=await repository.getPublicVendorProfile(req.params.vendorId);
+    if(!vendor)return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor not found.'}});
+    const limit=Math.min(100,Math.max(1,Number(req.query.limit)||50));
+    const offset=Math.max(0,Number(req.query.offset)||0);
+    const vehicles=(await repository.listPublicVendorVehicles(req.params.vendorId,{limit,offset})).map(mobileVehicle);
+    res.json({vendor,vehicles,data:vehicles,pagination:{limit,offset,count:vehicles.length}});
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'vendor_fleet_failed',requestId:req.requestId,code:error?.code||'VENDOR_FLEET_FAILED'}));
+    res.status(503).json({error:{code:'VENDOR_FLEET_UNAVAILABLE',message:'Vendor fleet is temporarily unavailable. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/quotes/multi', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({
+    vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
+    pickupAt:z.string().datetime(),
+    returnAt:z.string().datetime(),
+    delivery:z.boolean().default(true),
+    address:z.string().trim().max(300).default(''),
+    deliveryLatitude:z.union([z.number(),z.string()]).nullable().optional(),
+    deliveryLongitude:z.union([z.number(),z.string()]).nullable().optional(),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid fleet booking details.',details:parsed.error.flatten()}});
+  try{
+    const quote=await repository.quoteMultiVehicle({customerId:req.user.id,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude});
+    res.json({quote});
+  }catch(error){
+    const map={INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'MULTI_QUOTE_FAILED',message:error?.code==='MULTI_VEHICLE_UNAVAILABLE'?'One or more selected vehicles are no longer available.':'We could not prepare the fleet quote right now. Please retry.',vehicleIds:error?.vehicleIds}});
+  }
+});
+
+app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({
+    vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
+    pickupAt:z.string().datetime(),
+    returnAt:z.string().datetime(),
+    delivery:z.boolean().default(true),
+    address:z.string().trim().min(8).max(300),
+    deliveryLatitude:z.union([z.number(),z.string()]).nullable().optional(),
+    deliveryLongitude:z.union([z.number(),z.string()]).nullable().optional(),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide valid fleet checkout details.',details:parsed.error.flatten()}});
+  const idempotencyKey=req.get('Idempotency-Key')?.trim()||null;
+  if(idempotencyKey&&idempotencyKey.length>128)return res.status(400).json({error:{code:'INVALID_IDEMPOTENCY_KEY'}});
+  try{
+    const order=await repository.createFleetOrder({customerId:req.user.id,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
+    res.status(201).json({order,data:order});
+  }catch(error){
+    const map={INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404,VEHICLE_NOT_FOUND:404};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_ORDER_FAILED',message:error?.code==='MULTI_VEHICLE_UNAVAILABLE'?'One or more selected vehicles became unavailable. No vehicles were booked.':'We could not create the fleet booking. Please retry.',vehicleIds:error?.vehicleIds}});
+  }
+});
+
+app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    if(!repository.getFleetOrder) return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
+    const order=await repository.getFleetOrder(req.params.id,req.user.id);
+    if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
+    res.json({order});
+  }catch(error){res.status(503).json({error:{code:'FLEET_ORDER_UNAVAILABLE',message:'Fleet booking is temporarily unavailable. Please retry.'}});}
+});
+
+app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({idempotencyKey:z.string().trim().min(8).max(128).optional()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid payment request.'}});
+  try{
+    const order=await repository.getFleetOrder(req.params.id,req.user.id);
+    if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
+    if(order.paymentStatus==='paid')return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This fleet booking is already paid.'}});
+    if(new Date(order.quoteExpiresAt)<=new Date())return res.status(409).json({error:{code:'QUOTE_EXPIRED',message:'This fleet quote has expired. Please recheck availability.'}});
+    const amountPaise=Math.round(Number(order.total)*100);
+    const publicBaseUrl=`${req.protocol}://${req.get('host')}`;
+    const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
+    const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
+    const customer=await repository.findCustomerById(req.user.id);
+    const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise,customerId:req.user.id,customerPhone:customer?.phone,returnUrl,notifyUrl});
+    console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',fleetOrderId:order.id}));
+    const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,reference:paymentRequest.paymentSessionId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
+    const checkoutUrl=paymentProvider==='cashfree'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
+    res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:checkoutUrl,amount:result.payment.amountPaise,currency:'INR'},order});
+  }catch(error){
+    const map={FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,PAYMENT_PROVIDER_REQUEST_FAILED:502,PAYMENT_PROVIDER_TIMEOUT:504};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'?'Cashfree checkout is not configured on the RideOn server.':'We could not start fleet checkout right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    const limit=Math.min(50,Math.max(1,Number(req.query.limit)||20));
+    const offset=Math.max(0,Number(req.query.offset)||0);
+    const orders=await repository.listCustomerFleetOrders(req.user.id,{limit,offset});
+    res.json({orders,data:orders,pagination:{limit,offset,count:orders.length}});
+  }catch(error){res.status(503).json({error:{code:'FLEET_ORDERS_UNAVAILABLE',message:'Fleet bookings are temporarily unavailable. Please retry.'}});}
 });
 
 app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
@@ -317,6 +711,42 @@ app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
   if (!customer) return res.status(404).json({ error:{ code:'USER_NOT_FOUND' } });
   const user={id:customer.id,name:customer.fullName,email:customer.email||req.user.email,role:req.user.role};
   res.json({user,customer});
+});
+
+app.get('/api/v1/fleet', async (req,res)=>{
+  const rawType=String(req.query.type||'').trim().toLowerCase();
+  const type=rawType==='scooter'?'bike':rawType;
+  if(type && !['bike','car'].includes(type)) return res.status(400).json({error:{code:'INVALID_VEHICLE_TYPE',message:'Choose a valid fleet vehicle type.'}});
+  const sort=['recommended','price_asc','price_desc'].includes(String(req.query.sort||'').toLowerCase())?String(req.query.sort).toLowerCase():'recommended';
+  try{
+    const limit=Math.min(100,Math.max(1,Number(req.query.limit)||50)),offset=Math.max(0,Number(req.query.offset)||0);
+    const vehicles=await repository.listRideOnFleet({q:req.query.q,type,brand:req.query.brand,model:req.query.model,city:req.query.city,minPrice:req.query.minPrice,maxPrice:req.query.maxPrice,sort,limit,offset});
+    res.json({fleet:vehicles,data:vehicles,vehicles,meta:{count:vehicles.length,limit,offset}});
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'fleet_list_failed',requestId:req.requestId,code:error?.code||'FLEET_LIST_FAILED'}));
+    res.status(503).json({error:{code:'FLEET_UNAVAILABLE',message:'RideOn fleet is temporarily unavailable. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/fleet/:vehicleId', async (req,res)=>{
+  try{
+    const vehicle=await repository.getRideOnFleetVehicle(req.params.vehicleId);
+    if(!vehicle)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+    res.json({vehicle:mobileVehicle(vehicle),data:mobileVehicle(vehicle)});
+  }catch(error){res.status(503).json({error:{code:'FLEET_UNAVAILABLE',message:'RideOn fleet is temporarily unavailable. Please retry.'}});}
+});
+
+app.get('/api/v1/fleet/:vehicleId/availability', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  const parsed=z.object({startAt:z.string().datetime(),endAt:z.string().datetime()}).safeParse(req.query);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_BOOKING_WINDOW',message:'Provide valid pickup and return timestamps.'}});
+  try{
+    validateBookingWindow(parsed.data.startAt,parsed.data.endAt);
+    const availability=await repository.checkVehicleAvailability(req.params.vehicleId,parsed.data.startAt,parsed.data.endAt);
+    if(!availability.exists)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+    res.json(availability);
+  }catch(error){
+    res.status(error?.code==='INVALID_BOOKING_WINDOW'?400:503).json({error:{code:error?.code||'FLEET_AVAILABILITY_FAILED',message:error?.message||'Fleet availability is temporarily unavailable.'}});
+  }
 });
 
 app.get('/api/v1/vehicles/:id', async (req, res) => {
@@ -329,6 +759,36 @@ app.get('/api/v1/vehicles/:id', async (req, res) => {
 // Vendor profile and fleet management.
 app.get('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
   res.json({ user: { id:req.user.id, name:req.user.name, email:req.user.email, role:'vendor' }, vendor:req.vendor });
+});
+
+app.get('/api/v1/vendor/service-location', supabaseRequireAuth, requireVendor, async (req,res) => {
+  try {
+    const location = await repository.getVendorServiceLocation(req.user.id);
+    if (!location) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor profile not found.'}});
+    res.json({data:location,location});
+  } catch (error) {
+    console.error(JSON.stringify({level:'error',event:'vendor_service_location_get_failed',requestId:req.requestId,code:error?.code||'VENDOR_SERVICE_LOCATION_GET_FAILED'}));
+    res.status(503).json({error:{code:'SERVICE_LOCATION_UNAVAILABLE',message:'We could not load your service location right now.'}});
+  }
+});
+
+app.patch('/api/v1/vendor/service-location', supabaseRequireAuth, requireVendor, async (req,res) => {
+  const parsed=z.object({
+    latitude:z.union([z.number(),z.string()]).nullable().optional(),
+    longitude:z.union([z.number(),z.string()]).nullable().optional(),
+    address:z.string().trim().max(300).optional(),
+    serviceCity:z.string().trim().min(2).max(100).optional(),
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_SERVICE_LOCATION',message:'Please provide a valid service location.',details:parsed.error.flatten()}});
+  try {
+    const location=await repository.updateVendorServiceLocation(req.user.id,parsed.data);
+    if(!location) return res.status(404).json({error:{code:'VENDOR_NOT_FOUND',message:'Vendor profile not found.'}});
+    res.json({data:{vendorId:location.id,serviceCity:location.serviceCity,address:location.serviceAddress||location.address,latitude:location.serviceLatitude,longitude:location.serviceLongitude},location:{vendorId:location.id,serviceCity:location.serviceCity,address:location.serviceAddress||location.address,latitude:location.serviceLatitude,longitude:location.serviceLongitude}});
+  } catch(error) {
+    if(error.code==='INVALID_SERVICE_LOCATION') return res.status(400).json({error:{code:error.code,message:'Please provide a valid latitude and longitude.'}});
+    console.error(JSON.stringify({level:'error',event:'vendor_service_location_update_failed',requestId:req.requestId,code:error?.code||'SERVICE_LOCATION_UPDATE_FAILED'}));
+    res.status(503).json({error:{code:'SERVICE_LOCATION_UPDATE_FAILED',message:'We could not save your service location right now. Please try again.'}});
+  }
 });
 
 app.patch('/api/v1/vendor/me', supabaseRequireAuth, requireVendor, async (req, res) => {
@@ -364,6 +824,47 @@ const vehicleInput=z.object({
   imageUrls:z.array(z.string().url()).max(12).optional().default([]),
   deliveryAvailable:z.boolean().optional().default(true),
   active:z.boolean().optional().default(true),
+});
+
+app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const supabaseUrl=String(process.env.SUPABASE_URL||'').replace(/\/$/,'');
+    const storageKey=process.env.SUPABASE_SERVICE_ROLE_KEY||process.env.SUPABASE_SECRET_KEY;
+    const bucket=String(process.env.SUPABASE_VEHICLE_IMAGE_BUCKET||'vehicle-images').trim();
+    if(!supabaseUrl||!storageKey) return res.status(503).json({error:{code:'STORAGE_NOT_CONFIGURED',message:'Vehicle image storage is not configured on the API.'}});
+    const base64=String(req.body?.base64||'').replace(/^data:image\/[^;]+;base64,/i,'').trim();
+    const contentType=String(req.body?.contentType||'image/jpeg').toLowerCase();
+    if(!base64) return res.status(400).json({error:{code:'IMAGE_REQUIRED',message:'Please select a vehicle image to upload.'}});
+    if(!['image/jpeg','image/png','image/webp'].includes(contentType)) return res.status(400).json({error:{code:'IMAGE_TYPE_UNSUPPORTED',message:'Please upload a JPG, PNG, or WebP image.'}});
+    if(!/^[A-Za-z0-9+/\s]+={0,2}$/.test(base64) || base64.length > Math.ceil((8*1024*1024)/3)*4 + 16){
+      return res.status(400).json({error:{code:'IMAGE_INVALID',message:'The selected image could not be read. Please choose it again.'}});
+    }
+    const imageBuffer=Buffer.from(base64,'base64');
+    if(!imageBuffer.length) return res.status(400).json({error:{code:'IMAGE_INVALID',message:'The selected image could not be read. Please choose it again.'}});
+    if(imageBuffer.length>8*1024*1024) return res.status(413).json({error:{code:'IMAGE_TOO_LARGE',message:'Vehicle images must be 8 MB or smaller.'}});
+    const hasJpegMagic=imageBuffer.length>=3&&imageBuffer[0]===0xFF&&imageBuffer[1]===0xD8&&imageBuffer[2]===0xFF;
+    const hasPngMagic=imageBuffer.length>=8&&imageBuffer.subarray(0,8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]));
+    const hasWebpMagic=imageBuffer.length>=12&&imageBuffer.subarray(0,4).toString('ascii')==='RIFF'&&imageBuffer.subarray(8,12).toString('ascii')==='WEBP';
+    const contentMatchesMagic=(contentType==='image/jpeg'&&hasJpegMagic)||(contentType==='image/png'&&hasPngMagic)||(contentType==='image/webp'&&hasWebpMagic);
+    if(!contentMatchesMagic) return res.status(400).json({error:{code:'IMAGE_INVALID',message:'The selected file is not a valid image of the declared type.'}});
+    const extension=contentType==='image/png'?'png':contentType==='image/webp'?'webp':'jpg';
+    const path=`vendors/${req.vendor.id}/${crypto.randomUUID()}.${extension}`;
+    const response=await fetch(`${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`,{
+      method:'POST',
+      headers:{Authorization:`Bearer ${storageKey}`,apikey:storageKey,'Content-Type':contentType,'x-upsert':'false'},
+      body:imageBuffer,
+    });
+    if(!response.ok){
+      const details=await response.text().catch(()=> '');
+      console.error(JSON.stringify({level:'error',event:'vehicle_image_upload_failed',requestId:req.requestId,status:response.status,details:details.slice(0,500)}));
+      return res.status(502).json({error:{code:'IMAGE_UPLOAD_FAILED',message:'Vehicle image upload failed. Please try again.'}});
+    }
+    const publicUrl=`${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+    res.status(201).json({data:{url:publicUrl,path,bucket},url:publicUrl});
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'vehicle_image_upload_error',requestId:req.requestId,message:error?.message}));
+    res.status(500).json({error:{code:'IMAGE_UPLOAD_FAILED',message:'Vehicle image upload failed. Please try again.'}});
+  }
 });
 
 app.get('/api/v1/vendor/vehicles', supabaseRequireAuth, requireVendor, async (req,res)=>{
@@ -420,7 +921,133 @@ app.get('/api/v1/vendor/bookings', supabaseRequireAuth, requireVendor, async (re
 app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async (req,res)=>{
   const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
   if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
-  res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+  res.json({data:publicBooking(booking,{includeDeliveryLocation:true}),booking:publicBooking(booking,{includeDeliveryLocation:true})});
+});
+
+const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false});
+
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/start',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const booking=await repository.getRentalBookingForCustomer(req.params.id,req.body?.customerId);if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});const session=await repository.startDelivery(null,req.params.id);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});try{const session=await repository.updateDeliveryLocation(null,req.params.id,p.data);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_LOCATION_FAILED',message:error?.message||'Delivery location could not be updated.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/delivery/complete',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{try{const result=await repository.completeDelivery(null,req.params.id,req.body||{});res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:error?.message||'Delivery could not be completed.'}});}});
+app.post('/api/v1/vendor/bookings/:id/delivery/start', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const session=await repository.startDelivery(req.vendor.id,req.params.id);
+    res.json({tracking:{session,status:'in_delivery',active:true}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,DELIVERY_START_NOT_ALLOWED:409,DELIVERY_LOCATION_REQUIRED:409,PAYMENT_REQUIRED_FOR_DELIVERY:409,DELIVERY_ALREADY_ACTIVE:409};
+    const messages={DELIVERY_START_NOT_ALLOWED:'Delivery can only start after the booking is confirmed.',DELIVERY_LOCATION_REQUIRED:'A valid delivery address and map location are required before delivery can start.',PAYMENT_REQUIRED_FOR_DELIVERY:'Payment must be confirmed before delivery can start.',DELIVERY_ALREADY_ACTIVE:'Delivery tracking is already active.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:messages[error?.code]||'We could not start delivery right now. Please try again.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/location', supabaseRequireAuth, requireVendor, trackingUpdateRateLimit, async (req,res)=>{
+  const parsed=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location. Please try again.'}});
+  try{
+    const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    const before=await repository.getActiveTrackingSession(req.vendor.id,req.params.id);
+    const session=await repository.updateDeliveryLocation(req.vendor.id,req.params.id,parsed.data);
+    let route=null; let routeUnavailable=false;
+    const movedMeters=before?.lastLatitude!=null?Math.sqrt(Math.pow((parsed.data.latitude-before.lastLatitude)*111320,2)+Math.pow((parsed.data.longitude-before.lastLongitude)*111320*Math.cos(parsed.data.latitude*Math.PI/180),2)):Infinity;
+    const routeDue=!before?.lastRouteAt||Date.now()-new Date(before.lastRouteAt).getTime()>=Math.max(30,Number(process.env.TRACKING_ROUTE_REFRESH_SECONDS||60))*1000||movedMeters>=Math.max(100,Number(process.env.TRACKING_ROUTE_REFRESH_METERS||300));
+    if(routeDue&&booking.deliveryLatitude!=null&&booking.deliveryLongitude!=null){
+      try{
+        const calculated=await getDrivingRoute({latitude:parsed.data.latitude,longitude:parsed.data.longitude},{latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude});
+        route={distanceMeters:calculated.distanceMeters,durationSeconds:calculated.durationSeconds,estimatedDeliveryMinutes:Math.max(1,Math.round(calculated.durationSeconds/60)),provider:calculated.provider,encodedPolyline:calculated.encodedPolyline||null};
+        await repository.updateTrackingRoute(req.vendor.id,req.params.id,route);
+      }catch(routeError){
+        routeUnavailable=true;
+        if(routeError?.code!=='ROUTE_PROVIDER_NOT_CONFIGURED'&&routeError?.code!=='ROUTE_PROVIDER_UNAVAILABLE'&&routeError?.code!=='ROUTE_PROVIDER_TIMEOUT'&&routeError?.code!=='ROUTE_NOT_FOUND')throw routeError;
+      }
+    }
+    const latest=await repository.getActiveTrackingSession(req.vendor.id,req.params.id);
+    const payload={type:'tracking.update',tracking:{session:latest||session,location:{latitude:parsed.data.latitude,longitude:parsed.data.longitude,accuracyMeters:parsed.data.accuracyMeters||null,updatedAt:parsed.data.recordedAt||new Date().toISOString()},route,routeUnavailable}};
+    trackingRealtime.broadcast(req.params.id,payload);
+    res.json({tracking:payload.tracking});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,STALE_LOCATION_UPDATE:409,INVALID_DELIVERY_LOCATION:400,INVALID_DELIVERY_TIMESTAMP:400};
+    const messages={TRACKING_NOT_ACTIVE:'Live delivery tracking is not active.',TRACKING_SESSION_EXPIRED:'This delivery tracking session has expired.',STALE_LOCATION_UPDATE:'That GPS update is older than the last accepted location.',INVALID_DELIVERY_LOCATION:'We could not use that GPS location. Please try again.',INVALID_DELIVERY_TIMESTAMP:'That GPS timestamp is invalid.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_LOCATION_UPDATE_FAILED',message:messages[error?.code]||'We could not update the delivery location right now. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/complete', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({latitude:z.coerce.number().min(-90).max(90).nullable().optional(),longitude:z.coerce.number().min(-180).max(180).nullable().optional()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'The final delivery location is invalid.'}});
+  try{
+    const result=await repository.completeDelivery(req.vendor.id,req.params.id,parsed.data);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,DELIVERY_COMPLETION_NOT_ALLOWED:409,INVALID_DELIVERY_LOCATION:400};
+    const messages={TRACKING_NOT_ACTIVE:'Live delivery tracking is not active.',TRACKING_SESSION_EXPIRED:'This delivery session has expired.',DELIVERY_COMPLETION_NOT_ALLOWED:'Delivery cannot be completed in the current booking state.',INVALID_DELIVERY_LOCATION:'The final delivery location is invalid.'};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:messages[error?.code]||'We could not mark the vehicle delivered right now. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/vendor/bookings/:id/delivery/abort', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const result=await repository.abortDelivery(req.vendor.id,req.params.id);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.stopped',tracking:{session:result.session,status:'aborted',active:false}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'aborted',active:false}});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,TRACKING_NOT_ACTIVE:409};
+    res.status(map[error?.code]||500).json({error:{code:error?.code||'DELIVERY_ABORT_FAILED',message:error?.code==='TRACKING_NOT_ACTIVE'?'Live delivery tracking is not active.':'We could not stop delivery tracking right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/bookings/:id/tracking', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  try{
+    const result=await repository.getTrackingForCustomer(req.user.id,req.params.id);
+    const staleThresholdSeconds=Math.max(30,Number(process.env.TRACKING_STALE_SECONDS||90));
+    const last=result.session?.lastLocationAt?new Date(result.session.lastLocationAt).getTime():0;
+    const stale=!last||Date.now()-last>staleThresholdSeconds*1000;
+    const active=Boolean(result.session?.status==='active'&&result.booking.deliveryStatus==='in_delivery'&&!stale);
+    res.json({tracking:{active,stale,staleThresholdSeconds,session:result.session,booking:publicBooking(result.booking,{includeDeliveryLocation:active})}});
+  }catch(error){
+    res.status(error?.code==='BOOKING_NOT_FOUND'?404:500).json({error:{code:error?.code||'TRACKING_UNAVAILABLE',message:error?.code==='BOOKING_NOT_FOUND'?'Booking not found.':'We could not load live delivery tracking right now. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/vendor/bookings/:id/customer-reviews', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const booking=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    const customerId=booking.customerId;
+    const result=await repository.listVendorCustomerReviewsForBooking({vendorId:req.vendor.id,bookingId:req.params.id,limit:10,offset:0});
+    res.json(result);
+  }catch(error){res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load customer rating history right now. Please retry.'}});}
+});
+
+app.get('/api/v1/vendor/fleet-orders', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const limit=Math.min(50,Math.max(1,Number(req.query.limit)||20));
+    const offset=Math.max(0,Number(req.query.offset)||0);
+    const orders=await repository.listVendorFleetOrders(req.vendor.id,{limit,offset});
+    res.json({orders,data:orders,pagination:{limit,offset,count:orders.length}});
+  }catch(error){res.status(503).json({error:{code:'FLEET_ORDERS_UNAVAILABLE',message:'Grouped fleet bookings are temporarily unavailable. Please retry.'}});}
+});
+
+app.get('/api/v1/vendor/fleet-orders/:id', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  try{
+    const orders=await repository.listVendorFleetOrders(req.vendor.id,{limit:50,offset:0});
+    const order=orders.find(x=>String(x.id)===String(req.params.id));
+    if(!order)return res.status(404).json({error:{code:'FLEET_ORDER_NOT_FOUND',message:'Fleet booking not found.'}});
+    res.json({order});
+  }catch(error){res.status(503).json({error:{code:'FLEET_ORDER_UNAVAILABLE',message:'Fleet booking is temporarily unavailable. Please retry.'}});}
+});
+
+app.patch('/api/v1/vendor/fleet-orders/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['confirmed','rejected','cancelled','in_progress','completed']),note:z.string().trim().max(500).optional()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid grouped booking status.',details:parsed.error.flatten()}});
+  try{
+    const order=await repository.updateFleetOrderStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
+    res.json({order});
+  }catch(error){
+    const map={BOOKING_NOT_FOUND:404,INVALID_BOOKING_STATUS:400,INVALID_BOOKING_TRANSITION:409,PAYMENT_REQUIRED_FOR_ACCEPTANCE:409,DELIVERY_NOT_COMPLETED:409,REJECTION_REASON_REQUIRED:400};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_ORDER_STATUS_FAILED',message:error?.code==='PAYMENT_REQUIRED_FOR_ACCEPTANCE'?'Payment must be confirmed before accepting the grouped booking.':error?.code==='DELIVERY_NOT_COMPLETED'?'Complete delivery for every vehicle before completing the grouped booking.':error?.code==='REJECTION_REASON_REQUIRED'?'A rejection reason is required.':'We could not update the grouped booking right now. Please retry.'}});
+  }
 });
 
 app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
@@ -428,13 +1055,201 @@ app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVend
   if(!parsed.success) return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid booking status.',details:parsed.error.flatten()}});
   try{
     const booking=await repository.updateVendorBookingStatus(req.vendor.id,req.params.id,parsed.data.status,parsed.data.note);
-    res.json({data:publicBooking(booking),booking:publicBooking(booking)});
+    const refund=(parsed.data.status==='rejected'&&['paid','refund_pending'].includes(String(booking.paymentStatus))) ? await requestRefundForBooking(booking.id) : {status:'not_applicable'};
+    const latest=await repository.getVendorBooking(req.vendor.id,req.params.id);
+    res.json({data:publicBooking(latest||booking,{includeDeliveryLocation:true}),booking:publicBooking(latest||booking,{includeDeliveryLocation:true}),refund});
   }catch(error){
     if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
     if(error.code==='INVALID_BOOKING_TRANSITION') return res.status(409).json({error:{code:error.code,message:'Booking cannot move to that status.'}});
+    if(error.code==='PAYMENT_REQUIRED_FOR_ACCEPTANCE') return res.status(409).json({error:{code:error.code,message:'Payment must be confirmed before this booking can be accepted.'}});
     if(error.code==='INVALID_BOOKING_STATUS') return res.status(400).json({error:{code:error.code,message:'Invalid booking status.'}});
+    if(error.code==='REJECTION_REASON_REQUIRED') return res.status(400).json({error:{code:error.code,message:'A rejection reason is required.'}});
+    if(error.code==='DELIVERY_NOT_COMPLETED') return res.status(409).json({error:{code:error.code,message:'Mark the vehicle delivered before completing the rental.'}});
     throw error;
   }
+});
+
+const reviewResponse = (res, error) => {
+  const map = {
+    BOOKING_NOT_FOUND:[404,'Booking not found.'],
+    REVIEW_NOT_ELIGIBLE:[409,'Reviews are available only after the booking is completed.'],
+    REVIEW_ALREADY_EXISTS:[409,'You have already reviewed this booking.'],
+    INVALID_REVIEW_RATING:[400,'Choose a star rating from 1 to 5.'],
+    REVIEW_TARGET_UNAVAILABLE:[409,'The review target is not available for this booking.'],
+    REVIEW_NOT_FOUND:[404,'Review not found.'],
+    REVIEW_EDIT_NOT_ALLOWED:[403,'Vendor reviews cannot be edited after submission.'],
+    REVIEW_EDIT_WINDOW_EXPIRED:[409,'This review can no longer be edited.'],
+    FORBIDDEN:[403,'You do not have permission to perform this review action.'],
+  };
+  const [status,message]=map[error?.code]||[500,'We could not complete that review action right now. Please try again.'];
+  return res.status(status).json({error:{code:error?.code||'REVIEW_FAILED',message}});
+};
+
+const supportResponse = (res, error) => {
+  const map = {
+    FORBIDDEN:[403,'FORBIDDEN','You do not have access to this support resource.'],
+    BOOKING_NOT_FOUND:[404,'BOOKING_NOT_FOUND','Booking not found.'],
+    VENDOR_NOT_FOUND:[404,'VENDOR_NOT_FOUND','Vendor profile not found.'],
+    SUPPORT_TICKET_NOT_FOUND:[404,'SUPPORT_TICKET_NOT_FOUND','Support ticket not found.'],
+    INVALID_SUPPORT_CATEGORY:[400,'INVALID_SUPPORT_CATEGORY','Choose a valid support category.'],
+    INVALID_SUPPORT_PRIORITY:[400,'INVALID_SUPPORT_PRIORITY','Choose a valid priority.'],
+    INVALID_SUPPORT_STATUS:[400,'INVALID_SUPPORT_STATUS','Choose a valid ticket status.'],
+    INVALID_SUPPORT_SUBJECT:[400,'INVALID_SUPPORT_SUBJECT','Please enter a clear support subject.'],
+    INVALID_SUPPORT_DESCRIPTION:[400,'INVALID_SUPPORT_DESCRIPTION','Please describe the issue in at least 10 characters.'],
+    INVALID_SUPPORT_MESSAGE:[400,'INVALID_SUPPORT_MESSAGE','Please enter a message of up to 5000 characters.'],
+    INVALID_SUPPORT_TRANSITION:[409,'INVALID_SUPPORT_TRANSITION','That ticket status change is not available.'],
+    SUPPORT_TICKET_CLOSED:[409,'SUPPORT_TICKET_CLOSED','Reopen the ticket before replying.'],
+    RESOLUTION_REQUIRED:[400,'RESOLUTION_REQUIRED','Add a resolution before marking the ticket resolved.'],
+    INVALID_ASSIGNEE:[400,'INVALID_ASSIGNEE','Tickets can only be assigned to support staff.'],
+    INVALID_IDEMPOTENCY_KEY:[400,'INVALID_IDEMPOTENCY_KEY','The support request key is invalid.'],
+  };
+  const [status,code,message]=map[error?.code]||[503,'SUPPORT_UNAVAILABLE','Support is temporarily unavailable. Please retry.'];
+  console.error(JSON.stringify({level:'error',event:'support_request_failed',requestId:res.req?.requestId,code:error?.code||'SUPPORT_UNAVAILABLE'}));
+  return res.status(status).json({error:{code,message}});
+};
+
+app.post('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer','vendor'), supportRateLimit, async (req,res)=>{
+  const parsed=z.object({
+    bookingId:z.string().uuid().nullable().optional(),
+    category:z.string().trim().max(40),
+    subject:z.string().trim().min(3).max(160),
+    description:z.string().trim().min(10).max(5000),
+    priority:z.enum(['low','normal','high','urgent']).default('normal'),
+  }).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please check the support request details.',details:parsed.error.flatten()}});
+  try{
+    const result=await repository.createSupportTicket({...parsed.data,raisedByUserId:req.user.id,raisedByRole:req.user.role,idempotencyKey:req.get('Idempotency-Key')||null});
+    res.status(result.idempotentReplay?200:201).json({ticket:result.ticket,idempotentReplay:result.idempotentReplay});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets', supabaseRequireAuth, requireRole('customer','vendor'), async (req,res)=>{
+  try{
+    const result=await repository.listMySupportTickets({userId:req.user.id,role:req.user.role,status:req.query.status,category:req.query.category,limit:req.query.limit,offset:req.query.offset});
+    res.json(result);
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets/:id', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), async (req,res)=>{
+  try{
+    const ticket=await repository.getSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role});
+    if(!ticket)return res.status(404).json({error:{code:'SUPPORT_TICKET_NOT_FOUND',message:'Support ticket not found.'}});
+    res.json({ticket});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/tickets/:id/messages', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), async (req,res)=>{
+  try{
+    const messages=await repository.listSupportMessages({ticketId:req.params.id,userId:req.user.id,role:req.user.role});
+    if(!messages)return res.status(404).json({error:{code:'SUPPORT_TICKET_NOT_FOUND',message:'Support ticket not found.'}});
+    res.json({messages});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/messages', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
+  try{
+    const message=await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal});
+    res.status(201).json({message});
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/close', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  try{res.json({ticket:await repository.closeSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/tickets/:id/reopen', supabaseRequireAuth, requireRole('customer','vendor','support','admin'), supportRateLimit, async (req,res)=>{
+  try{res.json({ticket:await repository.reopenSupportTicket({ticketId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.get('/api/v1/support/admin/tickets', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  try{
+    const result=await repository.listSupportTickets({userId:req.user.id,status:req.query.status,category:req.query.category,priority:req.query.priority,limit:req.query.limit,offset:req.query.offset});
+    res.json(result);
+  }catch(error){return supportResponse(res,error);}
+});
+
+app.patch('/api/v1/support/admin/tickets/:id/assignment', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({assignedToUserId:z.string().uuid()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid support assignee.'}});
+  try{res.json({ticket:await repository.assignSupportTicket({ticketId:req.params.id,assignedToUserId:parsed.data.assignedToUserId,actorUserId:req.user.id})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.patch('/api/v1/support/admin/tickets/:id/status', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({status:z.enum(['open','in_progress','waiting_for_user','resolved','closed']),resolution:z.string().trim().max(5000).optional().nullable()}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid status and optional resolution.'}});
+  try{res.json({ticket:await repository.updateSupportTicketStatus({ticketId:req.params.id,userId:req.user.id,role:req.user.role,status:parsed.data.status,resolution:parsed.data.resolution})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/admin/tickets/:id/messages', supabaseRequireAuth, requireSupport, supportRateLimit, async (req,res)=>{
+  const parsed=z.object({message:z.string().trim().min(1).max(5000),isInternal:z.boolean().optional().default(false)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Please enter a message of up to 5000 characters.'}});
+  try{res.status(201).json({message:await repository.addSupportMessage({ticketId:req.params.id,userId:req.user.id,role:req.user.role,message:parsed.data.message,isInternal:parsed.data.isInternal})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/support/admin/tickets/:id/resolve', supabaseRequireAuth, requireSupport, async (req,res)=>{
+  const parsed=z.object({resolution:z.string().trim().min(3).max(5000)}).safeParse(req.body||{});
+  if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'A resolution is required.'}});
+  try{res.json({ticket:await repository.resolveSupportTicket({ticketId:req.params.id,userId:req.user.id,resolution:parsed.data.resolution})});}
+  catch(error){return supportResponse(res,error);}
+});
+
+app.post('/api/v1/bookings/:id/reviews/customer', supabaseRequireAuth, requireCustomer, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{
+    const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'customer',...parsed.data});
+    res.status(201).json({review});
+  }catch(error){return reviewResponse(res,error);}
+});
+
+app.post('/api/v1/vendor/bookings/:id/review', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});res.status(201).json({review});}catch(error){return reviewResponse(res,error);}
+});
+
+app.post('/api/v1/vendor/bookings/:id/reviews/customer', supabaseRequireAuth, requireVendor, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{
+    const review=await repository.createReview({bookingId:req.params.id,reviewerId:req.user.id,reviewerRole:'vendor',...parsed.data});
+    res.status(201).json({review});
+  }catch(error){return reviewResponse(res,error);}
+});
+
+app.get('/api/v1/bookings/:id/reviews/status', supabaseRequireAuth, async (req,res)=>{
+  if(!['customer','vendor'].includes(req.user.role))return res.status(403).json({error:{code:'FORBIDDEN',message:'A valid RideOn account is required.'}});
+  try{res.json({data:await repository.getReviewStatus({bookingId:req.params.id,userId:req.user.id,role:req.user.role})});}
+  catch(error){return reviewResponse(res,error);}
+});
+
+app.patch('/api/v1/reviews/:id', supabaseRequireAuth, requireCustomer, reviewRateLimit, async (req,res)=>{
+  const parsed=z.object({rating:z.coerce.number().int().min(1).max(5),comment:z.string().trim().max(1000).optional().nullable()}).safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({error:{code:'INVALID_REVIEW',message:'Choose a rating from 1 to 5 and keep the comment within 1000 characters.'}});
+  try{res.json({review:await repository.updateReview({reviewId:req.params.id,userId:req.user.id,role:'customer',...parsed.data})});}
+  catch(error){return reviewResponse(res,error);}
+});
+
+app.get('/api/v1/vehicles/:id/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviews({scope:'vehicle',id:req.params.id,limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load vehicle reviews right now. Please retry.'}});}
+});
+
+app.get('/api/v1/vendors/:id/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviews({scope:'vendor',id:req.params.id,limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load vendor reviews right now. Please retry.'}});}
+});
+
+app.get('/api/v1/me/reviews', supabaseRequireAuth, async (req,res)=>{
+  try{res.json(await repository.listReviewsReceived(req.user.id,{limit:req.query.limit,offset:req.query.offset}));}
+  catch(error){return res.status(500).json({error:{code:'REVIEWS_UNAVAILABLE',message:'We could not load your reviews right now. Please retry.'}});}
 });
 
 app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
@@ -450,15 +1265,101 @@ app.post('/api/v1/auth/request-otp', authRateLimit, async (req, res) => {
       headers:{ apikey:publishableKey, Authorization:`Bearer ${publishableKey}`, 'Content-Type':'application/json' },
       body:JSON.stringify({ email, create_user:true, data: parsed.data.fullName ? { full_name: parsed.data.fullName } : undefined })
     });
-    if (!response.ok) return res.status(response.status===429?429:502).json({ error:{ code:'OTP_REQUEST_FAILED', message:'Unable to send the RideOn verification email right now.' } });
+    if (!response.ok) {
+      const providerPayload = await response.text().catch(() => '');
+      let providerError = {};
+      try { providerError = providerPayload ? JSON.parse(providerPayload) : {}; } catch {}
+      console.error('[rideon-auth] Supabase OTP request failed', {
+        status: response.status,
+        code: providerError?.error_code || providerError?.error,
+        message: providerError?.msg || providerError?.message || providerError?.error_description,
+      });
+      return res.status(response.status === 429 ? 429 : 502).json({
+        error:{
+          code:'OTP_REQUEST_FAILED',
+          message:'Unable to send the RideOn verification email right now.'
+        }
+      });
+    }
     return res.json({ data:{ challenge:true, channel:'email', destination:email, expiresInSeconds:600 } });
   } catch {
     return res.status(502).json({ error:{ code:'OTP_REQUEST_FAILED', message:'Unable to send the RideOn verification email right now.' } });
   }
 });
 
+app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) => {
+  console.log('[RideOnAuth][COMPLETE_REGISTRATION_REQUEST]', JSON.stringify({
+    requestId:req.requestId,
+    method:req.method,
+    path:req.path,
+    hasAuthorization:Boolean(req.get('Authorization')),
+    bodyKeys:Object.keys(req.body || {}),
+    accountType:req.body?.accountType || null,
+    fullNameLength:String(req.body?.fullName || '').length,
+    hasPhone:Boolean(req.body?.phone),
+    buildCommit
+  }));
+  const header=req.get('Authorization')||'';
+  const token=header.startsWith('Bearer ')?header.slice(7).trim():'';
+  if(!token) return res.status(401).json({error:{code:'AUTH_REQUIRED',message:'Authentication required.'}});
+  const parsed=z.object({
+    accountType:z.enum(['customer','vendor']),
+    fullName:z.string().trim().min(2).max(100),
+    phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
+  }).superRefine((value,ctx)=>{
+    if(value.accountType==='vendor' && !value.phone) ctx.addIssue({code:z.ZodIssueCode.custom,path:['phone'],message:'Vendor phone number is required.'});
+  }).safeParse(req.body);
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid account type and registration details.'}});
+  try{
+    console.log('[RideOnAuth][TOKEN_VERIFY_START]', JSON.stringify({requestId:req.requestId, buildCommit}));
+    const supa=await verifySupabaseAccessToken(token);
+    console.log('[RideOnAuth][TOKEN_VERIFY_RESULT]', JSON.stringify({requestId:req.requestId, valid:Boolean(supa?.id), hasEmail:Boolean(supa?.email)}));
+    if(!supa?.id||!supa?.email) return res.status(401).json({error:{code:'INVALID_TOKEN',message:'Session is invalid or expired.'}});
+    console.log('[RideOnAuth][IDENTITY_LINK_START]', JSON.stringify({requestId:req.requestId, accountType:parsed.data.accountType}));
+    const customer=await repository.createOrLinkCustomerFromSupabase({
+      supabaseUserId:supa.id,email:supa.email,fullName:parsed.data.fullName,phone:parsed.data.phone,role:parsed.data.accountType,
+    });
+    console.log('[RideOnAuth][IDENTITY_LINK_SUCCESS]', JSON.stringify({requestId:req.requestId, customerId:customer.id, role:customer.role}));
+    let vendor=null;
+    if(parsed.data.accountType==='vendor'){
+      console.log('[RideOnAuth][VENDOR_PROFILE_START]', JSON.stringify({requestId:req.requestId, customerId:customer.id}));
+      vendor=await repository.ensureVendorForCustomer(customer.id,{
+        businessName:parsed.data.fullName,contactName:parsed.data.fullName,
+        phone:parsed.data.phone,email:supa.email,serviceCity:'Udaipur'
+      });
+      console.log('[RideOnAuth][VENDOR_PROFILE_RESULT]', JSON.stringify({requestId:req.requestId, created:Boolean(vendor)}));
+      if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
+    }
+    return res.json({user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},customer,vendor});
+  }catch(error){
+    console.error('[RideOnAuth][COMPLETE_REGISTRATION_ERROR]', JSON.stringify({requestId:req.requestId, code:error?.code, message:error?.message, buildCommit}));
+    if(error.code==='ACCOUNT_TYPE_CONFLICT') return res.status(409).json({error:{code:error.code,message:error.message}});
+    console.error(JSON.stringify({level:'error',event:'registration_completion_failed',requestId:req.requestId,code:error?.code||'REGISTRATION_COMPLETION_FAILED'}));
+    return res.status(500).json({error:{code:'REGISTRATION_COMPLETION_FAILED',message:'We could not complete your RideOn registration right now.'}});
+  }
+});
+
 app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
-  return res.status(410).json({ error:{ code:'OTP_FLOW_RETIRED', message:'RideOn now verifies email OTPs with Supabase Auth. Update the app to use the Supabase session.' } });
+  const parsed = z.object({ email:z.string().trim().email().max(254), token:z.string().trim().regex(/^\d{6}$/) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error:{ code:'VALIDATION_ERROR', message:'Provide the email address and 6-digit verification code.' } });
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+  if (!supabaseUrl || !publishableKey) return res.status(503).json({ error:{ code:'AUTH_NOT_CONFIGURED', message:'Supabase authentication is not configured.' } });
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/verify`, {
+      method:'POST',
+      headers:{ apikey:publishableKey, Authorization:`Bearer ${publishableKey}`, 'Content-Type':'application/json' },
+      body:JSON.stringify({ email:parsed.data.email.toLowerCase(), token:parsed.data.token, type:'email' })
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.access_token) {
+      return res.status(response.status===429?429:401).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:'The verification code is invalid or expired.' } });
+    }
+    return res.json({ data:{ accessToken:payload.access_token, refreshToken:payload.refresh_token, expiresIn:payload.expires_in }, accessToken:payload.access_token });
+  } catch (error) {
+    console.error('[rideon-auth] OTP verification failed', { message:error?.message, code:error?.code });
+    return res.status(502).json({ error:{ code:'OTP_VERIFICATION_FAILED', message:'Unable to verify the RideOn code right now.' } });
+  }
 });
 
 app.post('/api/v1/auth/register', authRateLimit, async (req, res) => {
@@ -521,6 +1422,26 @@ app.post('/api/v1/bookings/quote', supabaseRequireAuth, requireCustomer, async (
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
 });
 
+app.post('/api/v1/bookings/:id/route', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  try {
+    const booking=await repository.getBooking(req.params.id,req.user.id);
+    if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(!booking.delivery || booking.deliveryLatitude==null || booking.deliveryLongitude==null) return res.status(409).json({error:{code:'ROUTE_LOCATION_REQUIRED',message:'A delivery location is required before estimating delivery time.'}});
+    if(booking.vendorServiceLatitude==null || booking.vendorServiceLongitude==null) return res.status(409).json({error:{code:'VENDOR_SERVICE_LOCATION_UNAVAILABLE',message:'The selected vendor has not set a service location yet.'}});
+    const route=await getDrivingRoute(
+      {latitude:booking.vendorServiceLatitude,longitude:booking.vendorServiceLongitude},
+      {latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude}
+    );
+    const updated=await repository.updateBookingRouteData(req.params.id,req.user.id,route);
+    res.json({route:{...route,estimatedDeliveryMinutes:Math.max(1,Math.round(route.durationSeconds/60))},booking:publicBooking(updated||booking)});
+  } catch(error) {
+    const statusByCode={ROUTE_LOCATION_REQUIRED:409,VENDOR_SERVICE_LOCATION_UNAVAILABLE:409,ROUTE_INVALID_COORDINATES:400,ROUTE_PROVIDER_NOT_CONFIGURED:503,ROUTE_PROVIDER_UNAVAILABLE:503,ROUTE_PROVIDER_TIMEOUT:504,ROUTE_NOT_FOUND:422};
+    const messages={ROUTE_LOCATION_REQUIRED:'A delivery location is required before estimating delivery time.',VENDOR_SERVICE_LOCATION_UNAVAILABLE:'The selected vendor has not set a service location yet.',ROUTE_INVALID_COORDINATES:'Please choose a valid delivery location.',ROUTE_PROVIDER_NOT_CONFIGURED:'Delivery routing is not configured yet.',ROUTE_PROVIDER_UNAVAILABLE:'Delivery routing is temporarily unavailable. Please retry.',ROUTE_PROVIDER_TIMEOUT:'Delivery routing took too long. Please retry.',ROUTE_NOT_FOUND:'No driving route was found for these locations.'};
+    console.error(JSON.stringify({level:'error',event:'booking_route_failed',requestId:req.requestId,code:error?.code||'ROUTE_FAILED'}));
+    res.status(statusByCode[error?.code]||503).json({error:{code:error?.code||'ROUTE_FAILED',message:messages[error?.code]||'We could not estimate delivery time right now. Please retry.'}});
+  }
+});
+
 app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
@@ -547,6 +1468,8 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
       delivery: parsed.data.delivery,
       address: parsed.data.address,
       notes: parsed.data.notes,
+      deliveryLatitude: parsed.data.deliveryLatitude,
+      deliveryLongitude: parsed.data.deliveryLongitude,
       pricing: pricingData,
       idempotencyKey,
     });
@@ -561,10 +1484,16 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
 });
 
 app.get('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
-  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
-  const offset = Math.max(0, Number(req.query.offset) || 0);
-  const data = await repository.listCustomerBookings({ customerId: req.user.id, limit, offset });
-  res.json({ data: data.map(publicBooking), bookings: data.map(publicBooking), pagination: { limit, offset, count: data.length } });
+  try {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const data = await repository.listCustomerBookings({ customerId: req.user.id, limit, offset });
+    const mapped = data.map(publicBooking);
+    res.json({ data: mapped, bookings: mapped, pagination: { limit, offset, count: data.length } });
+  } catch (error) {
+    console.error(JSON.stringify({ level:'error', event:'customer_bookings_failed', requestId:req.requestId, code:error?.code || 'BOOKINGS_LIST_FAILED', message:error?.message }));
+    res.status(503).json({ error:{ code:'BOOKINGS_UNAVAILABLE', message:'Your bookings are temporarily unavailable. Please retry.' } });
+  }
 });
 
 app.get('/api/v1/bookings/:id', supabaseRequireAuth, requireCustomer, async (req, res) => {
@@ -573,77 +1502,135 @@ app.get('/api/v1/bookings/:id', supabaseRequireAuth, requireCustomer, async (req
   res.json({ data: publicBooking(booking), booking: publicBooking(booking) });
 });
 
-app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, async (req, res) => {
-  const booking = await repository.getBooking(req.params.id);
-  if (!booking) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
-  if (booking.customerId !== req.user.id) return res.status(404).json({ error: { code: 'BOOKING_NOT_FOUND' } });
-  if (booking.paymentStatus === 'paid') return res.status(409).json({ error: { code: 'REFUND_POLICY_REQUIRED', message: 'This paid booking requires an approved refund policy before cancellation.' } });
-  if (booking.paymentStatus === 'refunded') return res.status(409).json({ error: { code: 'INVALID_PAYMENT_STATE', message: 'A refunded booking cannot be cancelled again.' } });
+app.get('/api/v1/bookings/:id/cancellation-preview', supabaseRequireAuth, requireCustomer, async (req,res) => {
   try {
-    const updated = await repository.cancelBooking(req.params.id, req.user.id);
-    if (!updated) return res.status(409).json({ error: { code: 'CANNOT_CANCEL', message: 'This booking can no longer be cancelled.' } });
-    res.json({ data: publicBooking(updated), booking: publicBooking(updated) });
-  } catch (error) {
-    if (error.code === 'CANNOT_CANCEL') return res.status(409).json({ error: { code: error.code, message: error.message } });
+    const preview=await repository.getCancellationPreview(req.params.id,req.user.id);
+    res.json({cancellation:preview});
+  } catch(error) {
+    if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(error.code==='CANCELLATION_NOT_ALLOWED') return res.status(409).json({error:{code:error.code,message:'This booking can no longer be cancelled.'}});
     throw error;
   }
 });
 
-app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, async (req,res) => {
+app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const parsed=z.object({reason:z.string().trim().max(500).optional()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid cancellation request.'}});
+  try {
+    const result=await repository.cancelBooking(req.params.id,req.user.id,{reason:parsed.data.reason||'customer_cancelled'});
+    const refund=result.calculation.totalRefund>0 ? await requestRefundForBooking(req.params.id) : {status:'not_applicable'};
+    const latest=await repository.getBooking(req.params.id,req.user.id);
+    res.json({data:publicBooking(latest||result.booking),booking:publicBooking(latest||result.booking),cancellation:result.calculation,refund});
+  } catch(error) {
+    if(error.code==='BOOKING_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Booking not found.'}});
+    if(error.code==='CANCELLATION_NOT_ALLOWED') return res.status(409).json({error:{code:error.code,message:'This booking can no longer be cancelled.'}});
+    if(error.code==='INVALID_PAYMENT_STATE') return res.status(409).json({error:{code:error.code,message:'The payment is not in a refundable state.'}});
+    throw error;
+  }
+});
+
+app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
   const parsed=z.object({ bookingId:z.string().uuid(), idempotencyKey:z.string().trim().min(8).max(128).optional() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'bookingId is required.',details:parsed.error.flatten()}});
   const booking=await repository.getBooking(parsed.data.bookingId, req.user.id);
   if(!booking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
   if(['cancelled','rejected','completed'].includes(booking.status)) return res.status(409).json({error:{code:'BOOKING_NOT_PAYABLE',message:'This booking cannot be paid.'}});
   if(booking.paymentStatus==='paid') return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This booking is already paid.'}});
-  try{
-    return await repository.withPaymentLock(booking.id, async ()=>{
+  try {
+    return await repository.withPaymentLock(booking.id, async () => {
       const amountPaise=Math.round(Number(booking.pricing.total)*100);
       const existing=await repository.findPaymentByBooking(booking.id);
-      if(existing?.providerOrderId && ['unpaid','pending'].includes(existing.status)){
-        return res.json({payment:{id:existing.id,provider:'razorpay',orderId:existing.providerOrderId,amount:existing.amountPaise,currency:'INR',status:existing.status},keyId:paymentKeyId});
+      if(existing && ['unpaid','pending'].includes(existing.status)) {
+        const checkoutUrl=paymentProvider==='cashfree'?(()=>{const checkoutToken=createCheckoutToken({paymentId:existing.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
+        return res.json({payment:{
+          id:existing.id, bookingId:existing.bookingId, provider:existing.provider || paymentProvider,
+          amount:existing.amountPaise, amountPaise:existing.amountPaise,
+          currency:'INR', status:existing.status,
+          paymentReference:existing.providerOrderId || existing.providerReference,
+          paymentUrl:checkoutUrl,
+        }});
       }
-      const order=await payments.createOrder({receipt:`rideon_${booking.id}`,amountPaise,currency:'INR',notes:{bookingId:booking.id,customerId:req.user.id}});
-      const result=await repository.createOrGetPaymentOrder({bookingId:booking.id,customerId:req.user.id,provider:'razorpay',amountPaise,currency:'INR',idempotencyKey:parsed.data.idempotencyKey,providerOrder:order});
-      return res.status(201).json({payment:{id:result.payment.id,provider:'razorpay',orderId:result.payment.providerOrderId,amount:result.payment.amountPaise,currency:'INR',status:result.payment.status},keyId:paymentKeyId});
+      const paymentReference = `rideon_${booking.id}`;
+      const publicBaseUrl=`${req.protocol}://${req.get('host')}`;
+      const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
+      const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
+      const customer=await repository.findCustomerById(req.user.id);
+      const paymentRequest=await payments.createCustomerPayment({ orderId:paymentReference, amountPaise, customerId:req.user.id, customerPhone:customer?.phone, returnUrl, notifyUrl });
+      console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',bookingId:booking.id}));
+      const result=await repository.createOrGetPaymentOrder({
+        bookingId:booking.id,
+        customerId:req.user.id,
+        provider:paymentProvider,
+        amountPaise,
+        currency:'INR',
+        idempotencyKey:parsed.data.idempotencyKey,
+        providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'},
+      });
+      const checkoutUrl=paymentProvider==='cashfree'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
+      return res.status(201).json({payment:{
+        id:result.payment.id,
+        bookingId:result.payment.bookingId,
+        provider:paymentProvider,
+        amount:result.payment.amountPaise,
+        amountPaise:result.payment.amountPaise,
+        currency:'INR',
+        status:result.payment.status,
+        paymentReference:result.payment.providerOrderId,
+        paymentUrl:checkoutUrl,
+      }});
     });
-  }catch(error){
-    if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_NOT_CONFIGURED',message:'Payment provider is not configured.'}});
+  } catch(error) {
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED',message:'Online payment is not configured on the RideOn server.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
+    if(error.code==='PAYMENT_PROVIDER_REQUEST_FAILED') return res.status(502).json({error:{code:error.code,message:'The payment provider could not create the checkout order. Please retry.'}});
+    if(error.code==='PAYMENT_PROVIDER_TIMEOUT') return res.status(504).json({error:{code:error.code,message:'The payment provider took too long to respond. Please retry.'}});
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Cashfree payment integration is not configured on the RideOn server. No payment has been marked successful.'}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
   }
 });
 
-app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, async (req,res) => {
-  const parsed=z.object({bookingId:z.string().uuid(),razorpayOrderId:z.string().min(1),razorpayPaymentId:z.string().min(1),razorpaySignature:z.string().min(1)}).safeParse(req.body);
-  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Incomplete payment verification data.'}});
-  if(!payments.verifyCheckoutSignature({orderId:parsed.data.razorpayOrderId,paymentId:parsed.data.razorpayPaymentId,signature:parsed.data.razorpaySignature})) return res.status(401).json({error:{code:'PAYMENT_VERIFICATION_FAILED',message:'Payment signature verification failed.'}});
+app.get('/api/v1/payments/checkout', async (req,res) => {
+  const token=verifyCheckoutToken(req.query.token);
+  if(!token)return res.status(401).type('html').send(checkoutPage({status:'failed',title:'Checkout expired',message:'This payment session has expired. Return to RideOn and start payment again.',returnUrl:'rideon://payment-return'}));
+  const payment=await repository.findPaymentById(token.paymentId,token.customerId);
+  if(!payment)return res.status(404).type('html').send(checkoutPage({status:'failed',title:'Payment not found',message:'This payment session is no longer available.',returnUrl:'rideon://payment-return'}));
+  if(payment.status==='paid')return res.type('html').send(checkoutPage({status:'paid',title:'Payment already confirmed',message:'RideOn has already confirmed this payment.',returnUrl:'rideon://payment-return'}));
+  if(payment.provider!=='cashfree')return res.status(409).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'This payment is not configured for the active checkout provider.',returnUrl:'rideon://payment-return'}));
   try{
-    const payment=await repository.verifyPayment({paymentId:req.params.id,bookingId:parsed.data.bookingId,customerId:req.user.id,providerPaymentId:parsed.data.razorpayPaymentId,providerOrderId:parsed.data.razorpayOrderId,providerSignature:parsed.data.razorpaySignature});
-    return res.json({payment,verification:'accepted',message:'Payment accepted and awaiting provider webhook confirmation.',bookingPaymentStatus:'pending'});
+    const config=payments.getCheckoutConfig({providerOrderId:payment.providerOrderId,amountPaise:payment.amountPaise,paymentSessionId:payment.providerReference});
+    const session=JSON.stringify(config.paymentSessionId).replace(/</g,'\\u003c');
+    const environment=JSON.stringify(config.environment==='production'?'production':'sandbox');
+    res.type('html').send('<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1"><script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script><script>const cashfree=Cashfree({mode:'+environment+'});cashfree.checkout({paymentSessionId:'+session+',redirectTarget:"_self"});</script></body></html>');
   }catch(error){
-    if(error.code==='PAYMENT_NOT_FOUND') return res.status(404).json({error:{code:error.code,message:'Payment not found.'}});
-    if(error.code==='PAYMENT_VERIFICATION_FAILED') return res.status(400).json({error:{code:error.code,message:error.message}});
-    throw error;
+    console.error(JSON.stringify({level:'error',event:'payment_checkout_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_FAILED'}));
+    res.status(503).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'RideOn could not start the provider checkout. Return to the app and retry.',returnUrl:'rideon://payment-return'}));
   }
 });
 
-app.post('/api/v1/vendor/bookings/:bookingId/refund', supabaseRequireAuth, requireVendor, async (req,res) => {
-  const scopedBooking=await repository.getVendorBooking(req.vendor.id,req.params.bookingId);
-  if(!scopedBooking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
-  const payment=await repository.findPaymentByBooking(req.params.bookingId);
-  if(!payment || payment.status!=='paid') return res.status(409).json({error:{code:'INVALID_PAYMENT_STATE',message:'Only a paid booking can enter the refund flow.'}});
-  const booking=await repository.getBooking(req.params.bookingId);
+app.get('/api/v1/payments/checkout/callback', async (req,res) => {
+  const providerOrderId=String(req.query?.order_id||'');
+  const token=verifyCheckoutToken(req.query?.token);
+  const payment=token
+    ? await repository.findPaymentById(token.paymentId,token.customerId)
+    : (providerOrderId ? await repository.findPaymentByProviderOrder(providerOrderId) : null);
+  if(!payment)return res.status(404).type('html').send(checkoutPage({status:'failed',title:'Payment not found',message:'This payment session is no longer available.',returnUrl:'rideon://payment-return'}));
+  if(payment.status==='paid')return res.type('html').send(checkoutPage({status:'paid',title:'Payment confirmed',message:'RideOn has already confirmed this payment. Return to the app to continue.',returnUrl:'rideon://payment-return'}));
+  const orderId=String(providerOrderId||payment.providerOrderId||'');
   try{
-    const refund=await payments.refundPayment({paymentId:payment.providerPaymentId,amountPaise:payment.amountPaise});
-    const updated=await repository.refundPayment({paymentId:payment.id,providerReference:refund.providerReference,status:'refunded'});
-    return res.json({payment:updated,refund:{id:refund.id,status:'refunded'}});
+    const verified=await payments.verifyPayment({providerOrderId:orderId,providerPaymentId:String(req.query?.cf_payment_id||''),providerReference:payment.providerReference,amountPaise:payment.amountPaise});
+    if(verified.status==='failed'){
+      const applied=await repository.applyPaymentEvent({eventId:'checkout-failed:'+String(verified.providerPaymentId||orderId),bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:orderId,amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
+      if(applied.invalid)throw Object.assign(new Error('Provider payment did not match the RideOn payment.'),{code:'PAYMENT_NOT_VERIFIED'});
+      return res.type('html').send(checkoutPage({status:'failed',title:'Payment was not completed',message:'Cashfree did not confirm this payment. You can safely retry from RideOn.',returnUrl:'rideon://payment-return'}));
+    }
+    if(!verified.verified)throw Object.assign(new Error('Provider has not confirmed the payment.'),{code:'PAYMENT_VERIFICATION_PENDING'});
+    const applied=await repository.applyPaymentEvent({eventId:'checkout-paid:'+verified.providerPaymentId,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:orderId,amountPaise:Number(verified.amountPaise),currency:'INR',status:'paid'});
+    if(applied.invalid)throw Object.assign(new Error('Provider payment did not match the RideOn payment.'),{code:'PAYMENT_NOT_VERIFIED'});
+    res.type('html').send(checkoutPage({status:'paid',title:'Payment confirmed',message:'RideOn has verified your Cashfree payment. Return to the app to continue.',returnUrl:'rideon://payment-return'}));
   }catch(error){
-    if(error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:error.code,message:'Payment provider is not configured.'}});
-    if(error.code==='REFUND_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
-    if(error.code==='INVALID_PAYMENT_STATE') return res.status(409).json({error:{code:error.code,message:error.message}});
-    throw error;
+    console.error(JSON.stringify({level:'error',event:'payment_checkout_callback_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_CALLBACK_FAILED'}));
+    res.status(error?.code==='PAYMENT_VERIFICATION_PENDING'?409:502).type('html').send(checkoutPage({status:'pending',title:'Payment status pending',message:'RideOn could not complete provider verification yet. Return to the app and refresh payment status.',returnUrl:'rideon://payment-return'}));
   }
 });
 
@@ -656,19 +1643,24 @@ app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req
 });
 
 app.post('/api/v1/payments/webhook', async (req, res) => {
-  const signature = req.get('X-Razorpay-Signature') || req.get('X-Payment-Signature');
-  const body = req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
-  if (!payments.verifyWebhook(body, signature)) return res.status(401).json({ error: { code: 'INVALID_WEBHOOK_SIGNATURE' } });
-  const event = payments.parseWebhook(req.body, { eventId: req.get('X-Razorpay-Event-Id') || undefined });
-  if (!event) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT' } });
-  if (!event.bookingId && event.providerOrderId) {
-    const payment = await repository.findPaymentByProviderOrder(event.providerOrderId);
-    if (payment) event.bookingId = payment.bookingId;
+  const signature=req.get('x-webhook-signature') || '';
+  const timestamp=req.get('x-webhook-timestamp') || '';
+  const body=req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
+  if(!payments.verifyWebhook(body,signature,timestamp)){
+    console.error(JSON.stringify({level:'warn',event:'payment_webhook_rejected',requestId:req.requestId,provider:payments.name,reason:'invalid_signature'}));
+    return res.status(401).json({error:{code:'INVALID_WEBHOOK_SIGNATURE'}});
   }
-  if (!event.bookingId) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT' } });
-  const result = await repository.applyPaymentEvent(event);
-  if (result.invalid) return res.status(400).json({ error: { code: 'INVALID_PAYMENT_EVENT', message: 'Payment event does not match the booking payment.' } });
-  res.json({ received: true, applied: result.applied, duplicate: result.duplicate });
+  const event=payments.parseWebhook(req.body,{eventId:req.get('X-Cashfree-Event-Id')||req.get('x-cashfree-event-id')||undefined,eventName:req.body?.event});
+  if(!event)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT'}});
+  if(!event.bookingId&&event.providerOrderId){
+    const payment=await repository.findPaymentByProviderOrder(event.providerOrderId);
+    if(payment)event.bookingId=payment.bookingId;
+  }
+  if(!event.bookingId)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT'}});
+  const result=await repository.applyPaymentEvent(event);
+  console.log(JSON.stringify({level:'info',event:'payment_webhook_processed',requestId:req.requestId,provider:payments.name,providerOrderId:event.providerOrderId,providerPaymentId:event.providerPaymentId,status:event.status,applied:result.applied,duplicate:result.duplicate,invalid:result.invalid}));
+  if(result.invalid)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT',message:'Payment event does not match the booking payment.'}});
+  res.json({received:true,applied:result.applied,duplicate:result.duplicate});
 });
 
 app.use((req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found', requestId:req.requestId } }));
@@ -680,11 +1672,14 @@ app.use((err, req, res, _next) => {
   if (err.code === 'CUSTOMER_EXISTS') return res.status(409).json({ error: { code: err.code, message: 'A customer with those credentials already exists.' } });
   if (err.code === 'INVALID_CREDENTIALS') return res.status(401).json({ error: { code: err.code, message: 'Phone or password is incorrect.' } });
   if (err.code === 'PAYMENT_PROVIDER_UNSUPPORTED') return res.status(500).json({ error: { code: err.code, message: 'Unsupported payment provider configuration.' } });
+  if (err.code === 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({ error: { code: err.code, message: 'Payment provider configuration is required.' } });
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Unexpected server error' } });
 });
 
 const port = Number(process.env.PORT) || 4000;
+const httpServer=createServer(app);
+const trackingRealtime=createTrackingRealtimeServer({httpServer,repository,authenticate:resolveTrackingUser});
 if (process.env.NODE_ENV !== 'test') {
-  app.listen(port, () => console.log(`RideOn API listening on :${port}`));
+  httpServer.listen(port, () => console.log(`RideOn API listening on :${port}`));
 }
-export { app, repository };
+export { app, repository, httpServer, trackingRealtime };

@@ -1,16 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 
 const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',line:'#E8EAF0',white:'#FFFFFF'};
 const empty={label:'',recipient:'',phone:'',street:'',area:'',city:'',postalCode:'',instructions:''};
+
+const Field=({label,value,onChangeText,placeholder,keyboardType})=><View style={styles.fieldWrap}><Text style={styles.label}>{label}</Text><TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor="#A0A7B1" keyboardType={keyboardType} style={styles.field}/></View>;
 
 export default function AddressForm({address,onSave,onCancel}){
   const [draft,setDraft]=useState({...empty}),[error,setError]=useState('');
   useEffect(()=>{setDraft({...empty,...(address||{})});setError('');},[address]);
   const update=(key,value)=>{setDraft(current=>({...current,[key]:value}));setError('');};
   const save=()=>{const required=['label','recipient','phone','street','area','city','postalCode'];if(required.some(key=>!String(draft[key]||'').trim()))return setError('Complete all required address fields.');if(draft.phone.replace(/\D/g,'').length<10)return setError('Enter a valid phone number.');if(!/^\d{6}$/.test(draft.postalCode))return setError('Postal code must be 6 digits.');onSave?.({...draft,phone:draft.phone.trim(),postalCode:draft.postalCode.trim()});};
-  const Field=({label,value,onChangeText,placeholder,keyboardType})=><View style={styles.fieldWrap}><Text style={styles.label}>{label}</Text><TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor="#A0A7B1" keyboardType={keyboardType} style={styles.field}/></View>;
-  return <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':'height'}><ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
+  return <View style={{flex:1}}><ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="always" keyboardDismissMode="interactive" automaticallyAdjustKeyboardInsets>
     <Text style={styles.eyebrow}>{address?'EDIT SAVED ADDRESS':'NEW SAVED ADDRESS'}</Text><Text style={styles.title}>{address?'Update delivery address':'Add delivery address'}</Text><Text style={styles.sub}>Saved addresses stay local to this prototype and are not synced to the booking server.</Text>
     <Field label="LABEL" value={draft.label} onChangeText={v=>update('label',v)} placeholder="Home / Work"/>
     <Field label="RECIPIENT" value={draft.recipient} onChangeText={v=>update('recipient',v)} placeholder="Person receiving the ride"/>
@@ -22,7 +23,7 @@ export default function AddressForm({address,onSave,onCancel}){
     <Field label="DELIVERY INSTRUCTIONS (OPTIONAL)" value={draft.instructions} onChangeText={v=>update('instructions',v)} placeholder="Gate, security desk, timing notes…"/>
     {error?<View style={styles.error}><Text style={styles.errorText}>{error}</Text></View>:null}
     <View style={styles.actions}><TouchableOpacity style={styles.secondary} onPress={onCancel}><Text style={styles.secondaryText}>Cancel</Text></TouchableOpacity><TouchableOpacity style={styles.primary} onPress={save}><Text style={styles.primaryText}>{address?'Save changes':'Save address'}</Text></TouchableOpacity></View>
-  </ScrollView></KeyboardAvoidingView>;
+  </ScrollView></View>;
 }
 const styles=StyleSheet.create({
   page:{padding:20,paddingBottom:40,backgroundColor:C.bg},eyebrow:{fontSize:9,fontWeight:'900',letterSpacing:1.3,color:C.orange,marginBottom:7},title:{fontSize:27,fontWeight:'900',color:C.ink},sub:{fontSize:12,color:C.muted,lineHeight:18,marginTop:7,marginBottom:18},

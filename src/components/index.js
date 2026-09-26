@@ -7,3 +7,9 @@ export { default as CheckoutSummary } from './CheckoutSummary';
 export { default as BookingReview } from './BookingReview';
 export { default as PaymentMethodSelector } from './PaymentMethodSelector';
 export { default as BookingConfirmation } from './BookingConfirmation';
+
+export { default as DeliveryLocationPicker } from './DeliveryLocationPicker';
+export { default as ServiceLocationEditor } from './ServiceLocationEditor';
+
+export { default as ReviewComposer } from './ReviewComposer';
+export { default as ReviewsSection } from './ReviewsSection';

@@ -6,8 +6,12 @@ const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',line:'#E8EA
 export default function LocationSelector({visible,selectedCity,onConfirm,onCancel,locations,loading=false,error='',onRetry}){
   const [query,setQuery]=useState('');
   const [draft,setDraft]=useState(selectedCity||'');
-  useEffect(()=>{if(visible){setDraft(selectedCity||'');setQuery('');}},[visible,selectedCity]);
-  const options=useMemo(()=>[...new Set((Array.isArray(locations)?locations:[]).filter(Boolean).map(String))].filter(city=>city.toLowerCase().includes(query.trim().toLowerCase())),[locations,query]);
+  useEffect(()=>{if(visible){setDraft(selectedCity || locations?.[0] || '');setQuery('');}},[visible,selectedCity,locations]);
+  const options=useMemo(()=>{
+    const list=Array.isArray(locations)?locations:[];
+    const q=query.trim().toLowerCase();
+    return list.filter(city=>String(city).toLowerCase().includes(q));
+  },[locations,query]);
   return <Modal visible={visible} transparent animationType="slide" onRequestClose={onCancel}>
     <View style={styles.shade}><View style={styles.sheet}><View style={styles.handle}/>
       <View style={styles.header}><View><Text style={styles.eyebrow}>RIDEON LOCATION</Text><Text style={styles.title}>Where are you riding?</Text></View><TouchableOpacity onPress={onCancel}><Text style={styles.close}>✕</Text></TouchableOpacity></View>

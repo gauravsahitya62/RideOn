@@ -161,19 +161,38 @@ Authentication endpoints have a dedicated rate limit in addition to the global A
 
 ## Payments
 
-No real payment provider is configured.
+RideOn uses **Razorpay** as its single real UPI payment provider. The mobile app receives a short-lived RideOn checkout URL; Razorpay Checkout then presents the UPI methods enabled for the merchant account. Merchant secrets remain server-side.
 
-The payment boundary requires a provider event ID, booking ID, provider reference, INR currency, and integer amount in paise. Verified webhooks are the only source of payment status changes. Duplicate provider event IDs are ignored.
+Payment creation is server-authoritative:
 
-Supported status transitions are explicit:
+- `POST /api/v1/payments/create-order` derives the amount from the persisted booking.
+- `POST /api/v1/fleet-orders/:id/payment` derives the amount from the persisted fleet order.
+- Provider order IDs and exact INR paise amounts are persisted.
+- `POST /api/v1/payments/:id/verify` performs provider-side status/amount/order/currency verification before `paid` can be applied.
+- `POST /api/v1/payments/webhook` verifies the Razorpay webhook HMAC against the raw request body and processes provider events idempotently.
+- Duplicate and out-of-order events cannot downgrade an already confirmed payment.
+- Refunds use Razorpay's refund API and the existing RideOn refund transaction/idempotency flow.
+- Production rejects `PAYMENT_PROVIDER=mock` and requires Razorpay credentials.
 
-`unpaid → pending/failed → paid/failed → refunded` with retry from `failed → pending`. Terminal/refunded bookings cannot move backwards.
+Required server variables:
 
-A stale event cannot move a paid booking back to pending/failed. Booking amount, currency, provider reference, and current payment state are checked inside the repository transaction before a persistent event is applied.
+```dotenv
+PAYMENT_PROVIDER=razorpay
+RAZORPAY_ENVIRONMENT=production
+RAZORPAY_KEY_ID=
+RAZORPAY_KEY_SECRET=
+RAZORPAY_WEBHOOK_SECRET=
+```
 
-Do not set `PAYMENT_PROVIDER` to a real provider until its real credentials, provider-specific signature verification, event mapping, and refund behavior are implemented and tested. The app must not represent a demo payment as a completed charge.
+Production webhook:
 
+```text
+https://rideon-api-262g.onrender.com/api/v1/payments/webhook
+```
+
+See [docs/PAYMENTS_RUNBOOK.md](docs/PAYMENTS_RUNBOOK.md) for sandbox setup, production configuration, webhook setup, UPI capability behavior, refunds, and release verification.
 ## Testing
+
 
 Memory-path API tests:
 
@@ -216,7 +235,7 @@ No production host/account, domain, database instance, or payment credentials ar
 RideOn should not be treated as production-ready solely because CI is green. Remaining launch work includes:
 
 - provisioning and verifying a real PostgreSQL environment;
-- selecting and implementing a real payment provider;
+- completing a live Razorpay sandbox and low-value production device transaction;
 - device/emulator end-to-end testing of the customer journey;
 - production mobile build/signing configuration and a release build;
 - backups, monitoring, alerting, and operational runbooks;

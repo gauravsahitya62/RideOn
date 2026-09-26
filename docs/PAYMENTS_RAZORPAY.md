@@ -1,57 +1,53 @@
-# RideOn payments — Razorpay
+# RideOn marketplace payments — Paytm
 
-RideOn keeps booking state and payment state separate. A customer booking remains a booking request until the provider payment is independently verified.
+RideOn treats the rental obligation and refundable security deposit as separate financial objects. The accounting ledger is not an internal wallet and is not described as an escrow account.
 
-## Environment
+## Booking financials
 
-Set these on the API server and never expose the secret values to the mobile app:
+- rental amount: rental charge attributable to the vendor.
+- security deposit: refundable customer obligation.
+- platform fee: existing RideOn platform charge.
+- customer total = rental + security deposit + applicable customer fees.
+- vendor settlement = rental - platform fee - approved adjustments.
+- security refund = security deposit - approved deduction.
 
-`PAYMENT_PROVIDER=razorpay`
-`RAZORPAY_KEY_ID=`
-`RAZORPAY_KEY_SECRET=`
-`RAZORPAY_WEBHOOK_SECRET=`
+Security deposit money is never vendor revenue.
 
-Use Razorpay test-mode credentials for development and CI. Do not place credentials in Git.
+## Lifecycle
 
-## API flow
+Rental payment:
+PENDING -> PAID -> HELD/UNSETTLED -> SETTLEMENT_PENDING -> SETTLED
 
-1. Customer creates a booking request.
-2. `POST /api/v1/payments/create-order` verifies ownership/payability and recalculates the authoritative INR total.
-3. The API creates or reuses one active Razorpay order for the booking and stores the provider order reference.
-4. The mobile app opens the native Razorpay checkout.
-5. `POST /api/v1/payments/:id/verify` verifies the checkout signature but leaves the payment in `pending`.
-6. Razorpay webhook `POST /api/v1/payments/webhook` is the source of truth for `paid`, `failed`, and `refunded` transitions.
-7. The mobile app refreshes the booking state and only shows the paid confirmation after the backend reports `paymentStatus=paid`.
+Security deposit:
+PENDING -> HELD -> REFUND_PENDING -> REFUNDED
 
-The webhook endpoint verifies the signature against the raw request body and persists the provider event ID for idempotency.
+Damage:
+HELD -> DEDUCTION_PENDING -> PARTIALLY_DEDUCTED -> REFUND_PENDING -> REFUNDED
 
-## Webhook configuration
+Disputes are preserved as DISPUTED until an authorized resolution.
 
-Configure the provider webhook URL as:
+Vendor settlement is not triggered by payment success alone. Booking completion and return/inspection conditions are required.
 
-`https://<rideon-api-host>/api/v1/payments/webhook`
+## Paytm boundary
 
-Use the webhook secret configured as `RAZORPAY_WEBHOOK_SECRET`.
+The server uses a provider abstraction for customer payment creation, verification, refunds, vendor settlement, settlement status, webhook verification, and reconciliation.
 
-## Refund foundation
+Configured variable names:
+- PAYTM_MERCHANT_ID
+- PAYTM_CLIENT_ID
+- PAYTM_CLIENT_SECRET
+- PAYTM_WEBSITE
+- PAYTM_CALLBACK_URL
+- PAYTM_WEBHOOK_SECRET
 
-The backend contains a provider refund adapter and persisted payment refund state. A paid customer cancellation is intentionally blocked until RideOn has an approved cancellation/refund policy; this prevents the system from producing a cancelled booking with an unresolved paid state.
+This session could not live-verify current Paytm external documentation, so the implementation intentionally does not invent Paytm endpoint URLs, payloads, checksum rules, marketplace product names, sub-merchant identifiers, or payout endpoints. Provider-specific live operations fail closed with PAYTM_ONBOARDING_REQUIRED until the verified Paytm product integration is enabled.
 
-## Mobile build requirement
+## Render
 
-The mobile checkout uses `react-native-razorpay`, which is a native dependency. The live payment path therefore requires an Android/iOS development or production build (for example an EAS build) that includes the native module. Expo Go should not be treated as the live-payment runtime.
+render.yaml contains only the non-secret provider selector. Put all Paytm credentials/secrets in Render Environment settings.
 
-The existing mobile CI runs Expo Doctor; the payment dependency must also be installed before creating the native build.
+The old UPI_VPA and UPI_WEBHOOK_SECRET production dependency is removed.
 
-## CI
+## External onboarding
 
-CI should mock the provider boundary and independently test:
-
-- server-side order validation
-- checkout signature verification
-- webhook signature handling
-- provider-order/payment association
-- state transitions
-- duplicate event idempotency
-- retry behavior
-- refund state validation
+Before live transactions, complete Paytm merchant onboarding and confirm the exact Paytm products enabled for collections, refunds, and marketplace/vendor settlement. Do not describe the flow as escrow unless the actual arrangement explicitly permits that terminology.

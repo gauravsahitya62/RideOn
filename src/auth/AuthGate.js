@@ -14,7 +14,7 @@ export default function AuthGate() {
     authService.restoreSession().then((result) => {
       if (!active) return;
       if (!result) { setUser(null); setStatus('unauthenticated'); return; }
-      setUser(result.user);
+      setUser({...result.user, token: result.token});
       setStatus('authenticated');
     }).catch(() => {
       if (!active) return;

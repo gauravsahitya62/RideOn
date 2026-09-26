@@ -1,233 +1,37 @@
 import crypto from 'node:crypto';
 
-const VALID_STATUSES = new Set(['unpaid', 'pending', 'paid', 'failed', 'refunded']);
-const TERMINAL_STATUS = new Set(['refunded']);
-const PROVIDERS = new Set(['razorpay', 'mock', 'unconfigured']);
+// Cashfree UPI-first payment adapter. Provider-neutral lifecycle stays in repository.js.
+const RENTAL_STATUSES = new Set(['pending','paid','held','settlement_pending','settled','refund_pending','refunded','failed','disputed']);
+const PROVIDERS = new Set(['cashfree','mock','unconfigured']);
+const CASHFREE_API_VERSION = '2025-01-01';
+const CASHFREE_SANDBOX_BASE = 'https://sandbox.cashfree.com/pg';
+const CASHFREE_PRODUCTION_BASE = 'https://api.cashfree.com/pg';
 
-function paiseFromRupees(value) {
-  const n = Number(value);
-  return Number.isSafeInteger(Math.round(n * 100)) ? Math.round(n * 100) : null;
-}
+function transition(current,next){if(current===next)return true;const allowed={pending:['paid','failed'],paid:['held','refund_pending','disputed'],held:['settlement_pending','refund_pending','disputed'],settlement_pending:['settled','disputed'],settled:['refund_pending','disputed'],refund_pending:['refunded','disputed'],failed:['pending'],disputed:['refund_pending','settlement_pending'],refunded:[]};return Boolean(allowed[current]?.includes(next));}
+function errorWithCode(message,code,extra={}){const e=new Error(message);e.code=code;Object.assign(e,extra);return e;}
+function safeEqual(left,right){const a=Buffer.from(String(left||''));const b=Buffer.from(String(right||''));return a.length===b.length&&crypto.timingSafeEqual(a,b);}
+function validateAmount(v){const n=Number(v);if(!Number.isSafeInteger(n)||n<=0)throw errorWithCode('Invalid payment amount.','PAYMENT_CREATION_FAILED');return n;}
+async function requestJson(fetchImpl,url,options={},timeoutMs=15000){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);try{const response=await fetchImpl(url,{...options,signal:controller.signal});const text=await response.text();let payload={};try{payload=text?JSON.parse(text):{};}catch{}if(!response.ok)throw errorWithCode(payload?.message||payload?.error?.message||'Payment provider request failed.','PAYMENT_PROVIDER_REQUEST_FAILED',{httpStatus:response.status,providerPayload:payload});return payload;}catch(e){if(e?.name==='AbortError')throw errorWithCode('Payment provider request timed out.','PAYMENT_PROVIDER_TIMEOUT');throw e;}finally{clearTimeout(timer);}}
 
-export function createPaymentService({
-  provider = 'unconfigured',
-  keyId = '',
-  keySecret = '',
-  webhookSecret = '',
-  fetchImpl = globalThis.fetch,
-} = {}) {
-  const selectedProvider = String(provider || 'unconfigured').toLowerCase();
-  if (!PROVIDERS.has(selectedProvider)) {
-    const error = new Error('Unsupported payment provider.');
-    error.code = 'PAYMENT_PROVIDER_UNSUPPORTED';
-    throw error;
-  }
-
-  const configured = selectedProvider !== 'unconfigured' && selectedProvider !== 'mock';
-  const razorpayPaymentConfigured = selectedProvider === 'razorpay' && Boolean(keyId && keySecret);
-  const razorpayConfigured = razorpayPaymentConfigured && Boolean(webhookSecret);
-
-  function verifyWebhook(body, signature) {
-    if (!['razorpay','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
-    const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
-    const given = String(signature).trim();
-    const a = Buffer.from(expected, 'utf8');
-    const b = Buffer.from(given, 'utf8');
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
-  }
-
-  function verifyCheckoutSignature({ orderId, paymentId, signature }) {
-    if (selectedProvider !== 'razorpay' || !keySecret || !orderId || !paymentId || !signature) return false;
-    const expected = crypto.createHmac('sha256', keySecret).update(`${orderId}|${paymentId}`).digest('hex');
-    const a = Buffer.from(expected, 'utf8');
-    const b = Buffer.from(String(signature).trim(), 'utf8');
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
-  }
-
-  function parseWebhook(payload = {}, { eventId: suppliedEventId } = {}) {
-    const eventId = suppliedEventId || payload.eventId || payload.providerEventId;
-    if (!eventId) return null;
-
-    // Accept the normalized internal format used by tests/mocks.
-    if (payload.bookingId || payload.status || payload.amountPaise) {
-      const bookingId = payload.bookingId;
-      const providerReference = payload.providerReference || payload.paymentId || payload.orderId;
-      if (!bookingId || !providerReference || !VALID_STATUSES.has(String(payload.status))) return null;
-      const amountPaise = Number(payload.amountPaise);
-      if (!Number.isSafeInteger(amountPaise) || amountPaise < 0 || payload.currency !== 'INR') return null;
-      return {
-        eventId: String(eventId),
-        bookingId: String(bookingId),
-        status: String(payload.status),
-        providerReference: String(providerReference),
-        providerOrderId: payload.providerOrderId ? String(payload.providerOrderId) : undefined,
-        amountPaise,
-        currency: 'INR',
-      };
-    }
-
-    const event = String(payload.event || '').toLowerCase();
-    const paymentEntity = payload?.payload?.payment?.entity;
-    const refundEntity = payload?.payload?.refund?.entity;
-    const orderEntity = payload?.payload?.order?.entity;
-    const entity = paymentEntity || refundEntity || null;
-    if (!entity) return null;
-
-    const eventStatus =
-      event === 'payment.captured' || event === 'order.paid' ? 'paid' :
-      event === 'payment.authorized' ? 'pending' :
-      event === 'payment.failed' ? 'failed' :
-      event === 'refund.processed' ? 'refunded' :
-      null;
-    if (!eventStatus) return null;
-
-    const bookingId =
-      entity.notes?.bookingId ||
-      orderEntity?.notes?.bookingId ||
-      payload?.payload?.order?.entity?.notes?.bookingId ||
-      null;
-    const providerOrderId = entity.order_id || orderEntity?.id || undefined;
-    const providerReference = entity.id || entity.payment_id;
-    const amountPaise = Number(entity.amount);
-    const currency = entity.currency || 'INR';
-    if (!providerReference || !Number.isSafeInteger(amountPaise) || amountPaise < 0 || currency !== 'INR') return null;
-
-    return {
-      eventId: String(eventId),
-      bookingId: bookingId ? String(bookingId) : undefined,
-      status: eventStatus,
-      providerReference: String(providerReference),
-      providerOrderId: providerOrderId ? String(providerOrderId) : undefined,
-      amountPaise,
-      currency: 'INR',
-    };
-  }
-
-  function canTransition(currentStatus, nextStatus) {
-    if (!VALID_STATUSES.has(nextStatus)) return false;
-    if (currentStatus === nextStatus) return true;
-    if (TERMINAL_STATUS.has(currentStatus)) return false;
-    if (currentStatus === 'unpaid') return nextStatus === 'pending' || nextStatus === 'failed';
-    if (currentStatus === 'pending') return nextStatus === 'paid' || nextStatus === 'failed';
-    if (currentStatus === 'failed') return nextStatus === 'pending';
-    if (currentStatus === 'paid') return nextStatus === 'refunded';
-    return false;
-  }
-
-  async function createOrder({ receipt, amountPaise, currency = 'INR', notes = {} } = {}) {
-    if (selectedProvider === 'mock') {
-      if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
-        const error = new Error('Invalid payment amount or currency.'); error.code = 'PAYMENT_CREATION_FAILED'; throw error;
-      }
-      return { id: `mock_order_${String(receipt)}`, amountPaise:Number(amountPaise), currency:'INR', status:'created', provider:'mock' };
-    }
-    if (!razorpayPaymentConfigured) {
-      const error = new Error('Payment provider is not configured.');
-      error.code = 'PAYMENT_NOT_CONFIGURED';
-      throw error;
-    }
-    if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
-      const error = new Error('Invalid payment amount or currency.');
-      error.code = 'PAYMENT_CREATION_FAILED';
-      throw error;
-    }
-
-    const authorization = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-    let response;
-    try {
-      response = await fetchImpl('https://api.razorpay.com/v1/orders', {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${authorization}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          amount: Number(amountPaise),
-          currency: 'INR',
-          receipt: String(receipt),
-          notes,
-        }),
-      });
-    } catch {
-      const error = new Error('Unable to reach the payment provider.');
-      error.code = 'PAYMENT_CREATION_FAILED';
-      throw error;
-    }
-    if (!response?.ok) {
-      const error = new Error('Payment order creation failed.');
-      error.code = 'PAYMENT_CREATION_FAILED';
-      throw error;
-    }
-    const payload = await response.json();
-    if (!payload?.id || Number(payload.amount) !== Number(amountPaise) || payload.currency !== 'INR') {
-      const error = new Error('Payment provider returned an invalid order.');
-      error.code = 'PAYMENT_CREATION_FAILED';
-      throw error;
-    }
-    return {
-      id: String(payload.id),
-      amountPaise: Number(payload.amount),
-      currency: 'INR',
-      status: String(payload.status || 'created'),
-      provider: 'razorpay',
-    };
-  }
-
-  async function refundPayment({ paymentId, amountPaise } = {}) {
-    if (selectedProvider === 'mock') return { id:`mock_refund_${String(paymentId)}`, providerReference:String(paymentId) };
-    if (!razorpayPaymentConfigured) {
-      const error = new Error('Payment provider is not configured.');
-      error.code = 'PAYMENT_NOT_CONFIGURED';
-      throw error;
-    }
-    if (!paymentId) {
-      const error = new Error('Provider payment reference is required.');
-      error.code = 'REFUND_FAILED';
-      throw error;
-    }
-    const authorization = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-    const body = Number.isSafeInteger(Number(amountPaise)) && Number(amountPaise) > 0
-      ? JSON.stringify({ amount: Number(amountPaise) })
-      : '{}';
-    let response;
-    try {
-      response = await fetchImpl(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}/refunds`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${authorization}`,
-          'Content-Type': 'application/json',
-        },
-        body,
-      });
-    } catch {
-      const error = new Error('Unable to reach the payment provider.');
-      error.code = 'REFUND_FAILED';
-      throw error;
-    }
-    if (!response?.ok) {
-      const error = new Error('Provider refund failed.');
-      error.code = 'REFUND_FAILED';
-      throw error;
-    }
-    const payload = await response.json();
-    if (!payload?.id) {
-      const error = new Error('Provider returned an invalid refund.');
-      error.code = 'REFUND_FAILED';
-      throw error;
-    }
-    return { id: String(payload.id), providerReference: String(payload.payment_id || paymentId) };
-  }
-
-  return {
-    name: configured ? selectedProvider : 'unconfigured',
-    provider: selectedProvider,
-    configured: razorpayConfigured,
-    verifyWebhook,
-    verifyCheckoutSignature,
-    parseWebhook,
-    canTransition,
-    createOrder,
-    refundPayment,
-    paiseFromRupees,
-  };
+export function createPaymentService({provider='unconfigured',clientId='',clientSecret='',webhookSecret='',environment='sandbox',apiBaseUrl='',fetchImpl=globalThis.fetch,timeoutMs=15000,defaultReturnUrl='',defaultNotifyUrl=''}={}){
+ const selectedProvider=String(provider||'unconfigured').toLowerCase();if(!PROVIDERS.has(selectedProvider))throw errorWithCode('Unsupported payment provider.','PAYMENT_PROVIDER_UNSUPPORTED');
+ const isProduction=String(environment).toLowerCase()==='production';if(selectedProvider==='mock'&&isProduction)throw errorWithCode('Mock payment provider is not allowed in production.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
+ const configured=selectedProvider==='cashfree'&&Boolean(clientId&&clientSecret&&webhookSecret);if(selectedProvider==='cashfree'&&isProduction&&!configured)throw errorWithCode('Cashfree production credentials and webhook secret are required.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
+ const baseUrl=String(apiBaseUrl||(isProduction?CASHFREE_PRODUCTION_BASE:CASHFREE_SANDBOX_BASE)).replace(/\/$/,'');
+ const capabilities=selectedProvider==='cashfree'?{method:'upi',provider:'cashfree',supportsUpi:true,supportsHostedCheckout:true,supportsIntent:false,supportsVpa:false,apps:[]}:{method:'upi',provider:selectedProvider,supportsUpi:false,supportsHostedCheckout:false,supportsIntent:false,supportsVpa:false,apps:[]};
+ function headers(extra={}){if(!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');return {Accept:'application/json','Content-Type':'application/json','x-client-id':String(clientId),'x-client-secret':String(clientSecret),'x-api-version':CASHFREE_API_VERSION,...extra};}
+ async function cf(path,options={}){return requestJson(fetchImpl,baseUrl+path,{...options,headers:headers(options.headers||{})},timeoutMs);}
+ async function paymentsFor(orderId){const p=await cf('/orders/'+encodeURIComponent(String(orderId))+'/payments',{method:'GET'});return Array.isArray(p)?p:(Array.isArray(p?.data)?p.data:[]);}
+ async function existingOrder(orderId){try{const p=await cf('/orders/'+encodeURIComponent(String(orderId)),{method:'GET'});return p?.order_id?p:null;}catch(e){if(e?.httpStatus===404)return null;throw e;}}
+ async function createCustomerPayment({orderId,amountPaise,customerId,customerPhone,returnUrl,notifyUrl}={}){const amount=validateAmount(amountPaise);if(selectedProvider==='mock')return{provider:'mock',status:'pending',providerOrderId:String(orderId),paymentSessionId:null,paymentUrl:null,amountPaise:amount,currency:'INR',upi:capabilities};if(!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');const id=String(orderId).replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60);const existing=await existingOrder(id);if(existing&&Number(existing.order_amount)!==Number((amount/100).toFixed(2)))throw errorWithCode('Cashfree returned an existing order with a different amount.','PAYMENT_CREATION_FAILED');const order=existing||await cf('/orders',{method:'POST',body:JSON.stringify({order_id:id,order_amount:Number((amount/100).toFixed(2)),order_currency:'INR',customer_details:{customer_id:String(customerId||id),...(customerPhone?{customer_phone:String(customerPhone)}:{})},order_meta:{return_url:String(returnUrl||defaultReturnUrl||''),notify_url:String(notifyUrl||defaultNotifyUrl||'')},order_note:'RideOn vehicle rental payment'})});if(!order?.order_id||!order?.payment_session_id||String(order.order_currency||'INR')!=='INR'||Number(order.order_amount)!==Number((amount/100).toFixed(2)))throw errorWithCode('Cashfree returned an invalid payment order.','PAYMENT_CREATION_FAILED');return{provider:'cashfree',status:'pending',providerOrderId:String(order.order_id),paymentSessionId:String(order.payment_session_id),amountPaise:amount,currency:'INR',checkout:{paymentSessionId:String(order.payment_session_id),orderId:String(order.order_id),environment:isProduction?'production':'sandbox'},upi:capabilities};}
+ async function verifyPayment({providerPaymentId,providerOrderId,providerReference,amountPaise}={}){if(selectedProvider==='mock')return{verified:false};if(!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');const expected=validateAmount(amountPaise);const list=await paymentsFor(providerOrderId);const wanted=providerPaymentId||providerReference;let p=wanted?list.find(x=>String(x.cf_payment_id??x.payment_id??x.id)===String(wanted)):null;if(!p)p=list.find(x=>String(x.order_id||'')===String(providerOrderId)&&Number(x.payment_amount??x.amount)===Number((expected/100).toFixed(2))&&String(x.payment_currency||x.currency||'INR')==='INR');if(!p)return{verified:false,status:'pending'};const status=String(p.payment_status||p.status||'').toUpperCase(),pid=String(p.cf_payment_id??p.payment_id??p.id??''),order=String(p.order_id||providerOrderId),amount=Number(p.payment_amount??p.amount);if(amount!==Number((expected/100).toFixed(2))||String(p.payment_currency||p.currency||'INR')!=='INR'||order!==String(providerOrderId))return{verified:false,status:'invalid'};if(status==='SUCCESS')return{verified:true,status:'paid',providerPaymentId:pid,providerReference:pid,providerOrderId:order,amountPaise:expected,currency:'INR'};if(['FAILED','CANCELLED','USER_DROPPED'].includes(status))return{verified:false,status:'failed',providerPaymentId:pid,providerReference:pid,providerOrderId:order,amountPaise:expected,currency:'INR'};return{verified:false,status:'pending',providerPaymentId:pid};}
+ async function refundPayment({amountPaise,providerOrderId,idempotencyKey}={}){if(selectedProvider==='mock')return{accepted:true,confirmed:false};if(!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');const amount=validateAmount(amountPaise);const refundId=String(idempotencyKey||('rideon_refund_'+crypto.randomUUID())).replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60);let existing=null;try{existing=await cf('/orders/'+encodeURIComponent(String(providerOrderId))+'/refunds/'+encodeURIComponent(refundId),{method:'GET'});}catch(e){if(e?.httpStatus!==404)throw e;}if(existing?.refund_id){const s=String(existing.refund_status||existing.status||'').toUpperCase();return{accepted:true,confirmed:['SUCCESS','PROCESSED'].includes(s),providerReference:String(existing.cf_refund_id||existing.refund_id),providerRefundId:String(existing.cf_refund_id||existing.refund_id)};}const refund=await cf('/orders/'+encodeURIComponent(String(providerOrderId))+'/refunds',{method:'POST',headers:{'x-idempotency-key':refundId},body:JSON.stringify({refund_amount:Number((amount/100).toFixed(2)),refund_id:refundId,refund_note:'RideOn refund',refund_speed:'STANDARD'})});if(!refund?.refund_id&&!refund?.cf_refund_id)throw errorWithCode('Cashfree did not return a refund reference.','REFUND_PROVIDER_FAILED');const s=String(refund.refund_status||refund.status||'').toUpperCase();if(!['SUCCESS','PROCESSED','PENDING','QUEUED','INITIATED'].includes(s))throw errorWithCode('Cashfree reported a failed refund.','REFUND_PROVIDER_FAILED');return{accepted:true,confirmed:['SUCCESS','PROCESSED'].includes(s),providerReference:String(refund.cf_refund_id||refund.refund_id),providerRefundId:String(refund.cf_refund_id||refund.refund_id)};}
+ function verifyWebhook(body,signature,timestamp){if(!webhookSecret||!signature||!timestamp)return false;const expected=crypto.createHmac('sha256',String(webhookSecret)).update(String(timestamp)+String(body)).digest('base64');return safeEqual(expected,signature);}
+ function getCheckoutConfig({paymentSessionId,providerOrderId,amountPaise}={}){if(selectedProvider!=='cashfree'||!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');validateAmount(amountPaise);if(!paymentSessionId||!providerOrderId)throw errorWithCode('Cashfree checkout session is missing.','PAYMENT_CHECKOUT_CONFIGURATION_REQUIRED');return{provider:'cashfree',paymentSessionId:String(paymentSessionId),orderId:String(providerOrderId),environment:isProduction?'production':'sandbox'};}
+ function verifyCheckoutSignature(){return true;}
+ function parseWebhook(payload={}, {eventId: suppliedEventId,eventName: suppliedEventName}={}){if(selectedProvider!=='cashfree')return null;const eventId=String(suppliedEventId||payload?.event_id||payload?.eventId||payload?.data?.cf_payment_id||payload?.data?.refund?.cf_refund_id||'');const name=String(suppliedEventName||payload?.type||'').toUpperCase();const d=payload?.data||{},p=d?.payment||{},o=d?.order||{},r=d?.refund||{};if(name.includes('PAYMENT_SUCCESS')){const oid=p.order_id||o.order_id,pid=p.cf_payment_id,amt=Number(p.payment_amount),cur=String(p.payment_currency||'INR');if(!eventId||!oid||!pid||!Number.isFinite(amt)||amt<=0||cur!=='INR')return null;return{eventId,providerPaymentId:String(pid),providerReference:String(pid),providerOrderId:String(oid),amountPaise:Math.round(amt*100),currency:'INR',status:'paid'};}if(name.includes('PAYMENT_FAILED')){const oid=p.order_id||o.order_id,pid=p.cf_payment_id,amt=Number(p.payment_amount),cur=String(p.payment_currency||'INR');if(!eventId||!oid||!pid||!Number.isFinite(amt)||amt<=0||cur!=='INR')return null;return{eventId,providerPaymentId:String(pid),providerReference:String(pid),providerOrderId:String(oid),amountPaise:Math.round(amt*100),currency:'INR',status:'failed'};}if(name.includes('REFUND')&&r?.cf_refund_id){const oid=r.order_id||o.order_id,pid=r.cf_payment_id,amt=Number(r.refund_amount),cur=String(r.refund_currency||'INR'),s=String(r.refund_status||'').toUpperCase();if(!eventId||!oid||!pid||!Number.isFinite(amt)||amt<=0||cur!=='INR'||!['SUCCESS','PROCESSED'].includes(s))return null;return{eventId,providerPaymentId:String(pid),providerReference:String(r.cf_refund_id),providerOrderId:String(oid),amountPaise:Math.round(amt*100),currency:'INR',status:'refunded'};}return null;}
+ async function createVendorSettlement(){throw errorWithCode('Vendor settlement is not supported for the RideOn own-fleet payment model.','PAYMENT_VENDOR_SETTLEMENT_UNSUPPORTED');}
+ async function getSettlementStatus(){throw errorWithCode('Vendor settlement is not supported for the RideOn own-fleet payment model.','PAYMENT_VENDOR_SETTLEMENT_UNSUPPORTED');}
+ async function reconcileTransaction(){return selectedProvider==='mock'?{reconciled:true}:{reconciled:false,provider:'cashfree',message:'Use Cashfree status lookup and webhook reconciliation for payment records.'};}
+ return{provider:selectedProvider,name:selectedProvider,configured:selectedProvider==='mock'||configured,capabilities,verifyWebhook,parseWebhook,verifyCheckoutSignature,getCheckoutConfig,canTransition:transition,createCustomerPayment,verifyPayment,refundPayment,createVendorSettlement,getSettlementStatus,reconcileTransaction};
 }
