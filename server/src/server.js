@@ -1528,15 +1528,13 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       const amountPaise=Math.round(Number(booking.pricing.total)*100);
       const existing=await repository.findPaymentByBooking(booking.id);
       if(existing && ['unpaid','pending'].includes(existing.status)) {
-        const checkoutToken=createCheckoutToken({paymentId:existing.id,customerId:req.user.id});
-        const checkoutUrl=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);
-        checkoutUrl.searchParams.set('token',checkoutToken);
+        const checkoutUrl=paymentProvider==='razorpay'?(()=>{const checkoutToken=createCheckoutToken({paymentId:existing.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
         return res.json({payment:{
           id:existing.id, bookingId:existing.bookingId, provider:existing.provider || paymentProvider,
           amount:existing.amountPaise, amountPaise:existing.amountPaise,
           currency:'INR', status:existing.status,
           paymentReference:existing.providerOrderId || existing.providerReference,
-          paymentUrl:checkoutUrl.toString(),
+          paymentUrl:checkoutUrl,
         }});
       }
       const paymentReference = `rideon_${booking.id}`;
@@ -1550,9 +1548,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
         idempotencyKey:parsed.data.idempotencyKey,
         providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'},
       });
-      const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});
-      const checkoutUrl=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);
-      checkoutUrl.searchParams.set('token',checkoutToken);
+      const checkoutUrl=paymentProvider==='razorpay'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
       return res.status(201).json({payment:{
         id:result.payment.id,
         bookingId:result.payment.bookingId,
