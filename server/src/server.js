@@ -1543,6 +1543,9 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
         idempotencyKey:parsed.data.idempotencyKey,
         providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'},
       });
+      const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});
+      const checkoutUrl=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);
+      checkoutUrl.searchParams.set('token',checkoutToken);
       return res.status(201).json({payment:{
         id:result.payment.id,
         bookingId:result.payment.bookingId,
@@ -1552,7 +1555,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
         currency:'INR',
         status:result.payment.status,
         paymentReference:result.payment.providerOrderId,
-        paymentUrl:paymentRequest.paymentUrl,
+        paymentUrl:checkoutUrl.toString(),
       }});
     });
   } catch(error) {
@@ -1562,6 +1565,62 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
     if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED'||error.code==='PAYTM_ONBOARDING_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Verified UPI payment integration is not enabled for the configured provider. No payment has been marked successful.'}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
+  }
+});
+
+app.get('/api/v1/payments/checkout', async (req,res) => {
+  const token=verifyCheckoutToken(req.query.token);
+  if(!token)return res.status(401).type('html').send(checkoutPage({status:'failed',title:'Checkout expired',message:'This payment session has expired. Return to RideOn and start payment again.',returnUrl:'rideon://payment-return'}));
+  const payment=await repository.findPaymentById(token.paymentId,token.customerId);
+  if(!payment)return res.status(404).type('html').send(checkoutPage({status:'failed',title:'Payment not found',message:'This payment session is no longer available.',returnUrl:'rideon://payment-return'}));
+  if(payment.status==='paid')return res.type('html').send(checkoutPage({status:'paid',title:'Payment already confirmed',message:'RideOn has already confirmed this payment.',returnUrl:'rideon://payment-return'}));
+  if(payment.provider!=='razorpay')return res.status(409).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'This payment is not configured for the active checkout provider.',returnUrl:'rideon://payment-return'}));
+  try{
+    const callbackUrl=new URL('/api/v1/payments/checkout/callback',`${req.protocol}://${req.get('host')}`);
+    callbackUrl.searchParams.set('token',String(req.query.token));
+    const config=payments.getCheckoutConfig({providerOrderId:payment.providerOrderId,amountPaise:payment.amountPaise,callbackUrl:callbackUrl.toString()});
+    const options={
+      key:config.keyId,
+      amount:config.amountPaise,
+      currency:'INR',
+      name:'RideOn',
+      description:'Vehicle rental payment',
+      order_id:config.orderId,
+      callback_url:config.callbackUrl,
+      redirect:true,
+      theme:{color:'#E56A3D'},
+    };
+    const serialized=JSON.stringify(options).replace(/</g,'\\u003c');
+    res.type('html').send('<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1"><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const options='+serialized+';const checkout=new Razorpay(options);checkout.open();</script></body></html>');
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'payment_checkout_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_FAILED'}));
+    res.status(503).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'RideOn could not start the provider checkout. Return to the app and retry.',returnUrl:'rideon://payment-return'}));
+  }
+});
+
+app.post('/api/v1/payments/checkout/callback', async (req,res) => {
+  const token=verifyCheckoutToken(req.query.token);
+  if(!token)return res.status(401).type('html').send(checkoutPage({status:'failed',title:'Checkout expired',message:'This payment session has expired. Return to RideOn and start payment again.',returnUrl:'rideon://payment-return'}));
+  const payment=await repository.findPaymentById(token.paymentId,token.customerId);
+  if(!payment)return res.status(404).type('html').send(checkoutPage({status:'failed',title:'Payment not found',message:'This payment session is no longer available.',returnUrl:'rideon://payment-return'}));
+  const providerOrderId=String(req.body?.razorpay_order_id||payment.providerOrderId||'');
+  const providerPaymentId=String(req.body?.razorpay_payment_id||'');
+  const signature=String(req.body?.razorpay_signature||'');
+  try{
+    if(!payments.verifyCheckoutSignature({providerOrderId,providerPaymentId,signature}))return res.status(401).type('html').send(checkoutPage({status:'failed',title:'Payment verification failed',message:'The provider checkout response could not be authenticated. No payment was marked successful.',returnUrl:'rideon://payment-return'}));
+    const verified=await payments.verifyPayment({providerOrderId,providerPaymentId,amountPaise:payment.amountPaise});
+    if(verified.status==='failed'){
+      const applied=await repository.applyPaymentEvent({eventId:'checkout-failed:'+providerPaymentId,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
+      if(applied.invalid)throw Object.assign(new Error('Provider payment did not match the RideOn payment.'),{code:'PAYMENT_NOT_VERIFIED'});
+      return res.type('html').send(checkoutPage({status:'failed',title:'Payment was not completed',message:'The provider reported that this payment did not complete. You can safely retry from RideOn.',returnUrl:'rideon://payment-return'}));
+    }
+    if(!verified.verified)throw Object.assign(new Error('Provider has not confirmed the payment.'),{code:'PAYMENT_VERIFICATION_PENDING'});
+    const applied=await repository.applyPaymentEvent({eventId:'checkout-paid:'+providerPaymentId,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(verified.amountPaise),currency:'INR',status:'paid'});
+    if(applied.invalid)throw Object.assign(new Error('Provider payment did not match the RideOn payment.'),{code:'PAYMENT_NOT_VERIFIED'});
+    res.type('html').send(checkoutPage({status:'paid',title:'Payment confirmed',message:'RideOn has verified your payment. Return to the app to continue.',returnUrl:'rideon://payment-return'}));
+  }catch(error){
+    console.error(JSON.stringify({level:'error',event:'payment_checkout_callback_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_CALLBACK_FAILED'}));
+    res.status(error?.code==='PAYMENT_VERIFICATION_PENDING'?409:502).type('html').send(checkoutPage({status:'pending',title:'Payment status pending',message:'RideOn could not complete provider verification yet. Return to the app and refresh payment status.',returnUrl:'rideon://payment-return'}));
   }
 });
 
@@ -1582,7 +1641,7 @@ app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, pa
     const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
     return res.json({payment:latestPayment,verification:'verified',bookingPaymentStatus:latestBooking?.paymentStatus||'pending'});
   }catch(error){
-    if(error.code==='PAYTM_ONBOARDING_REQUIRED'||error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'UPI payment verification is not enabled for the configured provider yet. No payment has been marked successful.'}});
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Razorpay payment verification is not configured on the RideOn server. No payment has been marked successful.'}});
     throw error;
   }
 });
