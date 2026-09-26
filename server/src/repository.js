@@ -3032,11 +3032,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -4745,11 +4741,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -6466,11 +6458,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -8317,11 +8305,7 @@ if(!useDatabase){
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -10037,11 +10021,7 @@ async function getRideOnFleetVehicle(vehicleId) {
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -11751,11 +11731,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -13464,11 +13440,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -15185,11 +15157,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -17043,11 +17011,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -18763,11 +18727,7 @@ async function getRideOnFleetVehicle(vehicleId) {
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -20477,11 +20437,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -22190,11 +22146,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
@@ -23911,11 +23863,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined});
   }
   async function listCustomerBookings({customerId,limit,offset}){if(!useDatabase)return [...memory.bookings.values()].filter(b=>b.customerId===customerId).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(offset,offset+limit);const {rows}=await pool.query('select b.*, sd.status as security_deposit_status, sd.refundable_amount_paise as security_deposit_refundable_paise, sd.approved_deduction_paise as security_deposit_deduction_paise, sd.deduction_reason as security_deposit_reason, sd.evidence_reference as security_deposit_evidence, sd.refund_provider_reference as security_deposit_refund_reference, sd.inspected_at as security_deposit_inspected_at, sd.inspected_by as security_deposit_inspected_by, p.id as payment_id, v.id as v_id, v.type as v_type, v.name as v_name from bookings b left join security_deposits sd on sd.booking_id=b.id left join lateral (select * from payments px where px.booking_id=b.id order by px.created_at desc limit 1) p on true left join vehicles v on v.id=b.vehicle_id where b.customer_id=$1 order by b.created_at desc limit $2 offset $3',[customerId,limit,offset]);return rows.map(r=>mapBooking({...r,security_deposit_status:r.security_deposit_status,security_deposit_refundable_paise:r.security_deposit_refundable_paise,security_deposit_deduction_paise:r.security_deposit_deduction_paise,vehicle:r.v_id?{id:String(r.v_id),name:r.v_name,type:String(r.v_type)}:undefined}));}
-  const canTransition = (current, next) => {
-    if (current === next) return true;
-    const allowed = { unpaid:['pending','failed'], pending:['paid','failed'], paid:['held','refund_pending','failed','disputed'], held:['settlement_pending','refund_pending','disputed'], settlement_pending:['settled','failed','disputed'], settled:['refund_pending','disputed'], refund_pending:['refunded','failed','disputed'], failed:['pending'], disputed:['refund_pending','settlement_pending'], refunded:[] };
-    return Boolean(allowed[current]?.includes(next));
-  };
+
 
   async function getCancellationPreview(id, customerId){
     const booking=await getBooking(id,customerId);
