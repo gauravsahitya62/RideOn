@@ -193,16 +193,19 @@ console.log('[RideOnServer][BOOT]', JSON.stringify({
   hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
   hasSupabaseKey: Boolean(process.env.SUPABASE_PUBLISHABLE_KEY)
 }));
-const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'razorpay' : 'mock')).toLowerCase();
-const razorpayKeyId = process.env.RAZORPAY_KEY_ID || '';
-const razorpayKeySecret = process.env.RAZORPAY_KEY_SECRET || '';
-const razorpayWebhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || '';
-const razorpayEnvironment = String(process.env.RAZORPAY_ENVIRONMENT || (isProduction ? 'production' : 'test')).toLowerCase();
+const paymentProvider = (process.env.PAYMENT_PROVIDER || (isProduction ? 'cashfree' : 'mock')).toLowerCase();
+const cashfreeClientId = process.env.CASHFREE_CLIENT_ID || '';
+const cashfreeClientSecret = process.env.CASHFREE_CLIENT_SECRET || '';
+const cashfreeWebhookSecret = process.env.CASHFREE_WEBHOOK_SECRET || '';
+const cashfreeEnvironment = String(process.env.CASHFREE_ENVIRONMENT || (isProduction ? 'production' : 'sandbox')).toLowerCase();
+const cashfreeApiBaseUrl = process.env.CASHFREE_API_BASE_URL || '';
+const cashfreeReturnUrl = process.env.CASHFREE_RETURN_URL || '';
+const cashfreeNotifyUrl = process.env.CASHFREE_NOTIFY_URL || '';
 if (isProduction && !process.env.DATABASE_URL) throw new Error('DATABASE_URL is required in production');
 if (isProduction && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
 if (isProduction && (!process.env.SUPABASE_URL || !process.env.SUPABASE_PUBLISHABLE_KEY)) throw new Error('Supabase Auth configuration is required in production');
-if (isProduction && paymentProvider !== 'razorpay') throw new Error('PAYMENT_PROVIDER must be razorpay in production.');
-if (isProduction && (!razorpayKeyId || !razorpayKeySecret || !razorpayWebhookSecret)) throw new Error('Razorpay production credentials and webhook secret are required.');
+if (isProduction && paymentProvider !== 'cashfree') throw new Error('PAYMENT_PROVIDER must be cashfree in production.');
+if (isProduction && (!cashfreeClientId || !cashfreeClientSecret || !cashfreeWebhookSecret)) throw new Error('Cashfree production credentials and webhook secret are required.');
 
 
 function normalizeOtpDestination({ channel, value }) {
@@ -265,10 +268,13 @@ const auth = createAuth({
 });
 const payments = createPaymentService({
   provider: paymentProvider,
-  keyId: razorpayKeyId,
-  keySecret: razorpayKeySecret,
-  webhookSecret: razorpayWebhookSecret,
-  environment: razorpayEnvironment,
+  clientId: cashfreeClientId,
+  clientSecret: cashfreeClientSecret,
+  webhookSecret: cashfreeWebhookSecret,
+  environment: cashfreeEnvironment,
+  apiBaseUrl: cashfreeApiBaseUrl,
+  defaultReturnUrl: cashfreeReturnUrl,
+  defaultNotifyUrl: cashfreeNotifyUrl,
 });
 
 function createCheckoutToken({paymentId,customerId}) {
@@ -676,14 +682,18 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
     if(order.paymentStatus==='paid')return res.status(409).json({error:{code:'PAYMENT_ALREADY_PAID',message:'This fleet booking is already paid.'}});
     if(new Date(order.quoteExpiresAt)<=new Date())return res.status(409).json({error:{code:'QUOTE_EXPIRED',message:'This fleet quote has expired. Please recheck availability.'}});
     const amountPaise=Math.round(Number(order.total)*100);
-    const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise});
+    const publicBaseUrl=`${req.protocol}://${req.get('host')}`;
+    const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
+    const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
+    const customer=await repository.findCustomerById(req.user.id);
+    const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise,customerId:req.user.id,customerPhone:customer?.phone,returnUrl,notifyUrl});
     console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',fleetOrderId:order.id}));
-    const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
-    const checkoutUrl=paymentProvider==='razorpay'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
+    const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,reference:paymentRequest.paymentSessionId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
+    const checkoutUrl=paymentProvider==='cashfree'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
     res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:checkoutUrl,amount:result.payment.amountPaise,currency:'INR'},order});
   }catch(error){
     const map={FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,PAYMENT_PROVIDER_REQUEST_FAILED:502,PAYMENT_PROVIDER_TIMEOUT:504};
-    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'?'Razorpay checkout is not configured on the RideOn server.':'We could not start fleet checkout right now. Please retry.'}});
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'?'Cashfree checkout is not configured on the RideOn server.':'We could not start fleet checkout right now. Please retry.'}});
   }
 });
 
@@ -1531,7 +1541,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       const amountPaise=Math.round(Number(booking.pricing.total)*100);
       const existing=await repository.findPaymentByBooking(booking.id);
       if(existing && ['unpaid','pending'].includes(existing.status)) {
-        const checkoutUrl=paymentProvider==='razorpay'?(()=>{const checkoutToken=createCheckoutToken({paymentId:existing.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
+        const checkoutUrl=paymentProvider==='cashfree'?(()=>{const checkoutToken=createCheckoutToken({paymentId:existing.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
         return res.json({payment:{
           id:existing.id, bookingId:existing.bookingId, provider:existing.provider || paymentProvider,
           amount:existing.amountPaise, amountPaise:existing.amountPaise,
@@ -1541,7 +1551,11 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
         }});
       }
       const paymentReference = `rideon_${booking.id}`;
-      const paymentRequest=await payments.createCustomerPayment({ orderId:paymentReference, amountPaise });
+      const publicBaseUrl=`${req.protocol}://${req.get('host')}`;
+      const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
+      const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
+      const customer=await repository.findCustomerById(req.user.id);
+      const paymentRequest=await payments.createCustomerPayment({ orderId:paymentReference, amountPaise, customerId:req.user.id, customerPhone:customer?.phone, returnUrl, notifyUrl });
       console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',bookingId:booking.id}));
       const result=await repository.createOrGetPaymentOrder({
         bookingId:booking.id,
@@ -1552,7 +1566,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
         idempotencyKey:parsed.data.idempotencyKey,
         providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'},
       });
-      const checkoutUrl=paymentProvider==='razorpay'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
+      const checkoutUrl=paymentProvider==='cashfree'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
       return res.status(201).json({payment:{
         id:result.payment.id,
         bookingId:result.payment.bookingId,
@@ -1570,7 +1584,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
     if(error.code==='PAYMENT_PROVIDER_REQUEST_FAILED') return res.status(502).json({error:{code:error.code,message:'The payment provider could not create the checkout order. Please retry.'}});
     if(error.code==='PAYMENT_PROVIDER_TIMEOUT') return res.status(504).json({error:{code:error.code,message:'The payment provider took too long to respond. Please retry.'}});
-    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Razorpay payment integration is not configured on the RideOn server. No payment has been marked successful.'}});
+    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Cashfree payment integration is not configured on the RideOn server. No payment has been marked successful.'}});
     if(error.code==='PAYMENT_ALREADY_PAID') return res.status(409).json({error:{code:error.code,message:'This booking is already paid.'}});
     throw error;
   }
@@ -1582,91 +1596,42 @@ app.get('/api/v1/payments/checkout', async (req,res) => {
   const payment=await repository.findPaymentById(token.paymentId,token.customerId);
   if(!payment)return res.status(404).type('html').send(checkoutPage({status:'failed',title:'Payment not found',message:'This payment session is no longer available.',returnUrl:'rideon://payment-return'}));
   if(payment.status==='paid')return res.type('html').send(checkoutPage({status:'paid',title:'Payment already confirmed',message:'RideOn has already confirmed this payment.',returnUrl:'rideon://payment-return'}));
-  if(payment.provider!=='razorpay')return res.status(409).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'This payment is not configured for the active checkout provider.',returnUrl:'rideon://payment-return'}));
+  if(payment.provider!=='cashfree')return res.status(409).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'This payment is not configured for the active checkout provider.',returnUrl:'rideon://payment-return'}));
   try{
-    const callbackUrl=new URL('/api/v1/payments/checkout/callback',`${req.protocol}://${req.get('host')}`);
-    callbackUrl.searchParams.set('token',String(req.query.token));
-    const config=payments.getCheckoutConfig({providerOrderId:payment.providerOrderId,amountPaise:payment.amountPaise,callbackUrl:callbackUrl.toString()});
-    const options={
-      key:config.keyId,
-      amount:config.amountPaise,
-      currency:'INR',
-      name:'RideOn',
-      description:'Vehicle rental payment',
-      order_id:config.orderId,
-      callback_url:config.callbackUrl,
-      redirect:true,
-      theme:{color:'#E56A3D'},
-    };
-    const serialized=JSON.stringify(options).replace(/</g,'\\u003c');
-    res.type('html').send('<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1"><script src="https://checkout.razorpay.com/v1/checkout.js"></script><script>const options='+serialized+';const checkout=new Razorpay(options);checkout.open();</script></body></html>');
+    const config=payments.getCheckoutConfig({providerOrderId:payment.providerOrderId,amountPaise:payment.amountPaise,paymentSessionId:payment.providerReference});
+    const session=JSON.stringify(config.paymentSessionId).replace(/</g,'\\u003c');
+    const environment=JSON.stringify(config.environment==='production'?'production':'sandbox');
+    res.type('html').send('<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1"><script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script><script>const cashfree=Cashfree({mode:'+environment+'});cashfree.checkout({paymentSessionId:'+session+',redirectTarget:"_self"});</script></body></html>');
   }catch(error){
     console.error(JSON.stringify({level:'error',event:'payment_checkout_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_FAILED'}));
     res.status(503).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'RideOn could not start the provider checkout. Return to the app and retry.',returnUrl:'rideon://payment-return'}));
   }
 });
 
-app.post('/api/v1/payments/checkout/callback', async (req,res) => {
-  const token=verifyCheckoutToken(req.query.token);
-  if(!token)return res.status(401).type('html').send(checkoutPage({status:'failed',title:'Checkout expired',message:'This payment session has expired. Return to RideOn and start payment again.',returnUrl:'rideon://payment-return'}));
-  const payment=await repository.findPaymentById(token.paymentId,token.customerId);
+app.get('/api/v1/payments/checkout/callback', async (req,res) => {
+  const providerOrderId=String(req.query?.order_id||'');
+  const token=verifyCheckoutToken(req.query?.token);
+  const payment=token
+    ? await repository.findPaymentById(token.paymentId,token.customerId)
+    : (providerOrderId ? await repository.findPaymentByProviderOrder(providerOrderId) : null);
   if(!payment)return res.status(404).type('html').send(checkoutPage({status:'failed',title:'Payment not found',message:'This payment session is no longer available.',returnUrl:'rideon://payment-return'}));
-  const providerOrderId=String(req.body?.razorpay_order_id||payment.providerOrderId||'');
-  const providerPaymentId=String(req.body?.razorpay_payment_id||'');
-  const signature=String(req.body?.razorpay_signature||'');
+  if(payment.status==='paid')return res.type('html').send(checkoutPage({status:'paid',title:'Payment confirmed',message:'RideOn has already confirmed this payment. Return to the app to continue.',returnUrl:'rideon://payment-return'}));
+  const orderId=String(providerOrderId||payment.providerOrderId||'');
   try{
-    if(!payments.verifyCheckoutSignature({providerOrderId,providerPaymentId,signature}))return res.status(401).type('html').send(checkoutPage({status:'failed',title:'Payment verification failed',message:'The provider checkout response could not be authenticated. No payment was marked successful.',returnUrl:'rideon://payment-return'}));
-    const verified=await payments.verifyPayment({providerOrderId,providerPaymentId,amountPaise:payment.amountPaise});
+    const verified=await payments.verifyPayment({providerOrderId:orderId,providerPaymentId:String(req.query?.cf_payment_id||''),providerReference:payment.providerReference,amountPaise:payment.amountPaise});
     if(verified.status==='failed'){
-      const applied=await repository.applyPaymentEvent({eventId:'checkout-failed:'+providerPaymentId,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
+      const applied=await repository.applyPaymentEvent({eventId:'checkout-failed:'+String(verified.providerPaymentId||orderId),bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:orderId,amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
       if(applied.invalid)throw Object.assign(new Error('Provider payment did not match the RideOn payment.'),{code:'PAYMENT_NOT_VERIFIED'});
-      return res.type('html').send(checkoutPage({status:'failed',title:'Payment was not completed',message:'The provider reported that this payment did not complete. You can safely retry from RideOn.',returnUrl:'rideon://payment-return'}));
+      return res.type('html').send(checkoutPage({status:'failed',title:'Payment was not completed',message:'Cashfree did not confirm this payment. You can safely retry from RideOn.',returnUrl:'rideon://payment-return'}));
     }
     if(!verified.verified)throw Object.assign(new Error('Provider has not confirmed the payment.'),{code:'PAYMENT_VERIFICATION_PENDING'});
-    const applied=await repository.applyPaymentEvent({eventId:'checkout-paid:'+providerPaymentId,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(verified.amountPaise),currency:'INR',status:'paid'});
+    const applied=await repository.applyPaymentEvent({eventId:'checkout-paid:'+verified.providerPaymentId,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:orderId,amountPaise:Number(verified.amountPaise),currency:'INR',status:'paid'});
     if(applied.invalid)throw Object.assign(new Error('Provider payment did not match the RideOn payment.'),{code:'PAYMENT_NOT_VERIFIED'});
-    res.type('html').send(checkoutPage({status:'paid',title:'Payment confirmed',message:'RideOn has verified your payment. Return to the app to continue.',returnUrl:'rideon://payment-return'}));
+    res.type('html').send(checkoutPage({status:'paid',title:'Payment confirmed',message:'RideOn has verified your Cashfree payment. Return to the app to continue.',returnUrl:'rideon://payment-return'}));
   }catch(error){
     console.error(JSON.stringify({level:'error',event:'payment_checkout_callback_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_CALLBACK_FAILED'}));
     res.status(error?.code==='PAYMENT_VERIFICATION_PENDING'?409:502).type('html').send(checkoutPage({status:'pending',title:'Payment status pending',message:'RideOn could not complete provider verification yet. Return to the app and refresh payment status.',returnUrl:'rideon://payment-return'}));
   }
-});
-
-app.post('/api/v1/payments/:id/verify', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
-  const parsed=z.object({ bookingId:z.string().uuid() }).safeParse(req.body);
-  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid bookingId.'}});
-  let payment=await repository.findPaymentById(req.params.id, req.user.id);
-  if(!payment || String(payment.bookingId)!==String(parsed.data.bookingId)) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
-  if(String(payment.status).toLowerCase()==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
-  try {
-    const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
-    console.log(JSON.stringify({level:'info',event:'payment_verification_result',requestId:req.requestId,provider:payments.name,paymentId:payment.id,providerOrderId:payment.providerOrderId,providerPaymentId:verified?.providerPaymentId||undefined,status:verified?.status||'pending',verified:Boolean(verified?.verified)}));
-    if(!verified?.verified) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The provider has not authoritatively confirmed this payment yet.'}});
-    if(verified.status==='failed'){
-      const failed=await repository.applyPaymentEvent({eventId:`verify-failed:${payment.id}:${verified.providerPaymentId||verified.providerReference||'unknown'}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
-      if(failed.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking payment.'}});
-      const latestFailed=await repository.findPaymentById(payment.id,req.user.id);
-      return res.json({payment:latestFailed,verification:'failed',bookingPaymentStatus:'failed'});
-    }
-    const providerReference=String(verified.providerReference||payment.providerReference||payment.providerPaymentId||'').trim();
-    if(!verified.verified||!providerReference) return res.status(409).json({error:{code:'PAYMENT_VERIFICATION_PENDING',message:'The provider has not authoritatively confirmed this payment yet.'}});
-    const applied=await repository.applyPaymentEvent({eventId:`verify:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(verified.amountPaise||payment.amountPaise),currency:'INR',status:'paid'});
-    if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
-    const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
-    const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
-    return res.json({payment:latestPayment,verification:'verified',bookingPaymentStatus:latestBooking?.paymentStatus||'pending'});
-  }catch(error){
-    if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Razorpay payment verification is not configured on the RideOn server. No payment has been marked successful.'}});
-    throw error;
-  }
-});
-
-app.post('/api/v1/vendor/bookings/:bookingId/refund', supabaseRequireAuth, requireVendor, async (req,res) => {
-  const scopedBooking=await repository.getVendorBooking(req.vendor.id,req.params.bookingId);
-  if(!scopedBooking) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
-  const payment=await repository.findPaymentByBooking(req.params.bookingId);
-  if(!payment || payment.status!=='paid') return res.status(409).json({error:{code:'INVALID_PAYMENT_STATE',message:'Only a paid booking can enter the refund flow.'}});
-  return res.status(409).json({error:{code:'REFUND_PROVIDER_REQUIRED',message:'Refund requires the configured provider integration and authorized workflow.'}});
 });
 
 app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req,res) => {
@@ -1678,13 +1643,14 @@ app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req
 });
 
 app.post('/api/v1/payments/webhook', async (req, res) => {
-  const signature=req.get('X-Razorpay-Signature') || '';
+  const signature=req.get('x-webhook-signature') || '';
+  const timestamp=req.get('x-webhook-timestamp') || '';
   const body=req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
-  if(!payments.verifyWebhook(body,signature)){
+  if(!payments.verifyWebhook(body,signature,timestamp)){
     console.error(JSON.stringify({level:'warn',event:'payment_webhook_rejected',requestId:req.requestId,provider:payments.name,reason:'invalid_signature'}));
     return res.status(401).json({error:{code:'INVALID_WEBHOOK_SIGNATURE'}});
   }
-  const event=payments.parseWebhook(req.body,{eventId:req.get('X-Razorpay-Event-Id')||req.get('x-razorpay-event-id')||undefined,eventName:req.body?.event});
+  const event=payments.parseWebhook(req.body,{eventId:req.get('X-Cashfree-Event-Id')||req.get('x-cashfree-event-id')||undefined,eventName:req.body?.event});
   if(!event)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT'}});
   if(!event.bookingId&&event.providerOrderId){
     const payment=await repository.findPaymentByProviderOrder(event.providerOrderId);
