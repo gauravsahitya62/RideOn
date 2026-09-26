@@ -104,6 +104,7 @@ export function createPaymentService({
 
   const razorpayConfigured = selectedProvider === 'razorpay' && Boolean(keyId && keySecret && webhookSecret);
   const isProduction = String(environment).toLowerCase() === 'production';
+  if (selectedProvider === 'mock' && isProduction) throw errorWithCode('Mock payment provider is not allowed in production.', 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
 
   if (selectedProvider === 'razorpay' && isProduction && String(keyId).startsWith('rzp_test_')) {
     throw errorWithCode('A Razorpay test key cannot be used in production.', 'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
