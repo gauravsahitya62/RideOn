@@ -2901,7 +2901,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -4615,7 +4614,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -6337,7 +6335,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -8189,7 +8186,6 @@ if(!useDatabase){
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(actorId, bookingId, { actorRole='vendor' } = {}) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -9910,7 +9906,6 @@ async function getRideOnFleetVehicle(vehicleId) {
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -11625,7 +11620,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -13339,7 +13333,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -15061,7 +15054,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -16920,7 +16912,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(actorId, bookingId, { actorRole='vendor' } = {}) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -18641,7 +18632,6 @@ async function getRideOnFleetVehicle(vehicleId) {
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -20356,7 +20346,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -22070,7 +22059,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -23792,7 +23780,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
