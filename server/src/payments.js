@@ -313,7 +313,12 @@ export function createPaymentService({
   }
 
   function verifyWebhook(body, signature) {
-    if (selectedProvider !== 'razorpay' || !razorpayConfigured || !signature) return false;
+    if(selectedProvider==='mock'){
+      if(!webhookSecret||!signature)return false;
+      const expected=crypto.createHmac('sha256',webhookSecret).update(body).digest('hex');
+      return safeEqualHex(expected,signature);
+    }
+    if(selectedProvider !== 'razorpay' || !razorpayConfigured || !signature) return false;
     const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
     return safeEqualHex(expected, signature);
   }
@@ -331,6 +336,15 @@ export function createPaymentService({
   }
 
   function parseWebhook(payload = {}, {eventId: suppliedEventId, eventName: suppliedEventName} = {}) {
+    if(selectedProvider==='mock'){
+      const eventId=suppliedEventId||payload.eventId||payload.providerEventId||payload.referenceId;
+      const providerReference=payload.providerReference||payload.transactionReference||payload.providerTransactionId||payload.paymentId;
+      const providerOrderId=payload.providerOrderId||payload.orderId||payload.ORDERID;
+      const status=String(payload.status||payload.STATUS||'').toLowerCase();
+      const amountPaise=Number(payload.amountPaise ?? (payload.TXNAMOUNT!=null?Math.round(Number(payload.TXNAMOUNT)*100):NaN));
+      if(!eventId||!providerReference||!providerOrderId||!RENTAL_STATUSES.has(status)||!Number.isSafeInteger(amountPaise)||amountPaise<=0||(payload.currency||'INR')!=='INR')return null;
+      return {eventId:String(eventId),bookingId:payload.bookingId?String(payload.bookingId):undefined,paymentId:payload.paymentId?String(payload.paymentId):undefined,providerPaymentId:String(providerReference),providerReference:String(providerReference),providerOrderId:String(providerOrderId),amountPaise,currency:'INR',status};
+    }
     if (selectedProvider !== 'razorpay') return null;
     const eventId = suppliedEventId || payload.eventId || payload.id;
     const eventName = String(suppliedEventName || payload.event || '').toLowerCase();
