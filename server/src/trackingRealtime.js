@@ -39,7 +39,9 @@ export function createTrackingRealtimeServer({httpServer,authenticate,repository
       const tracking=await repository.getTrackingForCustomer(user.id,bookingId);if(!tracking?.session||tracking.booking.deliveryStatus!=='in_delivery'){socket.write('HTTP/1.1 409 Conflict\\r\\nConnection: close\\r\\n\\r\\n');socket.destroy();return;}
       const key=req.headers['sec-websocket-key'];if(!key){socket.destroy();return;}
       const accept=crypto.createHash('sha1').update(key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-      socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: '+accept+'\\r\\nSec-WebSocket-Protocol: '+authProtocol+'\\r\\n\\r\\n');
+      // Never echo the bearer token back in response headers.
+      // Clients continue to authenticate using the existing rideon-auth.<token> subprotocol.
+      socket.write('HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Accept: '+accept+'\\r\\nSec-WebSocket-Protocol: rideon-tracking\\r\\n\\r\\n');
       socket.setNoDelay(true);const client={socket,userId:String(user.id),bookingId:String(bookingId)};clients.add(client);subscribe(bookingId,client);socket.write(frameText({type:'tracking.snapshot',tracking}));
       let buffered=Buffer.alloc(0);socket.on('data',(chunk)=>{try{buffered=Buffer.concat([buffered,chunk]);const parsed=parseFrames(buffered);buffered=parsed.remaining;for(const message of parsed.messages){if(message.opcode===0x8){socket.write(closeFrame());socket.end();return;}if(message.opcode===0x9)socket.write(framePong(message.payload));}}catch{try{socket.write(closeFrame());socket.end();}catch{}}});
       socket.on('close',()=>unsubscribe(client));socket.on('end',()=>unsubscribe(client));socket.on('error',()=>unsubscribe(client));

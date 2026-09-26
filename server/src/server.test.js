@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import { createPaymentService } from './payments.js';
+import { createAuth } from './auth.js';
 
 process.env.NODE_ENV = 'test';
 
@@ -64,6 +65,9 @@ const jsonRequest = (path, method, payload, token, extraHeaders = {}) => request
   body: JSON.stringify(payload),
 });
 
+const testAuth = createAuth({ jwtSecret:'development-only-secret', authEnvironment:'test', accessTokenTtlSeconds:3600, bcryptRounds:4 });
+const vendorTokenFor = (customerId) => testAuth.sign({sub:customerId,role:'vendor'});
+
 async function legacyLogin(phone) {
   const response = await jsonRequest('/api/v1/auth/login', 'POST', {
     phone,
@@ -101,6 +105,99 @@ test('vehicle list preserves existing aliases and search contract', async () => 
   const creta = payload.data.find((vehicle) => vehicle.id === 'creta-01');
   assert.ok(creta);
   assert.equal(creta.price, creta.pricePerDay);
+});
+
+test('legacy JWT rejects wrong issuer, audience, and environment', async () => {
+  const baseToken = jwt.sign({sub:crypto.randomUUID(),role:'customer',authEnvironment:'test'}, 'development-only-secret', {expiresIn:3600,issuer:'rideon-api',audience:'rideon-mobile'});
+  const wrongIssuer = jwt.sign({sub:crypto.randomUUID(),role:'customer',authEnvironment:'test'}, 'development-only-secret', {expiresIn:3600,issuer:'other-api',audience:'rideon-mobile'});
+  const wrongAudience = jwt.sign({sub:crypto.randomUUID(),role:'customer',authEnvironment:'test'}, 'development-only-secret', {expiresIn:3600,issuer:'rideon-api',audience:'other-client'});
+  const wrongEnvironment = jwt.sign({sub:crypto.randomUUID(),role:'customer',authEnvironment:'production'}, 'development-only-secret', {expiresIn:3600,issuer:'rideon-api',audience:'rideon-mobile'});
+  const valid = await request('/api/v1/bookings', {headers:{authorization:'Bearer '+baseToken}});
+  assert.equal(valid.status,200);
+  for (const token of [wrongIssuer,wrongAudience,wrongEnvironment]) {
+    const response = await request('/api/v1/bookings', {headers:{authorization:'Bearer '+token}});
+    assert.equal(response.status,401);
+    assert.equal((await response.json()).error.code,'INVALID_TOKEN');
+  }
+});
+
+test('vehicle image validation rejects MIME-spoofed payloads before storage', async () => {
+  const vendor = await register('+911234568001','Upload Validation Vendor');
+  await repository.ensureVendorForCustomer(vendor.customer.id);
+  const token = vendorTokenFor(vendor.customer.id);
+  const response = await jsonRequest('/api/v1/vendor/vehicle-images','POST',{
+    contentType:'image/png',
+    base64:Buffer.from('not an image').toString('base64'),
+  },token);
+  assert.equal(response.status,400);
+  assert.equal((await response.json()).error.code,'IMAGE_INVALID');
+});
+
+test('ordinary booking responses do not expose exact GPS coordinates', async () => {
+  const customer = await register('+911234568002','GPS Privacy Customer');
+  const login = await legacyLogin('+911234568002');
+  const response = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',
+    startAt:'2042-01-10T10:00:00.000Z',
+    endAt:'2042-01-11T10:00:00.000Z',
+    delivery:true,
+    address:'12 GPS Privacy Road, Jaipur',
+    deliveryLatitude:26.9124,
+    deliveryLongitude:75.7873,
+  },login.accessToken,{'Idempotency-Key':'gps-privacy-1'});
+  assert.equal(response.status,201);
+  const payload=await response.json();
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLatitude'),false);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLongitude'),false);
+});
+
+test('booking validation caps vehicle identifiers', async () => {
+  const customer = await register('+911234568101', 'Vehicle ID Bound User');
+  const login = await legacyLogin('+911234568101');
+  const response = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'x'.repeat(65),
+    startAt:'2045-01-10T10:00:00.000Z',
+    endAt:'2045-01-11T10:00:00.000Z',
+    delivery:false,
+    address:'18 Validation Road, Jaipur',
+  },login.accessToken);
+  assert.equal(response.status,400);
+  assert.equal((await response.json()).error.code,'VALIDATION_ERROR');
+});
+
+test('delivery GPS is not persisted when delivery is disabled', async () => {
+  const customer = await register('+911234568102', 'Pickup Privacy User');
+  const login = await legacyLogin('+911234568102');
+  const response = await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',
+    startAt:'2045-01-12T10:00:00.000Z',
+    endAt:'2045-01-13T10:00:00.000Z',
+    delivery:false,
+    address:'19 Pickup Privacy Road, Jaipur',
+    deliveryLatitude:26.9124,
+    deliveryLongitude:75.7873,
+  },login.accessToken,{'Idempotency-Key':'pickup-privacy-1'});
+  assert.equal(response.status,201);
+  const bookingId=(await response.json()).booking.bookingId;
+  const detail=await request('/api/v1/bookings/'+bookingId,{headers:{authorization:'Bearer '+login.accessToken}});
+  const payload=await detail.json();
+  assert.equal(detail.status,200);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLatitude'),false);
+  assert.equal(Object.prototype.hasOwnProperty.call(payload.booking,'deliveryLongitude'),false);
+});
+
+test('vendor customer review history is scoped to the selected booking', async () => {
+  const vendorCustomer=await register('+911234568103','Review Privacy Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
+  const customer=await register('+911234568104','Review Privacy Customer');
+  const customerLogin=await legacyLogin('+911234568104');
+  const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Privacy Review Car',make:'RideOn',model:'R1',year:2035,city:'Jaipur',dailyRate:1500,securityDeposit:0,transmission:'Automatic',fuel:'Petrol',seats:5,registrationNumber:'RJ14PRV104',description:'Privacy review test vehicle',imageUrls:[],deliveryAvailable:false,active:true});
+  const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2045-02-10T10:00:00.000Z',endAt:'2045-02-11T10:00:00.000Z',delivery:false,address:'1 Review Privacy Road, Jaipur'},customerLogin.accessToken,{'Idempotency-Key':'review-privacy-a'});
+  assert.equal(created.status,201);
+  const bookingId=(await created.json()).booking.bookingId;
+  const result=await repository.listVendorCustomerReviewsForBooking({vendorId:vendor.id,bookingId});
+  assert.deepEqual(result.summary,{averageRating:0,totalReviewCount:0,ratingDistribution:{1:0,2:0,3:0,4:0,5:0}});
+  assert.deepEqual(result.reviews,[]);
 });
 
 test('protected booking routes reject anonymous callers', async () => {
@@ -481,7 +578,7 @@ test('vendor rejection requires a reason and cannot be accepted after rejection'
   const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2040-01-10T10:00:00.000Z',endAt:'2040-01-11T10:00:00.000Z',delivery:false,address:'1 Reject Road, Jaipur'},login.accessToken,{ 'Idempotency-Key':'reject-test-930'});
   assert.equal(created.status,201);
   const booking=(await created.json()).booking;
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   const noReason=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'rejected'},vendorToken);
   assert.equal(noReason.status,400);
   assert.equal((await noReason.json()).error.code,'REJECTION_REASON_REQUIRED');
@@ -500,7 +597,7 @@ test('security deposit inspection requires completed rental and protects deducti
   const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Deposit Car',make:'Test',model:'D',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:500,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJ14DEP932',description:'',imageUrls:[],deliveryAvailable:true,active:true});
   const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2040-02-10T10:00:00.000Z',endAt:'2040-02-11T10:00:00.000Z',delivery:false,address:'2 Deposit Road, Jaipur'},login.accessToken,{ 'Idempotency-Key':'deposit-test-932'});
   const booking=(await created.json()).booking;
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   const beforeReturn=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:0},vendorToken);
   assert.equal(beforeReturn.status,409);
   await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'confirmed');
@@ -592,8 +689,8 @@ test('vendor booking lifecycle is isolated and customer-visible', async () => {
   await repository.createOrGetPaymentOrder({bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR',providerOrder:{id:'test-vendor-lifecycle-'+bookingId,amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR'}});
   await repository.applyPaymentEvent({eventId:'paid-vendor-lifecycle-'+bookingId,bookingId,paymentId:undefined,providerReference:'paid-vendor-lifecycle-ref-'+bookingId,providerOrderId:'test-vendor-lifecycle-'+bookingId,amountPaise:Math.round(bookingForPayment.pricing.total*100),currency:'INR',status:'paid'});
 
-  const vendorAToken = jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
-  const vendorBToken = jwt.sign({sub:otherVendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorAToken = vendorTokenFor(vendorCustomer.customer.id);
+  const vendorBToken = vendorTokenFor(otherVendorCustomer.customer.id);
 
   const ownList = await request('/api/v1/vendor/bookings',{headers:{authorization:'Bearer '+vendorAToken}});
   assert.equal(ownList.status,200);
@@ -646,7 +743,7 @@ test('active delivery tracking is vendor-authorized and stops on delivery comple
   const booking=(await bookingResponse.json()).booking;
   const payment=await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'tracking-order-'+booking.bookingId,amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
   await repository.applyPaymentEvent({eventId:'tracking-paid-'+booking.bookingId,bookingId:booking.bookingId,paymentId:payment.id,providerReference:'tracking-ref-'+booking.bookingId,providerOrderId:'tracking-order-'+booking.bookingId,amountPaise:payment.amountPaise,currency:'INR',status:'paid'});
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   assert.equal((await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'confirmed'},vendorToken)).status,200);
   const otherTrack=await request('/api/v1/bookings/'+booking.bookingId+'/tracking',{headers:{authorization:'Bearer '+otherLogin.accessToken}});
   assert.equal(otherTrack.status,404);
@@ -741,7 +838,7 @@ test('vendor service location is vendor-only and persists', async () => {
   const vendorCustomer=await register('+911234567940','Maps Vendor');
   const login=await legacyLogin('+911234567940');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
-  const token=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const token=vendorTokenFor(vendorCustomer.customer.id);
   const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'RideOn Service Point',serviceCity:'Jaipur'},token);
   assert.equal(saved.status,200);
   const savedPayload=await saved.json();
@@ -759,7 +856,7 @@ test('vendor service location is vendor-only and persists', async () => {
 test('marketplace vendor map groups active vehicles by service location', async () => {
   const vendorCustomer=await register('+911234567941','Map Vendor Two');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
-  const token=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const token=vendorTokenFor(vendorCustomer.customer.id);
   const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'Service Point Two',serviceCity:'Jaipur'},token);
   assert.equal(saved.status,200);
   await repository.createVendorVehicle(vendor.id,{type:'car',name:'Map Car A',make:'Test',model:'A',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJMAP941A',description:'',imageUrls:[],deliveryAvailable:true,active:true});
@@ -777,7 +874,7 @@ test('route preview returns a friendly configuration error when routing is not c
   const login=await legacyLogin('+911234567942');
   const vendorCustomer=await register('+911234567943','Route Vendor');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'Route Service Point',serviceCity:'Jaipur'},vendorToken);
   assert.equal(saved.status,200);
   const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Route Car',make:'Test',model:'R',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJROUTE942',description:'',imageUrls:[],deliveryAvailable:true,active:true});
@@ -910,7 +1007,7 @@ test('reviews enforce completed booking ownership, duplicate prevention, and ser
   const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2042-01-10T10:00:00.000Z',endAt:'2042-01-11T10:00:00.000Z',delivery:false,address:'1 Reviews Road, Jaipur'},customerLogin.accessToken,{'Idempotency-Key':'reviews-booking-941'});
   assert.equal(created.status,201);
   const booking=(await created.json()).booking;
-  const vendorToken=jwt.sign({sub:vendorCustomer.customer.id,role:'vendor'},'development-only-secret');
+  const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
 
   const beforeComplete=await jsonRequest('/api/v1/bookings/'+booking.bookingId+'/reviews/customer','POST',{rating:5,comment:'Too early'},customerLogin.accessToken);
   assert.equal(beforeComplete.status,409);
@@ -1089,6 +1186,68 @@ test('support staff can inspect, assign and transition tickets while internal me
   const reopened=await jsonRequest('/api/v1/support/tickets/'+ticket.id+'/reopen','POST',{},customerLogin.accessToken);
   assert.equal(reopened.status,200);
   assert.equal((await reopened.json()).ticket.status,'open');
+});
+
+
+test('vendor public fleet returns only active vehicles for that vendor', async () => {
+  const vendorCustomer=await register('+911234569001','Fleet Vendor A');
+  const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id,{businessName:'Fleet Vendor A'});
+  await repository.createVendorVehicle(vendor.id,{type:'car',name:'Fleet Car A',make:'RideOn',model:'A',year:2035,city:'Udaipur',dailyRate:1200,securityDeposit:0,registrationNumber:'RJ14FLEET001',description:'A',imageUrls:[],deliveryAvailable:true,active:true});
+  await repository.createVendorVehicle(vendor.id,{type:'bike',name:'Fleet Bike Inactive',make:'RideOn',model:'B',year:2035,city:'Udaipur',dailyRate:500,securityDeposit:0,registrationNumber:'RJ14FLEET002',description:'B',imageUrls:[],deliveryAvailable:true,active:false});
+  const token=await legacyLogin('+911234569001');
+  // Public fleet route is intentionally public; authorization is enforced by returned active vendor data.
+  const response=await request('/api/v1/vendors/'+vendor.id+'/vehicles');
+  assert.equal(response.status,200);
+  const payload=await response.json();
+  assert.equal(payload.vehicles.length,1);
+  assert.equal(payload.vehicles[0].name,'Fleet Car A');
+});
+
+test('multi-vehicle quote rejects vehicles from another vendor', async () => {
+  const va=await register('+911234569002','Quote Vendor A');
+  const vb=await register('+911234569003','Quote Vendor B');
+  const vendorA=await repository.ensureVendorForCustomer(va.customer.id);
+  const vendorB=await repository.ensureVendorForCustomer(vb.customer.id);
+  const a=await repository.createVendorVehicle(vendorA.id,{type:'car',name:'Quote A',make:'RideOn',model:'A',year:2035,city:'Udaipur',dailyRate:1000,securityDeposit:0,registrationNumber:'RJ14QUOTE01',description:'A',imageUrls:[],deliveryAvailable:false,active:true});
+  const b=await repository.createVendorVehicle(vendorB.id,{type:'car',name:'Quote B',make:'RideOn',model:'B',year:2035,city:'Udaipur',dailyRate:1000,securityDeposit:0,registrationNumber:'RJ14QUOTE02',description:'B',imageUrls:[],deliveryAvailable:false,active:true});
+  const customer=await register('+911234569004','Quote Customer');
+  const login=await legacyLogin('+911234569004');
+  const response=await jsonRequest('/api/v1/quotes/multi','POST',{vendorId:vendorA.id,vehicleIds:[a.id,b.id],pickupAt:'2045-03-10T10:00:00.000Z',returnAt:'2045-03-12T10:00:00.000Z',delivery:false,address:'Self pickup'},login.accessToken);
+  assert.equal(response.status,403);
+  assert.equal((await response.json()).error.code,'MULTI_VEHICLE_ACCESS_DENIED');
+});
+
+test('multi-vehicle checkout creates one grouped order atomically and is idempotent', async () => {
+  const vc=await register('+911234569005','Atomic Fleet Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vc.customer.id);
+  const one=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Atomic One',make:'RideOn',model:'1',year:2035,city:'Udaipur',dailyRate:1000,securityDeposit:100,registrationNumber:'RJ14ATOMIC01',description:'1',imageUrls:[],deliveryAvailable:false,active:true});
+  const two=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Atomic Two',make:'RideOn',model:'2',year:2035,city:'Udaipur',dailyRate:1500,securityDeposit:200,registrationNumber:'RJ14ATOMIC02',description:'2',imageUrls:[],deliveryAvailable:false,active:true});
+  const customer=await register('+911234569006','Atomic Customer');
+  const login=await legacyLogin('+911234569006');
+  const base={vendorId:vendor.id,vehicleIds:[one.id,two.id],pickupAt:'2045-04-10T10:00:00.000Z',returnAt:'2045-04-12T10:00:00.000Z',delivery:false,address:'Self pickup'};
+  const first=await jsonRequest('/api/v1/fleet-orders','POST',base,login.accessToken,{'Idempotency-Key':'atomic-fleet-001'});
+  assert.equal(first.status,201);
+  const firstPayload=await first.json();
+  assert.equal(firstPayload.order.items.length,2);
+  const replay=await jsonRequest('/api/v1/fleet-orders','POST',base,login.accessToken,{'Idempotency-Key':'atomic-fleet-001'});
+  assert.equal(replay.status,201);
+  assert.equal((await replay.json()).order.id,firstPayload.order.id);
+  const invalid=await jsonRequest('/api/v1/quotes/multi','POST',{...base,vehicleIds:[one.id,'does-not-belong']},login.accessToken);
+  assert.equal(invalid.status,403);
+});
+
+test('multi-vehicle checkout rolls back all staged bookings when a selected vehicle becomes unavailable', async () => {
+  const vc=await register('+911234569007','Rollback Fleet Vendor');
+  const vendor=await repository.ensureVendorForCustomer(vc.customer.id);
+  const one=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Rollback One',make:'RideOn',model:'1',year:2035,city:'Udaipur',dailyRate:1000,securityDeposit:0,registrationNumber:'RJ14ROLL001',description:'1',imageUrls:[],deliveryAvailable:false,active:true});
+  const two=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Rollback Two',make:'RideOn',model:'2',year:2035,city:'Udaipur',dailyRate:1500,securityDeposit:0,registrationNumber:'RJ14ROLL002',description:'2',imageUrls:[],deliveryAvailable:false,active:true});
+  const customer=await register('+911234569008','Rollback Customer');
+  const futureStart='2045-05-10T10:00:00.000Z',futureEnd='2045-05-12T10:00:00.000Z';
+  const result=await repository.quoteMultiVehicle({customerId:customer.customer.id,vendorId:vendor.id,vehicleIds:[one.id,two.id],startAt:futureStart,endAt:futureEnd,delivery:false});
+  assert.equal(result.items.length,2);
+  const competing=await repository.createBooking({customerId:customer.customer.id,vehicle:two,startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup',pricing:{days:2,rental:3000,deliveryFee:0,platformFee:150,securityDeposit:0,total:3150,currency:'INR',currencyUnit:'rupees'},notes:null,idempotencyKey:'rollback-competing'});
+  assert.ok(competing.id);
+  await assert.rejects(()=>repository.createFleetOrder({customerId:customer.customer.id,vendorId:vendor.id,vehicleIds:[one.id,two.id],startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup'}),e=>e.code==='MULTI_VEHICLE_UNAVAILABLE');
 });
 
 test.after(async () => {
