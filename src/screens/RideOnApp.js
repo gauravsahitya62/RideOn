@@ -19,7 +19,7 @@ const formatDateValue = date => {
   return `${y}-${m}-${d}`;
 };
 const parseDateValue = value => {
-  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(String(value || ''))) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return null;
   const [y, m, d] = String(value).split('-').map(Number);
   const date = new Date(y, m - 1, d);
   return Number.isNaN(date.getTime()) ? null : date;
