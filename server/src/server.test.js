@@ -958,10 +958,10 @@ test('payment webhook signature and payload are validated', () => {
   assert.equal(service.parseWebhook({...valid,amountPaise:0}),null);
 });
 
-test('real production provider without verified UPI integration fails closed', async () => {
-  const service = createPaymentService({ provider:'paytm',merchantId:'m',clientId:'c',clientSecret:'s',website:'w',callbackUrl:'cb' });
+test('real provider without implemented checkout fails closed', async () => {
+  const service = createPaymentService({ provider:'razorpay',keyId:'rzp_test_m',keySecret:'s',webhookSecret:'w' });
   assert.equal(service.configured,true);
-  await assert.rejects(() => service.createCustomerPayment({orderId:'rideon-test',amountPaise:10000}),(error)=>error.code==='UPI_PROVIDER_INTEGRATION_REQUIRED');
+  await assert.rejects(() => service.createCustomerPayment({orderId:'rideon-test',amountPaise:10000}),(error)=>error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
 });
 
 test('unconfigured provider exposes no customer UPI methods and fails closed', async () => {
