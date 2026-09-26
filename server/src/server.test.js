@@ -892,6 +892,51 @@ test('customer booking APIs remain customer-role protected', async () => {
 });
 
 
+test('payment creation enforces booking ownership and ignores client amount fields', async () => {
+  const owner=await register('+911234568050','Payment Owner');
+  const other=await register('+911234568051','Payment Other');
+  const ownerLogin=await legacyLogin('+911234568050');
+  const otherLogin=await legacyLogin('+911234568051');
+  const created=await jsonRequest('/api/v1/bookings','POST',{
+    vehicleId:'activa-01',
+    startAt:'2045-01-10T10:00:00.000Z',
+    endAt:'2045-01-11T10:00:00.000Z',
+    delivery:false,
+    address:'20 Payment Ownership Road, Jaipur',
+  },ownerLogin.accessToken,{'Idempotency-Key':'payment-owner-booking'});
+  assert.equal(created.status,201);
+  const booking=(await created.json()).booking;
+  const forbidden=await jsonRequest('/api/v1/payments/create-order','POST',{bookingId:booking.bookingId,amountPaise:1},otherLogin.accessToken);
+  assert.equal(forbidden.status,404);
+  const payment=await jsonRequest('/api/v1/payments/create-order','POST',{bookingId:booking.bookingId,amountPaise:1},ownerLogin.accessToken,{ 'Idempotency-Key':'payment-create-owner' });
+  assert.equal(payment.status,201);
+  const payload=await payment.json();
+  assert.equal(payload.payment.amountPaise,Math.round(booking.pricing.total*100));
+  assert.notEqual(payload.payment.amountPaise,1);
+  assert.equal(payload.payment.currency,'INR');
+  assert.equal(payload.payment.provider,'mock');
+});
+
+test('fleet order payment uses the server-authoritative fleet total', async () => {
+  const user=await register('+911234568052','Fleet Payment User');
+  const login=await legacyLogin('+911234568052');
+  const orderResponse=await jsonRequest('/api/v1/fleet-orders','POST',{
+    vehicleIds:['activa-01','classic-01'],
+    pickupAt:'2045-02-10T10:00:00.000Z',
+    returnAt:'2045-02-11T10:00:00.000Z',
+    delivery:false,
+    address:'21 Fleet Payment Road, Jaipur',
+  },login.accessToken,{'Idempotency-Key':'fleet-payment-order'});
+  assert.equal(orderResponse.status,201);
+  const order=(await orderResponse.json()).order;
+  const paymentResponse=await jsonRequest('/api/v1/fleet-orders/'+order.id+'/payment','POST',{idempotencyKey:'fleet-payment-create'},login.accessToken);
+  assert.equal(paymentResponse.status,201);
+  const payment=(await paymentResponse.json()).payment;
+  assert.equal(payment.amountPaise,Math.round(Number(order.total)*100));
+  assert.equal(payment.currency,'INR');
+  assert.equal(payment.provider,'mock');
+});
+
 test('payment creation rejects anonymous callers', async () => {
   const response = await jsonRequest('/api/v1/payments/create-order','POST',{bookingId:'00000000-0000-0000-0000-000000000000'});
   assert.equal(response.status,401);
