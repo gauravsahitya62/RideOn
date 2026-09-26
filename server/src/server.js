@@ -677,6 +677,7 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
     if(new Date(order.quoteExpiresAt)<=new Date())return res.status(409).json({error:{code:'QUOTE_EXPIRED',message:'This fleet quote has expired. Please recheck availability.'}});
     const amountPaise=Math.round(Number(order.total)*100);
     const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise});
+    console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',fleetOrderId:order.id}));
     const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
     const checkoutUrl=paymentProvider==='razorpay'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
     res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:checkoutUrl,amount:result.payment.amountPaise,currency:'INR'},order});
