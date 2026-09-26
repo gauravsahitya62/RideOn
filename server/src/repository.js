@@ -2297,12 +2297,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
   return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
-}
-+params.length);}
-    const orderBy=sortValue==='price_asc'?'v.daily_rate_paise asc':sortValue==='price_desc'?'v.daily_rate_paise desc':'v.name asc';
-    params.push(safeLimit,safeOffset);
-    const {rows}=await pool.query(
-      'select v.id,v.owner_id,v.type,v.name,v.make,v.model,v.year,v.city,v.daily_rate_paise,v.security_deposit_paise,v.transmission,v.fuel,v.seats,v.variant,v.color,v.pickup_location,v.service_area,v.fleet_vehicle_class,v.operational_state,v.maintenance_required,v.description,v.image_urls,v.delivery_available,v.active,v.created_at,v.updated_at from vehicles v where '+where.join(' and ')+' order by '+orderBy+' nulls last limit   async function getRideOnFleetVehicle(vehicleId) {
+
     if(!useDatabase){
       const v=[...memory.vehicles.values()].find(x=>String(x.id)===String(vehicleId)&&x.active!==false);
       return v||null;
@@ -11031,12 +11026,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
   return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
-}
-+params.length);}
-    const orderBy=sortValue==='price_asc'?'v.daily_rate_paise asc':sortValue==='price_desc'?'v.daily_rate_paise desc':'v.name asc';
-    params.push(safeLimit,safeOffset);
-    const {rows}=await pool.query(
-      'select v.id,v.owner_id,v.type,v.name,v.make,v.model,v.year,v.city,v.daily_rate_paise,v.security_deposit_paise,v.transmission,v.fuel,v.seats,v.variant,v.color,v.pickup_location,v.service_area,v.fleet_vehicle_class,v.operational_state,v.maintenance_required,v.description,v.image_urls,v.delivery_available,v.active,v.created_at,v.updated_at from vehicles v where '+where.join(' and ')+' order by '+orderBy+' nulls last limit   async function getRideOnFleetVehicle(vehicleId) {
+
     if(!useDatabase){
       const v=[...memory.vehicles.values()].find(x=>String(x.id)===String(vehicleId)&&x.active!==false);
       return v||null;
@@ -19772,12 +19762,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
   return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
-}
-+params.length);}
-    const orderBy=sortValue==='price_asc'?'v.daily_rate_paise asc':sortValue==='price_desc'?'v.daily_rate_paise desc':'v.name asc';
-    params.push(safeLimit,safeOffset);
-    const {rows}=await pool.query(
-      'select v.id,v.owner_id,v.type,v.name,v.make,v.model,v.year,v.city,v.daily_rate_paise,v.security_deposit_paise,v.transmission,v.fuel,v.seats,v.variant,v.color,v.pickup_location,v.service_area,v.fleet_vehicle_class,v.operational_state,v.maintenance_required,v.description,v.image_urls,v.delivery_available,v.active,v.created_at,v.updated_at from vehicles v where '+where.join(' and ')+' order by '+orderBy+' nulls last limit   async function getRideOnFleetVehicle(vehicleId) {
+
     if(!useDatabase){
       const v=[...memory.vehicles.values()].find(x=>String(x.id)===String(vehicleId)&&x.active!==false);
       return v||null;
