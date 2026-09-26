@@ -235,7 +235,7 @@ No production host/account, domain, database instance, or payment credentials ar
 RideOn should not be treated as production-ready solely because CI is green. Remaining launch work includes:
 
 - provisioning and verifying a real PostgreSQL environment;
-- selecting and implementing a real payment provider;
+- completing a live Razorpay sandbox and low-value production device transaction;
 - device/emulator end-to-end testing of the customer journey;
 - production mobile build/signing configuration and a release build;
 - backups, monitoring, alerting, and operational runbooks;
