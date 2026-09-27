@@ -477,7 +477,18 @@ app.post('/api/v1/fleet-ops/rentals/overdue/check',supabaseRequireAuth,requireFl
 app.get('/api/v1/fleet-ops/bookings',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const bookings=await repository.getFleetBookingOperations({limit:req.query.limit});res.json({bookings,data:bookings});}catch(error){res.status(503).json({error:{code:'FLEET_OPERATIONS_UNAVAILABLE',message:'Rental operations are temporarily unavailable.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/inspection',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({vehicleId:z.string().min(1).max(64),inspectionType:z.enum(['pickup','return','maintenance','routine']).default('return'),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),exteriorCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),inspectionStatus:z.enum(['pending','passed','failed','damage_review']).default('passed'),conditionPhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid inspection details.',details:p.error.flatten()}});try{const result=await repository.recordFleetInspection({bookingId:req.params.id,...p.data,actorUserId:req.user.id});res.json(result);}catch(error){res.status(409).json({error:{code:error?.code||'INSPECTION_FAILED',message:error?.message||'Inspection could not be completed.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/deposit/settle',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({deductionPaise:z.number().int().min(0).default(0),reason:z.string().max(2000).optional().default(''),evidenceReference:z.string().max(500).optional().default(''),refundProviderReference:z.string().max(255).optional().default('')}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid deposit settlement details.',details:p.error.flatten()}});try{const result=await repository.settleFleetSecurityDeposit({bookingId:req.params.id,actorUserId:req.user.id,...p.data});res.json(result);}catch(error){const status=['DEPOSIT_ALREADY_SETTLED','DEPOSIT_SETTLEMENT_NOT_ALLOWED','DEPOSIT_DEDUCTION_INVALID','DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'].includes(error?.code)?409:error?.code==='FORBIDDEN'?403:404;res.status(status).json({error:{code:error?.code||'DEPOSIT_SETTLEMENT_FAILED',message:error?.message||'Security deposit settlement could not be completed.'}});}});
-app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => { res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...(payments.capabilities||{})}}); });
+app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => {
+  const capabilities={...(payments.capabilities||{})};
+  // App availability is resolved by the native Cashfree SDK at runtime. Never claim
+  // a specific UPI app is installed from the server.
+  capabilities.apps=Array.isArray(capabilities.apps)?capabilities.apps:[];
+  if(capabilities.provider==='cashfree'){
+    capabilities.supportsIntent=true;
+    capabilities.supportsVpa=true;
+    capabilities.appAvailability='device_runtime';
+  }
+  res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...capabilities}});
+});
 
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
@@ -1631,6 +1642,35 @@ app.get('/api/v1/payments/checkout/callback', async (req,res) => {
   }catch(error){
     console.error(JSON.stringify({level:'error',event:'payment_checkout_callback_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_CALLBACK_FAILED'}));
     res.status(error?.code==='PAYMENT_VERIFICATION_PENDING'?409:502).type('html').send(checkoutPage({status:'pending',title:'Payment status pending',message:'RideOn could not complete provider verification yet. Return to the app and refresh payment status.',returnUrl:'rideon://payment-return'}));
+  }
+});
+
+app.get('/api/v1/payments/:id/status', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
+  const payment=await repository.findPaymentById(req.params.id, req.user.id);
+  if(!payment) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
+  const booking=await repository.getBooking(payment.bookingId, req.user.id);
+  if(!booking || (req.query.bookingId && String(booking.id)!==String(req.query.bookingId))) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
+  if(payment.status==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
+  try {
+    const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
+    if(verified?.status==='failed'){
+      const applied=await repository.applyPaymentEvent({eventId:`status-failed:${payment.id}:${verified.providerPaymentId||verified.providerReference||'unknown'}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
+      if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking payment.'}});
+    } else if(verified?.verified){
+      const providerReference=String(verified.providerReference||payment.providerReference||payment.providerPaymentId||'').trim();
+      if(providerReference){
+        const applied=await repository.applyPaymentEvent({eventId:`status-paid:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(verified.amountPaise||payment.amountPaise),currency:'INR',status:'paid'});
+        if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
+      }
+    }
+    const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
+    const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
+    return res.json({payment:latestPayment,verification:verified?.verified?'verified':verified?.status==='failed'?'failed':'pending',bookingPaymentStatus:latestBooking?.paymentStatus||latestPayment?.status||'pending'});
+  } catch(error) {
+    if(error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Cashfree payment verification is not configured on the RideOn server.'}});
+    if(error?.code==='PAYMENT_PROVIDER_REQUEST_FAILED') return res.status(502).json({error:{code:error.code,message:'Cashfree payment verification could not be completed. Please retry.'}});
+    if(error?.code==='PAYMENT_PROVIDER_TIMEOUT') return res.status(504).json({error:{code:error.code,message:'Cashfree payment verification timed out. Please retry.'}});
+    throw error;
   }
 });
 
