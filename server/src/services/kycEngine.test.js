@@ -153,3 +153,77 @@ test('Cashfree Secure ID adapter sends the Driving Licence payload and maps id_f
     }
   }
 });
+
+
+test('Cashfree Secure ID DigiLocker Aadhaar flow creates URL and fetches authenticated document', async () => {
+  const envKeys = [
+    'KYC_PROVIDER','KYC_PROVIDER_VERIFY_URL','KYC_PROVIDER_CLIENT_ID',
+    'KYC_PROVIDER_CLIENT_SECRET','KYC_PROVIDER_API_VERSION'
+  ];
+  const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+
+  try {
+    process.env.KYC_PROVIDER='cashfree';
+    process.env.KYC_PROVIDER_VERIFY_URL='https://sandbox.cashfree.com/verification/driving-license';
+    process.env.KYC_PROVIDER_CLIENT_ID='test-client';
+    process.env.KYC_PROVIDER_CLIENT_SECRET='test-secret';
+    process.env.KYC_PROVIDER_API_VERSION='2024-12-01';
+
+    globalThis.fetch = async (url, options) => {
+      calls.push({url,options});
+      if (options?.method === 'POST') {
+        return new Response(JSON.stringify({
+          verification_id:'kyc-aadhaar-1',
+          reference_id:456,
+          url:'https://sandbox.cashfree.com/verification/digilocker/test',
+          status:'PENDING',
+          document_requested:['AADHAAR'],
+        }), {status:200,headers:{'content-type':'application/json'}});
+      }
+      if (String(url).includes('/digilocker/document/AADHAAR')) {
+        return new Response(JSON.stringify({
+          status:'SUCCESS',
+          uid:'XXXX-XXXX-1234',
+          name:'RideOn Test User',
+        }), {status:200,headers:{'content-type':'application/json'}});
+      }
+      return new Response(JSON.stringify({
+        status:'AUTHENTICATED',
+        verification_id:'kyc-aadhaar-1',
+        reference_id:456,
+        document_requested:['AADHAAR'],
+        document_consent:['AADHAAR'],
+      }), {status:200,headers:{'content-type':'application/json'}});
+    };
+
+    const provider=createProviderFromEnv();
+    const created=await provider.createAadhaarDigiLockerUrl({
+      verificationId:'verification-1',
+      redirectUrl:'https://rideon-api-262g.onrender.com/api/v1/kyc/digilocker/callback',
+    });
+    assert.equal(created.verification_id,'kyc-aadhaar-1');
+    assert.equal(calls[0].url,'https://sandbox.cashfree.com/verification/digilocker');
+    assert.deepEqual(JSON.parse(calls[0].options.body),{
+      verification_id:'verification-1',
+      document_requested:['AADHAAR'],
+      redirect_url:'https://rideon-api-262g.onrender.com/api/v1/kyc/digilocker/callback',
+    });
+
+    const status=await provider.getAadhaarDigiLockerStatus({verificationId:'kyc-aadhaar-1'});
+    assert.equal(status.status,'AUTHENTICATED');
+
+    const document=await provider.getAadhaarDigiLockerDocument({verificationId:'kyc-aadhaar-1'});
+    assert.equal(document.status,'SUCCESS');
+    assert.equal(document.uid,'XXXX-XXXX-1234');
+    assert.match(calls[1].url,/\/digilocker\?/);
+    assert.match(calls[2].url,/\/digilocker\/document\/AADHAAR\?/);
+  } finally {
+    globalThis.fetch=originalFetch;
+    for (const key of envKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key]=previous[key];
+    }
+  }
+});
