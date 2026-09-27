@@ -2,8 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  CameraRoll,
-  Platform,
+  TextInput,
   ScrollView,
   StyleSheet,
   Text,
@@ -168,15 +167,18 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
         </View>
 
         <Text style={styles.inputLabel}>DOCUMENT NUMBER</Text>
-        <View style={styles.input}>
-          <Text style={styles.inputText}>{documentNumber || 'Enter your document number in the field above'}</Text>
-        </View>
-        <View style={styles.numberInputWrap}>
-          <Text style={styles.numberPlaceholder}>{documentType === 'DRIVING_LICENSE' ? 'DL number' : 'Aadhaar number'}</Text>
-          <TouchableOpacity style={styles.hiddenEntry} onPress={() => {}}>
-            <Text style={styles.hiddenEntryText}>{documentNumber || 'Use the document number field in your keyboard input.'}</Text>
-          </TouchableOpacity>
-        </View>
+        <TextInput
+          value={documentNumber}
+          onChangeText={setDocumentNumber}
+          autoCapitalize="characters"
+          autoCorrect={false}
+          keyboardType="default"
+          placeholder={documentType === 'DRIVING_LICENSE' ? 'DL number' : 'Aadhaar number'}
+          placeholderTextColor="#A0A7B1"
+          style={styles.numberInputWrap}
+          editable={!busy}
+          accessibilityLabel="Identity document number"
+        />
 
         <TouchableOpacity style={styles.captureCard} onPress={() => capture('document')} disabled={Boolean(captureBusy) || busy}>
           <View style={styles.captureIcon}><Text style={styles.captureIconText}>ID</Text></View>
@@ -243,12 +245,7 @@ const styles = StyleSheet.create({
   choiceText:{fontSize:12,fontWeight:'800',color:C.muted},
   choiceTextActive:{color:C.ink},
   inputLabel:{fontSize:10,fontWeight:'900',letterSpacing:1,color:C.muted,marginBottom:7},
-  input:{display:'none'},
-  inputText:{fontSize:14},
-  numberInputWrap:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:15,minHeight:52,justifyContent:'center',paddingHorizontal:15,marginBottom:12},
-  numberPlaceholder:{fontSize:14,color:C.muted},
-  hiddenEntry:{display:'none'},
-  hiddenEntryText:{fontSize:14,color:C.ink},
+  numberInputWrap:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:15,minHeight:52,paddingHorizontal:15,fontSize:14,color:C.ink,marginBottom:12},
   captureCard:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:18,padding:14,flexDirection:'row',alignItems:'center',gap:12,marginBottom:20},
   captureIcon:{width:46,height:46,borderRadius:15,backgroundColor:'#FFF0E9',alignItems:'center',justifyContent:'center'},
   captureIconText:{fontSize:12,fontWeight:'900',color:C.orange},
