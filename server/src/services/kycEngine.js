@@ -154,8 +154,9 @@ class HttpKycProvider {
 
     return {
       eventId,
+      clientReferenceId: String(firstValue(payload, ['clientReferenceId','client_reference_id','data.clientReferenceId','data.client_reference_id']) || ''),
       providerVerificationId: String(firstValue(payload, [
-        'verificationId','requestId','referenceId','clientReferenceId','id',
+        'verificationId','requestId','referenceId','id',
         'data.verificationId','data.requestId','data.referenceId','data.id',
       ]) || ''),
       status,
@@ -377,8 +378,11 @@ export class KycEngine {
     const existingEvent = await this.repository.findKycVerificationByProviderEvent(event.eventId);
     if (existingEvent) return { duplicate:true, verification:existingEvent };
 
-    let verification = event.providerVerificationId
-      ? await this.repository.findKycVerificationByProviderReference({
+    let verification = event.clientReferenceId && this.repository.findKycVerificationById
+      ? await this.repository.findKycVerificationById(event.clientReferenceId)
+      : null;
+
+    if (!verification && event.providerVerificationId) verification = await this.repository.findKycVerificationByProviderReference({
           provider:this.provider.name,
           providerVerificationId:event.providerVerificationId,
         })
