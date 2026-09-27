@@ -493,6 +493,60 @@ app.get('/api/v1/kyc/status', supabaseRequireAuth, requireCustomer, async (req,r
   }
 });
 
+app.post('/api/v1/kyc/aadhaar/start', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
+  if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
+  try {
+    const redirectUrl=String(
+      process.env.KYC_DIGILOCKER_REDIRECT_URL ||
+      'https://rideon-api-262g.onrender.com/api/v1/kyc/digilocker/callback'
+    ).trim();
+    const result=await kycEngine.startAadhaarDigiLocker({customerId:req.user.id,redirectUrl});
+    return res.status(201).json({
+      success:true,
+      verificationId:result.verificationId,
+      referenceId:result.referenceId,
+      status:result.status,
+      url:result.url,
+      kyc:publicKycVerification(result.verification),
+    });
+  } catch(error) {
+    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_start_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_AADHAAR_START_FAILED'}));
+    const status=error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
+    return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_START_FAILED',message:
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
+      error?.message || 'Could not start Aadhaar verification. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/kyc/aadhaar/sync', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
+  const parsed=z.object({verificationId:z.string().uuid()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'KYC_VALIDATION_ERROR',message:'A valid Aadhaar verification ID is required.',details:parsed.error.flatten()}});
+  if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
+  try {
+    const verification=await kycEngine.syncAadhaarDigiLocker({customerId:req.user.id,verificationId:parsed.data.verificationId});
+    return res.status(verification?.documentStatus==='APPROVED'?200:202).json({
+      success:true,
+      kyc:publicKycVerification(verification),
+    });
+  } catch(error) {
+    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_sync_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_AADHAAR_SYNC_FAILED'}));
+    const status=error?.code==='KYC_NOT_FOUND'?404:error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
+    return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_SYNC_FAILED',message:
+      error?.code==='KYC_NOT_FOUND'?'Aadhaar verification was not found.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
+      error?.message || 'Could not update Aadhaar verification status. Please retry.'}});
+  }
+});
+
+app.get('/api/v1/kyc/digilocker/callback', async (req,res) => {
+  const verificationId=String(req.query?.verification_id || '').trim();
+  if(!verificationId) return res.status(400).send('<!doctype html><title>RideOn KYC</title><p>Missing verification reference.</p>');
+  const target='rideon://kyc/aadhaar?verification_id=' + encodeURIComponent(verificationId);
+  return res.redirect(302,target);
+});
+
 app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
   const parsed=z.object({
     documentType:z.literal('DRIVING_LICENSE'),
