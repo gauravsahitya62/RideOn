@@ -118,6 +118,7 @@ KYC_PROVIDER_CLIENT_ID=<Cashfree Secure ID Client ID>
 KYC_PROVIDER_CLIENT_SECRET=<Cashfree Secure ID Client Secret>
 KYC_PROVIDER_API_VERSION=2024-12-01
 KYC_PROVIDER_VERIFY_URL=https://sandbox.cashfree.com/verification/driving-license
+KYC_DIGILOCKER_REDIRECT_URL=https://rideon-api-262g.onrender.com/api/v1/kyc/digilocker/callback
 KYC_WEBHOOK_URL=https://rideon-api-262g.onrender.com/api/v1/kyc/webhook
 KYC_PROVIDER_TIMEOUT_MS=30000
 KYC_LIVENESS_THRESHOLD=0.70
@@ -130,14 +131,14 @@ KYC_PROVIDER_VERIFY_URL is optional for Cashfree because the adapter derives it 
 
 ## Mobile
 
-The current mobile KYC flow collects:
+The current mobile KYC flow supports two methods:
 
-1. Driving Licence number
-2. Date of birth in YYYY-MM-DD format
+1. Driving Licence number + date of birth, verified through Cashfree Secure ID.
+2. Aadhaar through Cashfree Secure ID DigiLocker consent. The app opens the Cashfree DigiLocker URL in the browser and synchronizes the verification status when the customer returns to RideOn.
 
-The backend sends these values directly to Cashfree Secure ID. Cashfree credentials are never sent to the Expo application.
+The backend sends the Driving Licence fields directly to Cashfree Secure ID. For Aadhaar, RideOn does not ask the customer to type an Aadhaar number; Cashfree handles the DigiLocker consent journey. Cashfree credentials are never sent to the Expo application.
 
-DigiLocker/Aadhaar and Secure ID biometric products remain separate integrations and are not presented as completed by the current Driving Licence flow.
+RideOn stores the KYC status and provider reference needed to reconcile the verification. Raw Aadhaar numbers are not collected by the mobile flow.
 
 ## Future B2B extraction
 
