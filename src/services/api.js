@@ -241,6 +241,8 @@ export const rideOnApi = {
   getVendorCustomerReviews: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/customer-reviews`),
   updateVendorBookingStatus: (id,payload) => request(`/api/v1/vendor/bookings/${encode(id)}/status`, { method:'PATCH', body:JSON.stringify(payload) }),
   getPaymentCapabilities: () => request('/api/v1/payments/capabilities'),
+  getPaymentStatus: (paymentId, bookingId) => request(`/api/v1/payments/${encode(paymentId)}/status?bookingId=${encode(bookingId)}`),
+
   createPaymentOrder: (payload) => request('/api/v1/payments/create-order', { method:'POST', body:JSON.stringify(payload) }),
   getPayment: (id) => request(`/api/v1/payments/${encode(id)}`),
   getPaymentByBooking: async (bookingId) => {
