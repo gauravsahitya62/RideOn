@@ -1634,6 +1634,35 @@ app.get('/api/v1/payments/checkout/callback', async (req,res) => {
   }
 });
 
+app.get('/api/v1/payments/:id/status', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
+  const payment=await repository.findPaymentById(req.params.id, req.user.id);
+  if(!payment) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
+  const booking=await repository.getBooking(payment.bookingId, req.user.id);
+  if(!booking || (req.query.bookingId && String(booking.id)!==String(req.query.bookingId))) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
+  if(payment.status==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
+  try {
+    const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
+    if(verified?.status==='failed'){
+      const applied=await repository.applyPaymentEvent({eventId:`status-failed:${payment.id}:${verified.providerPaymentId||verified.providerReference||'unknown'}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
+      if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking payment.'}});
+    } else if(verified?.verified){
+      const providerReference=String(verified.providerReference||payment.providerReference||payment.providerPaymentId||'').trim();
+      if(providerReference){
+        const applied=await repository.applyPaymentEvent({eventId:`status-paid:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(verified.amountPaise||payment.amountPaise),currency:'INR',status:'paid'});
+        if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
+      }
+    }
+    const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
+    const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
+    return res.json({payment:latestPayment,verification:verified?.verified?'verified':verified?.status==='failed'?'failed':'pending',bookingPaymentStatus:latestBooking?.paymentStatus||latestPayment?.status||'pending'});
+  } catch(error) {
+    if(error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Cashfree payment verification is not configured on the RideOn server.'}});
+    if(error?.code==='PAYMENT_PROVIDER_REQUEST_FAILED') return res.status(502).json({error:{code:error.code,message:'Cashfree payment verification could not be completed. Please retry.'}});
+    if(error?.code==='PAYMENT_PROVIDER_TIMEOUT') return res.status(504).json({error:{code:error.code,message:'Cashfree payment verification timed out. Please retry.'}});
+    throw error;
+  }
+});
+
 app.get('/api/v1/payments/:id', supabaseRequireAuth, requireCustomer, async (req,res) => {
   const payment=await repository.findPaymentById(req.params.id, req.user.id);
   if(!payment) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
