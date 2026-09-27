@@ -768,7 +768,8 @@ app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (re
     const order=await repository.createFleetOrder({customerId:req.user.id,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
     res.status(201).json({order,data:order});
   }catch(error){
-    const map={INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404,VEHICLE_NOT_FOUND:404};
+    const map={KYC_REQUIRED:403,INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404,VEHICLE_NOT_FOUND:404};
+    if(error?.code==='KYC_REQUIRED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
     res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_ORDER_FAILED',message:error?.code==='MULTI_VEHICLE_UNAVAILABLE'?'One or more selected vehicles became unavailable. No vehicles were booked.':'We could not create the fleet booking. Please retry.',vehicleIds:error?.vehicleIds}});
   }
 });
@@ -1587,6 +1588,7 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
     res.status(201).json({ data: publicBooking(booking), booking: publicBooking(booking) });
   } catch (error) {
     if (error.code === 'IDEMPOTENCY_REPLAY') return res.status(200).json({ data: publicBooking(error.booking), booking: publicBooking(error.booking) });
+    if (error.code === 'KYC_REQUIRED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
     if (error.code === 'VEHICLE_UNAVAILABLE') return res.status(409).json({ error: { code: 'VEHICLE_UNAVAILABLE', message: 'This vehicle is unavailable for part of those dates.' } });
     if (error.code === 'VEHICLE_INACTIVE') return res.status(409).json({ error:{code:'VEHICLE_INACTIVE',message:'This vehicle is not currently available for booking.'} });
     if (error.code === 'VEHICLE_NOT_FOUND') return res.status(404).json({ error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'} });
