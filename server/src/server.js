@@ -440,6 +440,16 @@ const requireRole = (...roles) => (req, res, next) => {
 
 const requireCustomer = requireRole('customer');
 
+const publicKycVerification = (verification) => verification ? ({
+  id:verification.id,
+  clientId:verification.clientId,
+  documentType:verification.documentType,
+  documentStatus:verification.documentStatus,
+  submittedAt:verification.submittedAt,
+  verifiedAt:verification.verifiedAt,
+  decisionReason:verification.decisionReason || null,
+}) : null;
+
 const KYC_REQUIRED_RESPONSE = {
   success: false,
   error_code: 'KYC_REQUIRED',
@@ -477,7 +487,7 @@ app.get('/api/v1/kyc/status', supabaseRequireAuth, requireCustomer, async (req,r
     const status = await repository.getKycStatus(req.user.id);
     if (!status) return res.status(404).json({error:{code:'USER_NOT_FOUND',message:'RideOn account not found.'}});
     const active = status.activeKycId ? await repository.getKycVerification(status.activeKycId, req.user.id) : null;
-    res.json({kyc:{status:status.status,activeVerification:active}});
+    res.json({kyc:{status:status.status,activeVerification:publicKycVerification(active)}});
   } catch(error) {
     console.error(JSON.stringify({level:'error',event:'kyc_status_failed',requestId:req.requestId,code:error?.code||'KYC_STATUS_FAILED'}));
     res.status(503).json({error:{code:'KYC_UNAVAILABLE',message:'Identity verification status is temporarily unavailable.'}});
@@ -495,7 +505,7 @@ app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimi
   if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
   try {
     const verification=await kycEngine.verify({customerId:req.user.id,...parsed.data});
-    res.status(verification?.documentStatus==='APPROVED'?200:202).json({success:true,kyc:verification});
+    res.status(verification?.documentStatus==='APPROVED'?200:202).json({success:true,kyc:publicKycVerification(verification)});
   } catch(error) {
     const statusByCode={
       INVALID_DOCUMENT_NUMBER:400,
