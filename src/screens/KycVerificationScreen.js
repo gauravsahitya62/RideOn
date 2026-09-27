@@ -1,7 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  Linking,
   ScrollView,
   StyleSheet,
   Text,
@@ -23,27 +25,98 @@ const C = {
   danger:'#B23B3B',
 };
 
+const extractVerificationId = (url) => {
+  const match = String(url || '').match(/[?&]verification_id=([^&]+)/i);
+  return match ? decodeURIComponent(match[1]) : null;
+};
+
 export default function KycVerificationScreen({ onBack, onVerified }) {
+  const [method, setMethod] = useState('DRIVING_LICENSE');
   const [documentNumber, setDocumentNumber] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
   const [status, setStatus] = useState('UNVERIFIED');
   const [verification, setVerification] = useState(null);
+  const [aadhaarVerificationId, setAadhaarVerificationId] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const appState = useRef(AppState.currentState);
+
+  const applyKyc = (next) => {
+    setVerification(next || null);
+    setStatus(next?.documentStatus || 'UNVERIFIED');
+    if (next?.documentStatus === 'APPROVED') {
+      onVerified?.(next);
+    }
+    return next;
+  };
 
   const loadStatus = async () => {
     try {
       const result = await rideOnApi.getKycStatus();
-      setStatus(result?.kyc?.status || 'UNVERIFIED');
-      setVerification(result?.kyc?.activeVerification || null);
+      applyKyc(result?.kyc?.activeVerification || null);
     } catch (e) {
       setError(e?.message || 'We could not load your verification status.');
     }
   };
 
-  useEffect(() => { loadStatus(); }, []);
+  const syncAadhaar = async (verificationId) => {
+    if (!verificationId || busy) return null;
+    try {
+      setBusy(true);
+      setError('');
+      const result = await rideOnApi.syncAadhaarKyc(verificationId);
+      const next = applyKyc(result?.kyc);
+      if (next?.documentStatus === 'APPROVED') {
+        Alert.alert('Aadhaar verified', 'Your Aadhaar identity has been verified through Cashfree Secure ID. You can now book RideOn vehicles.');
+      } else if (next?.documentStatus === 'REJECTED') {
+        setError('Aadhaar verification was not approved. Please start the verification again.');
+      }
+      return next;
+    } catch (e) {
+      if (e?.status !== 202) {
+        setError(e?.message || 'We could not update Aadhaar verification status.');
+      }
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  const submit = async () => {
+  useEffect(() => {
+    loadStatus();
+
+    const handleUrl = ({ url }) => {
+      const id = extractVerificationId(url);
+      if (id) {
+        setAadhaarVerificationId(id);
+        syncAadhaar(id);
+      }
+    };
+
+    const subscription = Linking.addEventListener('url', handleUrl);
+    Linking.getInitialURL().then((url) => {
+      const id = extractVerificationId(url);
+      if (id) {
+        setAadhaarVerificationId(id);
+        syncAadhaar(id);
+      }
+    }).catch(() => {});
+
+    const appSubscription = AppState.addEventListener('change', (nextState) => {
+      const wasBackgrounded = appState.current === 'background' || appState.current === 'inactive';
+      appState.current = nextState;
+      if (wasBackgrounded && nextState === 'active' && aadhaarVerificationId) {
+        syncAadhaar(aadhaarVerificationId);
+      }
+    });
+
+    return () => {
+      subscription.remove();
+      appSubscription.remove();
+    };
+  }, [aadhaarVerificationId]);
+
+  const submitDrivingLicence = async () => {
     setError('');
     const number = documentNumber.trim().toUpperCase();
     const dob = dateOfBirth.trim();
@@ -58,21 +131,11 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
         documentNumber:number,
         dateOfBirth:dob,
       });
-      const next = result?.kyc;
-      setVerification(next || null);
-      setStatus(next?.documentStatus || (result?.success ? 'PENDING' : 'UNVERIFIED'));
-
+      const next = applyKyc(result?.kyc);
       if (next?.documentStatus === 'APPROVED') {
-        Alert.alert(
-          'Identity verified',
-          'Your Driving Licence has been verified by Cashfree Secure ID. You can now book RideOn vehicles.'
-        );
-        onVerified?.(next);
+        Alert.alert('Identity verified', 'Your Driving Licence has been verified by Cashfree Secure ID. You can now book RideOn vehicles.');
       } else {
-        Alert.alert(
-          'Verification submitted',
-          'RideOn is waiting for identity verification confirmation. Booking remains locked until verification is approved.'
-        );
+        Alert.alert('Verification submitted', 'RideOn is waiting for identity verification confirmation. Booking remains locked until verification is approved.');
       }
     } catch (e) {
       setError(
@@ -80,6 +143,23 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
           ? 'Identity verification cannot be completed for this account.'
           : e?.message || 'Identity verification could not be completed. Please try again.'
       );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startAadhaar = async () => {
+    setError('');
+    setBusy(true);
+    try {
+      const result = await rideOnApi.startAadhaarKyc();
+      if (!result?.url || !result?.verificationId) {
+        throw new Error('Cashfree did not return an Aadhaar verification URL.');
+      }
+      setAadhaarVerificationId(result.verificationId);
+      await Linking.openURL(result.url);
+    } catch (e) {
+      setError(e?.message || 'Could not start Aadhaar verification. Please try again.');
     } finally {
       setBusy(false);
     }
@@ -102,14 +182,13 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
             <Text style={styles.back}>‹</Text>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Identity verification</Text>
-          <View style={{ width: 28 }} />
+          <View style={{ width:28 }} />
         </View>
 
         <Text style={styles.kicker}>RIDEON KYC</Text>
         <Text style={styles.title}>Verify your driver credentials</Text>
         <Text style={styles.subtitle}>
-          RideOn verifies your Driving Licence through Cashfree Secure ID before allowing vehicle bookings.
-          Your licence number is hashed for RideOn risk screening and is not stored as plain text.
+          Complete one identity verification through Cashfree Secure ID before booking a RideOn vehicle.
         </Text>
 
         <View style={styles.statusCard}>
@@ -126,32 +205,65 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
           </View>
         </View>
 
-        <Text style={styles.section}>01 — DRIVING LICENCE</Text>
-        <Text style={styles.inputLabel}>LICENCE NUMBER</Text>
-        <TextInput
-          value={documentNumber}
-          onChangeText={setDocumentNumber}
-          autoCapitalize="characters"
-          autoCorrect={false}
-          placeholder="e.g. RJ1420200012345"
-          placeholderTextColor="#A0A7B1"
-          style={styles.input}
-          editable={!busy}
-          accessibilityLabel="Driving Licence number"
-        />
+        <Text style={styles.section}>01 — CHOOSE VERIFICATION</Text>
+        <View style={styles.methodRow}>
+          <TouchableOpacity
+            disabled={busy}
+            onPress={() => { setMethod('DRIVING_LICENSE'); setError(''); }}
+            style={[styles.method, method === 'DRIVING_LICENSE' && styles.methodActive]}
+          >
+            <Text style={[styles.methodTitle, method === 'DRIVING_LICENSE' && styles.methodTitleActive]}>Driving Licence</Text>
+            <Text style={styles.methodText}>Licence number + DOB</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            disabled={busy}
+            onPress={() => { setMethod('AADHAAR'); setError(''); }}
+            style={[styles.method, method === 'AADHAAR' && styles.methodActive]}
+          >
+            <Text style={[styles.methodTitle, method === 'AADHAAR' && styles.methodTitleActive]}>Aadhaar</Text>
+            <Text style={styles.methodText}>DigiLocker consent</Text>
+          </TouchableOpacity>
+        </View>
 
-        <Text style={styles.inputLabel}>DATE OF BIRTH</Text>
-        <TextInput
-          value={dateOfBirth}
-          onChangeText={setDateOfBirth}
-          keyboardType="numbers-and-punctuation"
-          placeholder="YYYY-MM-DD"
-          placeholderTextColor="#A0A7B1"
-          style={styles.input}
-          editable={!busy}
-          maxLength={10}
-          accessibilityLabel="Date of birth"
-        />
+        {method === 'DRIVING_LICENSE' ? (
+          <>
+            <Text style={styles.section}>02 — DRIVING LICENCE</Text>
+            <Text style={styles.inputLabel}>LICENCE NUMBER</Text>
+            <TextInput
+              value={documentNumber}
+              onChangeText={setDocumentNumber}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              placeholder="e.g. RJ1420200012345"
+              placeholderTextColor="#A0A7B1"
+              style={styles.input}
+              editable={!busy}
+              accessibilityLabel="Driving Licence number"
+            />
+            <Text style={styles.inputLabel}>DATE OF BIRTH</Text>
+            <TextInput
+              value={dateOfBirth}
+              onChangeText={setDateOfBirth}
+              keyboardType="numbers-and-punctuation"
+              placeholder="YYYY-MM-DD"
+              placeholderTextColor="#A0A7B1"
+              style={styles.input}
+              editable={!busy}
+              maxLength={10}
+              accessibilityLabel="Date of birth"
+            />
+          </>
+        ) : (
+          <>
+            <Text style={styles.section}>02 — AADHAAR VIA DIGILOCKER</Text>
+            <View style={styles.aadhaarInfo}>
+              <Text style={styles.aadhaarTitle}>Secure Aadhaar verification</Text>
+              <Text style={styles.aadhaarText}>
+                RideOn will open Cashfree Secure ID's DigiLocker journey. You sign in to DigiLocker, give consent to share Aadhaar, and return to RideOn. RideOn does not ask you to type or store your Aadhaar number.
+              </Text>
+            </View>
+          </>
+        )}
 
         {error ? (
           <View style={styles.error}>
@@ -162,18 +274,31 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
         <View style={styles.security}>
           <Text style={styles.securityTitle}>Secure verification</Text>
           <Text style={styles.securityText}>
-            The RideOn backend sends your licence number and date of birth directly to Cashfree Secure ID.
-            Cashfree credentials never reach the mobile app, and RideOn does not store the raw licence number.
+            Cashfree Secure ID credentials stay on the RideOn backend. RideOn stores verification status and limited references, not raw Aadhaar or licence numbers.
           </Text>
         </View>
 
         <TouchableOpacity
           style={[styles.button, busy && { opacity:0.55 }]}
           disabled={busy}
-          onPress={submit}
+          onPress={method === 'AADHAAR' ? startAadhaar : submitDrivingLicence}
         >
-          {busy ? <ActivityIndicator color={C.white} /> : <Text style={styles.buttonText}>Verify Driving Licence</Text>}
+          {busy ? <ActivityIndicator color={C.white} /> : (
+            <Text style={styles.buttonText}>
+              {method === 'AADHAAR' ? 'Continue with Aadhaar' : 'Verify Driving Licence'}
+            </Text>
+          )}
         </TouchableOpacity>
+
+        {method === 'AADHAAR' && aadhaarVerificationId && status === 'PENDING' ? (
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            disabled={busy}
+            onPress={() => syncAadhaar(aadhaarVerificationId)}
+          >
+            <Text style={styles.secondaryButtonText}>Check Aadhaar verification status</Text>
+          </TouchableOpacity>
+        ) : null}
 
         <TouchableOpacity style={styles.backButton} disabled={busy} onPress={onBack}>
           <Text style={styles.backButtonText}>Back to profile</Text>
@@ -197,9 +322,18 @@ const styles = StyleSheet.create({
   statusDotGood:{backgroundColor:C.green},
   statusLabel:{fontSize:11,fontWeight:'900',letterSpacing:.7,color:C.ink},
   statusText:{fontSize:11,color:C.muted,lineHeight:16,marginTop:3},
-  section:{fontSize:10,fontWeight:'900',letterSpacing:1.4,color:C.muted,marginTop:7,marginBottom:10},
+  section:{fontSize:10,fontWeight:'900',letterSpacing:1.4,color:C.muted,marginTop:14,marginBottom:10},
+  methodRow:{flexDirection:'row',gap:10},
+  method:{flex:1,backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:15,padding:13},
+  methodActive:{borderColor:C.orange,backgroundColor:'#FFF5F0'},
+  methodTitle:{fontSize:12,fontWeight:'900',color:C.ink},
+  methodTitleActive:{color:C.orange},
+  methodText:{fontSize:10,color:C.muted,marginTop:4,lineHeight:14},
   inputLabel:{fontSize:10,fontWeight:'900',letterSpacing:1,color:C.muted,marginBottom:7,marginTop:10},
   input:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:15,minHeight:52,paddingHorizontal:15,fontSize:14,color:C.ink,marginBottom:6},
+  aadhaarInfo:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:16,padding:15},
+  aadhaarTitle:{fontSize:13,fontWeight:'900',color:C.ink},
+  aadhaarText:{fontSize:11,color:C.muted,lineHeight:17,marginTop:5},
   security:{backgroundColor:C.paleGreen,borderWidth:1,borderColor:'#D6EDE2',borderRadius:15,padding:14,marginTop:14,marginBottom:12},
   securityTitle:{fontSize:12,fontWeight:'900',color:C.ink,marginBottom:3},
   securityText:{fontSize:10,color:C.muted,lineHeight:15},
@@ -207,6 +341,8 @@ const styles = StyleSheet.create({
   errorText:{fontSize:11,fontWeight:'800',color:C.danger,lineHeight:16},
   button:{height:54,borderRadius:17,backgroundColor:C.orange,alignItems:'center',justifyContent:'center',marginTop:4},
   buttonText:{fontSize:14,fontWeight:'900',color:C.white},
+  secondaryButton:{height:50,borderRadius:16,borderWidth:1,borderColor:C.line,backgroundColor:C.white,alignItems:'center',justifyContent:'center',marginTop:10},
+  secondaryButtonText:{fontSize:12,fontWeight:'900',color:C.ink},
   backButton:{height:52,borderRadius:17,borderWidth:1,borderColor:C.line,backgroundColor:C.white,alignItems:'center',justifyContent:'center',marginTop:10},
   backButtonText:{fontSize:13,fontWeight:'900',color:C.ink},
 });
