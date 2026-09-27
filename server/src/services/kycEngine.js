@@ -192,8 +192,83 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
     if (this.clientId) headers['x-client-id'] = this.clientId;
     if (this.clientSecret) headers['x-client-secret'] = this.clientSecret;
     if (this.version) headers['x-api-version'] = this.version;
-    if (this.apiKey) headers.Authorization = 'Bearer ' + this.apiKey;
     return headers;
+  }
+
+  requiresBiometricChecks() {
+    return false;
+  }
+
+  async verifyIdentity(input) {
+    if (input.documentType !== 'DRIVING_LICENSE') {
+      throw Object.assign(new Error('Cashfree Secure ID currently supports Driving Licence verification only.'), { code: 'KYC_DOCUMENT_TYPE_UNSUPPORTED' });
+    }
+    if (!input.dateOfBirth) {
+      throw Object.assign(new Error('Date of birth is required for Driving Licence verification.'), { code: 'KYC_DOB_REQUIRED' });
+    }
+    return super.verifyIdentity({
+      verification_id: String(input.clientReferenceId || ''),
+      dl_number: input.documentNumber,
+      dob: input.dateOfBirth,
+    });
+  }
+
+  normalizeVerificationResponse(payload) {
+    const statusRaw = String(payload?.status || '').trim().toLowerCase();
+    const details = payload?.details_of_driving_licence;
+    const approved = Boolean(statusRaw && details);
+    const rejected = ['id_not_found','invalid','failed','failure','rejected','error'].includes(statusRaw);
+    return {
+      status: approved ? 'APPROVED' : rejected ? 'REJECTED' : 'PENDING',
+      providerVerificationId: String(payload?.reference_id ?? payload?.verification_id ?? payload?.data?.reference_id ?? ''),
+      governmentRefId: null,
+      ocrDataExtracted: {},
+      livenessScore: null,
+      faceMatchScore: null,
+      decisionReason: approved
+        ? 'Cashfree Secure ID Driving Licence verification succeeded.'
+        : rejected
+          ? 'Cashfree Secure ID could not verify the supplied Driving Licence.'
+          : 'Cashfree Secure ID returned a pending verification result.',
+      raw: payload,
+    };
+  }
+
+  verifyWebhookSignature(rawBody, signature, timestamp = '') {
+    if (!this.clientSecret || !signature || !timestamp) return false;
+    const timestampMs = Number(timestamp) * 1000;
+    if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > 5 * 60 * 1000) return false;
+    const expected = crypto.createHmac('sha256', this.clientSecret)
+      .update(String(timestamp) + String(rawBody || ''), 'utf8')
+      .digest('base64');
+    const provided = String(signature).trim();
+    const a = Buffer.from(provided, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+
+  parseWebhook(payload, headers = {}) {
+    const eventType = String(payload?.event_type || '').toUpperCase();
+    const data = payload?.data || {};
+    const status =
+      eventType.endsWith('_SUCCESS') ? 'APPROVED' :
+      eventType.includes('FAILURE') || eventType.includes('REJECTED') || eventType.includes('EXPIRED') || eventType.includes('CONSENT_DENIED') ? 'REJECTED' :
+      'PENDING';
+    const eventId = String(headers['x-event-id'] || payload?.event_id || data?.event_id || data?.verification_id || data?.reference_id || '').trim();
+    if (!eventId) return null;
+    return {
+      eventId,
+      clientReferenceId: String(data?.verification_id || '').trim(),
+      providerVerificationId: String(data?.reference_id || data?.verification_id || '').trim(),
+      status,
+      governmentRefId: null,
+      ocrDataExtracted: {},
+      livenessScore: null,
+      faceMatchScore: null,
+      decisionReason: eventType || 'Cashfree Secure ID webhook received.',
+      externalUserId: null,
+      raw: payload,
+    };
   }
 }
 
@@ -222,15 +297,22 @@ function createProviderFromEnv(env = process.env) {
   if (!PROVIDERS.has(name)) {
     throw Object.assign(new Error('A supported KYC provider must be configured.'), { code: 'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
   }
+  const cashfreeEnvironment = String(env.KYC_PROVIDER_ENVIRONMENT || env.CASHFREE_ENVIRONMENT || 'sandbox').trim().toLowerCase();
+  const cashfreeBaseUrl = String(
+    env.KYC_PROVIDER_BASE_URL ||
+    (cashfreeEnvironment === 'production'
+      ? 'https://api.cashfree.com/verification'
+      : 'https://sandbox.cashfree.com/verification')
+  ).replace(/\/$/, '');
   const common = {
     name,
-    verifyUrl: String(env.KYC_PROVIDER_VERIFY_URL || '').trim(),
+    verifyUrl: String(env.KYC_PROVIDER_VERIFY_URL || (name === 'cashfree' ? cashfreeBaseUrl + '/driving-license' : '')).trim(),
     apiKey: String(env.KYC_PROVIDER_API_KEY || '').trim(),
-    clientId: String(env.KYC_PROVIDER_CLIENT_ID || '').trim(),
-    clientSecret: String(env.KYC_PROVIDER_CLIENT_SECRET || '').trim(),
+    clientId: String(env.KYC_PROVIDER_CLIENT_ID || (name === 'cashfree' ? env.CASHFREE_SECURE_ID_CLIENT_ID : '') || '').trim(),
+    clientSecret: String(env.KYC_PROVIDER_CLIENT_SECRET || (name === 'cashfree' ? env.CASHFREE_SECURE_ID_CLIENT_SECRET : '') || '').trim(),
     webhookSecret: String(env.KYC_WEBHOOK_SECRET || '').trim(),
     timeoutMs: Math.max(5000, Math.min(60000, Number(env.KYC_PROVIDER_TIMEOUT_MS || 30000))),
-    version: String(env.KYC_PROVIDER_API_VERSION || '').trim(),
+    version: String(env.KYC_PROVIDER_API_VERSION || (name === 'cashfree' ? '2024-12-01' : '')).trim(),
   };
   if (name === 'cashfree') return new CashfreeVerificationAdapter(common);
   if (name === 'signzy') return new SignzyVerificationAdapter(common);
