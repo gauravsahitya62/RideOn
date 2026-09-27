@@ -70,3 +70,22 @@ test('webhook signatures are HMAC verified over the raw body', () => {
   assert.equal(provider.verifyWebhookSignature(raw,signature),true);
   assert.equal(provider.verifyWebhookSignature(raw,'bad'),false);
 });
+
+
+test('provider approval is represented as customer VERIFIED state', async () => {
+  const repository=repositoryFixture();
+  const provider={
+    name:'test',
+    async verifyIdentity(){return {status:'APPROVED',livenessScore:0.95,faceMatchScore:0.93,providerVerificationId:'pv-1'};},
+  };
+  const engine=new KycEngine({repository,provider});
+  const verification=await engine.verify({
+    customerId:'customer-1',
+    documentType:'DRIVING_LICENSE',
+    documentNumber:'DL-AB123456',
+    documentImageBase64:'x'.repeat(100),
+    selfieImageBase64:'x'.repeat(100),
+  });
+  assert.equal(verification.documentStatus,'APPROVED');
+  assert.equal(repository.customers.get('customer-1').kycStatus,'VERIFIED');
+});
