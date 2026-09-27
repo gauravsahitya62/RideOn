@@ -124,11 +124,16 @@ class HttpKycProvider {
     const candidates = [raw];
     if (timestamp) candidates.push(timestamp + '.' + raw);
     return candidates.some(value => {
-      const expected = crypto.createHmac('sha256', this.webhookSecret).update(value, 'utf8').digest('hex');
-      const provided = String(signature).replace(/^sha256=/i, '').trim().toLowerCase();
-      const a = Buffer.from(provided, 'utf8');
-      const b = Buffer.from(expected, 'utf8');
-      return a.length === b.length && crypto.timingSafeEqual(a, b);
+      const digest = crypto.createHmac('sha256', this.webhookSecret).update(value, 'utf8');
+      const expectedHex = digest.digest('hex');
+      const expectedBase64 = crypto.createHmac('sha256', this.webhookSecret).update(value, 'utf8').digest('base64');
+      const provided = String(signature).replace(/^sha256=/i, '').trim();
+      const candidates = [expectedHex, expectedBase64];
+      return candidates.some(expected => {
+        const a = Buffer.from(provided, 'utf8');
+        const b = Buffer.from(expected, 'utf8');
+        return a.length === b.length && crypto.timingSafeEqual(a, b);
+      });
     });
   }
 
