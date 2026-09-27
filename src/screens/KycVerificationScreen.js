@@ -37,6 +37,11 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
   const [status, setStatus] = useState('UNVERIFIED');
   const [verification, setVerification] = useState(null);
   const [aadhaarVerificationId, setAadhaarVerificationId] = useState(null);
+  const [aadhaarMethod, setAadhaarMethod] = useState('DIGILOCKER');
+  const [aadhaarNumber, setAadhaarNumber] = useState('');
+  const [aadhaarOtp, setAadhaarOtp] = useState('');
+  const [aadhaarReferenceId, setAadhaarReferenceId] = useState(null);
+  const [aadhaarOtpSent, setAadhaarOtpSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const appState = useRef(AppState.currentState);
@@ -148,18 +153,66 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
     }
   };
 
-  const startAadhaar = async () => {
+  const startAadhaarDigiLocker = async () => {
     setError('');
     setBusy(true);
     try {
       const result = await rideOnApi.startAadhaarKyc();
-      if (!result?.url || !result?.verificationId) {
-        throw new Error('Cashfree did not return an Aadhaar verification URL.');
-      }
+      if (!result?.url || !result?.verificationId) throw new Error('Cashfree did not return an Aadhaar verification URL.');
       setAadhaarVerificationId(result.verificationId);
       await Linking.openURL(result.url);
     } catch (e) {
-      setError(e?.message || 'Could not start Aadhaar verification. Please try again.');
+      setError(e?.message || 'Could not start Aadhaar DigiLocker verification. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sendAadhaarOtp = async () => {
+    const normalized=aadhaarNumber.replace(/\\s/g,'');
+    if (!/^\\d{12}$/.test(normalized)) {
+      setError('Enter a valid 12-digit Aadhaar number.');
+      return;
+    }
+    setError('');
+    setBusy(true);
+    try {
+      const result=await rideOnApi.startAadhaarNumberKyc(normalized);
+      setAadhaarVerificationId(result.verificationId);
+      setAadhaarReferenceId(result.referenceId);
+      setAadhaarOtpSent(true);
+      setAadhaarOtp('');
+      Alert.alert('OTP sent', 'Cashfree sent an OTP to the mobile number linked with your Aadhaar.');
+    } catch(e) {
+      setError(e?.message || 'Could not send Aadhaar OTP. Please try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verifyAadhaarOtp = async () => {
+    if (!aadhaarVerificationId || !aadhaarReferenceId) {
+      setError('Start Aadhaar verification again.');
+      return;
+    }
+    if (!/^\\d{4,8}$/.test(aadhaarOtp.trim())) {
+      setError('Enter the OTP sent to your Aadhaar-linked mobile number.');
+      return;
+    }
+    setError('');
+    setBusy(true);
+    try {
+      const result=await rideOnApi.verifyAadhaarNumberKyc(aadhaarVerificationId,aadhaarOtp.trim());
+      const next=applyKyc(result?.kyc);
+      if(next?.documentStatus==='APPROVED') {
+        Alert.alert('Aadhaar verified','Your Aadhaar has been verified. You can now book RideOn vehicles.');
+      } else if(next?.documentStatus==='REJECTED') {
+        setError('Aadhaar verification was not approved. Please start again.');
+      } else {
+        setError('Aadhaar verification is still pending. Please check again.');
+      }
+    } catch(e) {
+      setError(e?.message || 'Aadhaar OTP verification could not be completed. Please try again.');
     } finally {
       setBusy(false);
     }
@@ -255,13 +308,55 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
           </>
         ) : (
           <>
-            <Text style={styles.section}>02 — AADHAAR VIA DIGILOCKER</Text>
-            <View style={styles.aadhaarInfo}>
-              <Text style={styles.aadhaarTitle}>Secure Aadhaar verification</Text>
-              <Text style={styles.aadhaarText}>
-                RideOn will open Cashfree Secure ID's DigiLocker journey. You sign in to DigiLocker, give consent to share Aadhaar, and return to RideOn. RideOn does not ask you to type or store your Aadhaar number.
-              </Text>
+            <Text style={styles.section}>02 — AADHAAR VERIFICATION</Text>
+            <View style={styles.methodRow}>
+              <TouchableOpacity disabled={busy} onPress={() => {setAadhaarMethod('DIGILOCKER');setError('');}} style={[styles.method, aadhaarMethod === 'DIGILOCKER' && styles.methodActive]}>
+                <Text style={[styles.methodTitle, aadhaarMethod === 'DIGILOCKER' && styles.methodTitleActive]}>DigiLocker</Text>
+                <Text style={styles.methodText}>Consent-based Aadhaar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity disabled={busy} onPress={() => {setAadhaarMethod('NUMBER');setError('');}} style={[styles.method, aadhaarMethod === 'NUMBER' && styles.methodActive]}>
+                <Text style={[styles.methodTitle, aadhaarMethod === 'NUMBER' && styles.methodTitleActive]}>Aadhaar number</Text>
+                <Text style={styles.methodText}>OTP to linked mobile</Text>
+              </TouchableOpacity>
             </View>
+            {aadhaarMethod === 'DIGILOCKER' ? (
+              <View style={styles.aadhaarInfo}>
+                <Text style={styles.aadhaarTitle}>Secure Aadhaar verification</Text>
+                <Text style={styles.aadhaarText}>
+                  Cashfree Secure ID opens DigiLocker. You sign in, give consent to share Aadhaar, and return to RideOn. RideOn never asks you to type your Aadhaar number in this mode.
+                </Text>
+              </View>
+            ) : (
+              <>
+                <Text style={styles.inputLabel}>AADHAAR NUMBER</Text>
+                <TextInput
+                  value={aadhaarNumber}
+                  onChangeText={(v) => setAadhaarNumber(v.replace(/\\D/g,'').slice(0,12))}
+                  keyboardType="number-pad"
+                  placeholder="12-digit Aadhaar number"
+                  placeholderTextColor="#A0A7B1"
+                  style={styles.input}
+                  editable={!busy && !aadhaarOtpSent}
+                  maxLength={12}
+                  secureTextEntry
+                />
+                {aadhaarOtpSent ? (
+                  <>
+                    <Text style={styles.inputLabel}>OTP</Text>
+                    <TextInput
+                      value={aadhaarOtp}
+                      onChangeText={(v) => setAadhaarOtp(v.replace(/\\D/g,'').slice(0,8))}
+                      keyboardType="number-pad"
+                      placeholder="Enter OTP"
+                      placeholderTextColor="#A0A7B1"
+                      style={styles.input}
+                      editable={!busy}
+                      maxLength={8}
+                    />
+                  </>
+                ) : null}
+              </>
+            )}
           </>
         )}
 
@@ -281,22 +376,29 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
         <TouchableOpacity
           style={[styles.button, busy && { opacity:0.55 }]}
           disabled={busy}
-          onPress={method === 'AADHAAR' ? startAadhaar : submitDrivingLicence}
+          onPress={
+            method === 'AADHAAR'
+              ? (aadhaarMethod === 'DIGILOCKER' ? startAadhaarDigiLocker : (aadhaarOtpSent ? verifyAadhaarOtp : sendAadhaarOtp))
+              : submitDrivingLicence
+          }
         >
           {busy ? <ActivityIndicator color={C.white} /> : (
             <Text style={styles.buttonText}>
-              {method === 'AADHAAR' ? 'Continue with Aadhaar' : 'Verify Driving Licence'}
+              {method === 'AADHAAR'
+                ? (aadhaarMethod === 'DIGILOCKER' ? 'Continue with DigiLocker' : (aadhaarOtpSent ? 'Verify Aadhaar OTP' : 'Send Aadhaar OTP'))
+                : 'Verify Driving Licence'}
             </Text>
           )}
         </TouchableOpacity>
 
-        {method === 'AADHAAR' && aadhaarVerificationId && status === 'PENDING' ? (
-          <TouchableOpacity
-            style={styles.secondaryButton}
-            disabled={busy}
-            onPress={() => syncAadhaar(aadhaarVerificationId)}
-          >
+        {method === 'AADHAAR' && aadhaarMethod === 'DIGILOCKER' && aadhaarVerificationId && status === 'PENDING' ? (
+          <TouchableOpacity style={styles.secondaryButton} disabled={busy} onPress={() => syncAadhaar(aadhaarVerificationId)}>
             <Text style={styles.secondaryButtonText}>Check Aadhaar verification status</Text>
+          </TouchableOpacity>
+        ) : null}
+        {method === 'AADHAAR' && aadhaarMethod === 'NUMBER' && aadhaarOtpSent ? (
+          <TouchableOpacity style={styles.secondaryButton} disabled={busy} onPress={() => {setAadhaarOtpSent(false);setAadhaarReferenceId(null);setAadhaarVerificationId(null);setAadhaarOtp('');}}>
+            <Text style={styles.secondaryButtonText}>Use a different Aadhaar number</Text>
           </TouchableOpacity>
         ) : null}
 
