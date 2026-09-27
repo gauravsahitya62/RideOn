@@ -2483,7 +2483,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
       const row=memory.kycVerifications.get(String(verificationId)); if(!row) return null;
       if(providerEventId && row.providerEventId && row.providerEventId===providerEventId) return {verification:row,duplicate:true};
       Object.assign(row,{documentStatus:finalStatus,ocrDataExtracted:ocrDataExtracted||{},livenessScore:livenessScore==null?null:Number(livenessScore),faceMatchScore:faceMatchScore==null?null:Number(faceMatchScore),governmentRefId:governmentRefId||null,providerVerificationId:providerVerificationId||row.providerVerificationId,providerEventId:providerEventId||row.providerEventId,decisionReason:decisionReason||null,verifiedAt:finalStatus==='APPROVED'||finalStatus==='REJECTED'?new Date().toISOString():null,updatedAt:new Date().toISOString()});
-      const customer=memory.customers.get(String(row.externalUserId)); if(customer){customer.kycStatus=blacklist?'BLACKLISTED':finalStatus;customer.activeKycId=finalStatus==='APPROVED'?row.id:(customer.activeKycId===row.id?null:customer.activeKycId);}
+      const customer=memory.customers.get(String(row.externalUserId)); if(customer){const customerStatus=blacklist?'BLACKLISTED':finalStatus==='APPROVED'?'VERIFIED':finalStatus;customer.kycStatus=customerStatus;customer.activeKycId=customerStatus==='VERIFIED'?row.id:(customer.activeKycId===row.id?null:customer.activeKycId);}
       return {verification:row,duplicate:false};
     }
     const client=await pool.connect();
@@ -2509,7 +2509,7 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
          returning *`,
         [verificationId,finalStatus,ocrDataExtracted||{},livenessScore,faceMatchScore,governmentRefId,providerVerificationId,providerEventId,decisionReason]
       );
-      const blacklistStatus=blacklist?'BLACKLISTED':finalStatus;
+      const blacklistStatus=blacklist?'BLACKLISTED':finalStatus==='APPROVED'?'VERIFIED':finalStatus;
       await client.query(
         `update public.customers
          set kyc_status=$2,
