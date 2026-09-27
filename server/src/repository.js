@@ -3505,8 +3505,11 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     if (useDatabase) await pool.query('update auth_otps set attempts=attempts+1 where id=$1 and consumed_at is null', [id]);
   }
 
-
-
+  async function createReview({bookingId,reviewerId,reviewerRole,rating,comment}) {
+    const normalizedRating=Number(rating);
+    if(!Number.isInteger(normalizedRating)||normalizedRating<1||normalizedRating>5){const e=new Error('Rating must be an integer from 1 to 5.');e.code='INVALID_REVIEW_RATING';throw e;}
+    const normalizedComment=sanitizeReviewComment(comment);
+    if(!useDatabase){
       const booking=memory.bookings.get(String(bookingId));
       if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       if(booking.status!=='completed'){const e=new Error('Reviews are available only after the booking is completed.');e.code='REVIEW_NOT_ELIGIBLE';throw e;}
