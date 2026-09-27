@@ -14,7 +14,8 @@
     },
     "plugins": [
       "expo-status-bar",
-      "expo-secure-store"
+      "expo-secure-store",
+      ["expo-image-picker", {"photosPermission":"RideOn uses your photos only when you choose identity verification images.","cameraPermission":"RideOn uses your camera to capture your identity document and live selfie."}]
     ]
   }
 }
