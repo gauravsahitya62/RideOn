@@ -227,3 +227,41 @@ test('Cashfree Secure ID DigiLocker Aadhaar flow creates URL and fetches authent
     }
   }
 });
+
+
+test('Cashfree Secure ID Aadhaar number flow sends OTP and verifies it', async () => {
+  const envKeys=['KYC_PROVIDER','KYC_PROVIDER_VERIFY_URL','KYC_PROVIDER_CLIENT_ID','KYC_PROVIDER_CLIENT_SECRET','KYC_PROVIDER_API_VERSION'];
+  const previous=Object.fromEntries(envKeys.map(key=>[key,process.env[key]]));
+  const originalFetch=globalThis.fetch;
+  const calls=[];
+  try {
+    process.env.KYC_PROVIDER='cashfree';
+    process.env.KYC_PROVIDER_VERIFY_URL='https://sandbox.cashfree.com/verification/driving-license';
+    process.env.KYC_PROVIDER_CLIENT_ID='test-client';
+    process.env.KYC_PROVIDER_CLIENT_SECRET='test-secret';
+    process.env.KYC_PROVIDER_API_VERSION='2024-12-01';
+    globalThis.fetch=async (url,options)=>{
+      calls.push({url,options});
+      return new Response(JSON.stringify(
+        String(url).includes('/offline-aadhaar/otp')
+          ? {ref_id:'aadhaar-ref-1',status:'SUCCESS',message:'OTP sent'}
+          : {ref_id:'aadhaar-ref-1',status:'SUCCESS',name:'RideOn Test User',dob:'1994-08-05'}
+      ),{status:200,headers:{'content-type':'application/json'}});
+    };
+    const provider=createProviderFromEnv();
+    const otp=await provider.sendAadhaarOtp({aadhaarNumber:'123456789012',verificationId:'verification-1'});
+    assert.equal(otp.ref_id,'aadhaar-ref-1');
+    assert.equal(calls[0].url,'https://sandbox.cashfree.com/verification/offline-aadhaar/otp');
+    assert.deepEqual(JSON.parse(calls[0].options.body),{aadhaar_number:'123456789012'});
+    const verified=await provider.verifyAadhaarOtp({otp:'123456',referenceId:'aadhaar-ref-1'});
+    assert.equal(verified.status,'SUCCESS');
+    assert.equal(calls[1].url,'https://sandbox.cashfree.com/verification/offline-aadhaar/verify');
+    assert.deepEqual(JSON.parse(calls[1].options.body),{otp:'123456',ref_id:'aadhaar-ref-1'});
+  } finally {
+    globalThis.fetch=originalFetch;
+    for(const key of envKeys) {
+      if(previous[key]===undefined) delete process.env[key];
+      else process.env[key]=previous[key];
+    }
+  }
+});
