@@ -495,12 +495,11 @@ app.get('/api/v1/kyc/status', supabaseRequireAuth, requireCustomer, async (req,r
 
 app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
   const parsed=z.object({
-    documentType:z.enum(['DRIVING_LICENSE','AADHAAR']),
+    documentType:z.literal('DRIVING_LICENSE'),
     documentNumber:z.string().trim().min(6).max(40),
-    documentImageBase64:z.string().min(100).max(6_000_000),
-    selfieImageBase64:z.string().min(100).max(6_000_000),
+    dateOfBirth:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/,'Use date of birth in YYYY-MM-DD format.'),
   }).safeParse(req.body||{});
-  if(!parsed.success) return res.status(400).json({error:{code:'KYC_VALIDATION_ERROR',message:'Provide a valid identity document number and both required images.',details:parsed.error.flatten()}});
+  if(!parsed.success) return res.status(400).json({error:{code:'KYC_VALIDATION_ERROR',message:'Provide a valid Driving Licence number and date of birth.',details:parsed.error.flatten()}});
   if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
   try {
     const verification=await kycEngine.verify({customerId:req.user.id,...parsed.data});
@@ -508,6 +507,8 @@ app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimi
   } catch(error) {
     const statusByCode={
       INVALID_DOCUMENT_NUMBER:400,
+      KYC_DOB_REQUIRED:400,
+      KYC_DOCUMENT_TYPE_UNSUPPORTED:400,
       KYC_IMAGES_REQUIRED:400,
       KYC_BLACKLISTED:403,
       KYC_PROVIDER_CONFIGURATION_REQUIRED:503,
@@ -520,6 +521,8 @@ app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimi
     return res.status(status).json({error:{code:error?.code||'KYC_VERIFY_FAILED',message:
       error?.code==='KYC_BLACKLISTED'?'Identity verification cannot be completed for this account.':
       error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_DOB_REQUIRED'?'Date of birth is required for Driving Licence verification.':
+      error?.code==='KYC_DOCUMENT_TYPE_UNSUPPORTED'?'This identity document type is not supported by the configured provider.':
       error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
       error?.code==='KYC_PROVIDER_REQUEST_FAILED'?'Identity verification provider rejected the verification request. Please retry.':
       'We could not complete identity verification. Please retry.'}});
@@ -528,8 +531,8 @@ app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimi
 
 app.post('/api/v1/kyc/webhook', kycWebhookRateLimit, async (req,res) => {
   if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED'}});
-  const signature=req.get('x-kyc-signature') || req.get('x-signature') || req.get('x-hv-signature') || req.get('x-signzy-signature') || '';
-  const timestamp=req.get('x-kyc-timestamp') || req.get('x-timestamp') || '';
+  const signature=req.get('x-webhook-signature') || req.get('x-kyc-signature') || req.get('x-signature') || req.get('x-hv-signature') || req.get('x-signzy-signature') || '';
+  const timestamp=req.get('x-webhook-timestamp') || req.get('x-kyc-timestamp') || req.get('x-timestamp') || '';
   try {
     const result=await kycEngine.handleWebhook({
       rawBody:req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body||{}),
