@@ -797,6 +797,8 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
     const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
     const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
     const customer=await repository.findCustomerById(req.user.id);
+    const latestKyc=await repository.getKycStatus(req.user.id);
+    if (!latestKyc || latestKyc.status !== 'VERIFIED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
     const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise,customerId:req.user.id,customerPhone:customer?.phone,returnUrl,notifyUrl});
     console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',fleetOrderId:order.id}));
     const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,reference:paymentRequest.paymentSessionId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
@@ -1670,6 +1672,8 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
       const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
       const customer=await repository.findCustomerById(req.user.id);
+      const latestKyc=await repository.getKycStatus(req.user.id);
+      if (!latestKyc || latestKyc.status !== 'VERIFIED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
       const paymentRequest=await payments.createCustomerPayment({ orderId:paymentReference, amountPaise, customerId:req.user.id, customerPhone:customer?.phone, returnUrl, notifyUrl });
       console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',bookingId:booking.id}));
       const result=await repository.createOrGetPaymentOrder({
