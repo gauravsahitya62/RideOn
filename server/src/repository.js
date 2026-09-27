@@ -559,6 +559,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createFleetOrder({customerId,vendorId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null,idempotencyKey=null}={}) {
+    const kyc = await getKycStatus(customerId);
+    if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before fleet checkout.'), { code:'KYC_REQUIRED' });
     const normalizedKey=idempotencyKey?String(idempotencyKey).trim():null;
     if(!useDatabase){
       if(!memory.fleetOrders)memory.fleetOrders=new Map();
@@ -1052,6 +1054,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createBooking(input) {
+    const kyc = await getKycStatus(input.customerId);
+    if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before booking.'), { code:'KYC_REQUIRED' });
     if (useDatabase) {
       const client=await pool.connect();
       try {
