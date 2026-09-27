@@ -120,6 +120,11 @@ class HttpKycProvider {
 
   verifyWebhookSignature(rawBody, signature, timestamp = '') {
     if (!this.webhookSecret || !signature) return false;
+    if (timestamp && /^\\d+$/.test(String(timestamp))) {
+      const numeric=Number(timestamp);
+      const timestampMs=numeric > 1e12 ? numeric : numeric * 1000;
+      if (Number.isFinite(timestampMs) && Math.abs(Date.now()-timestampMs) > 5*60*1000) return false;
+    }
     const raw = String(rawBody || '');
     const candidates = [raw];
     if (timestamp) candidates.push(timestamp + raw, timestamp + '.' + raw);
