@@ -260,12 +260,20 @@ export class KycEngine {
     return this.repository.getKycStatus(customerId);
   }
 
-  async verify({ customerId, documentType, documentNumber, documentImageBase64, selfieImageBase64 }) {
+  async verify({ customerId, documentType, documentNumber, dateOfBirth, documentImageBase64, selfieImageBase64 }) {
     const normalizedDocument = normalizeDocumentNumber(documentNumber);
     if (normalizedDocument.length < 6 || normalizedDocument.length > 40) {
       throw Object.assign(new Error('Enter a valid identity document number.'), { code: 'INVALID_DOCUMENT_NUMBER' });
     }
-    if (!documentImageBase64 || !selfieImageBase64) {
+    const requiresBiometric = typeof this.provider.requiresBiometricChecks === 'function'
+      ? this.provider.requiresBiometricChecks()
+      : this.provider.requiresBiometricChecks !== false;
+
+    if (this.provider.name === 'cashfree' && documentType === 'DRIVING_LICENSE' && !dateOfBirth) {
+      throw Object.assign(new Error('Date of birth is required for Driving Licence verification.'), { code: 'KYC_DOB_REQUIRED' });
+    }
+
+    if (requiresBiometric && (!documentImageBase64 || !selfieImageBase64)) {
       throw Object.assign(new Error('Both the identity document and live selfie are required.'), { code: 'KYC_IMAGES_REQUIRED' });
     }
 
@@ -302,8 +310,9 @@ export class KycEngine {
         externalUserId:String(customerId),
         documentType,
         documentNumber:normalizedDocument,
-        documentImageBase64:String(documentImageBase64),
-        selfieImageBase64:String(selfieImageBase64),
+        dateOfBirth:dateOfBirth || null,
+        documentImageBase64:documentImageBase64 ? String(documentImageBase64) : null,
+        selfieImageBase64:selfieImageBase64 ? String(selfieImageBase64) : null,
         callbackUrl:process.env.KYC_WEBHOOK_URL || undefined,
         clientReferenceId:String(verification.id),
       });
@@ -355,10 +364,13 @@ export class KycEngine {
       };
     }
 
+    const requiresBiometric = typeof this.provider.requiresBiometricChecks === 'function'
+      ? this.provider.requiresBiometricChecks()
+      : this.provider.requiresBiometricChecks !== false;
     const biometricComplete = liveness != null && faceMatch != null;
-    const thresholdsPassed = biometricComplete &&
-      liveness >= this.livenessThreshold &&
-      faceMatch >= this.faceMatchThreshold;
+    const thresholdsPassed = requiresBiometric
+      ? biometricComplete && liveness >= this.livenessThreshold && faceMatch >= this.faceMatchThreshold
+      : true;
 
     return {
       status:thresholdsPassed ? 'APPROVED' : 'REJECTED',
@@ -367,7 +379,9 @@ export class KycEngine {
       faceMatchScore:faceMatch,
       governmentRefId:result.governmentRefId || null,
       decisionReason:thresholdsPassed
-        ? 'Identity document and biometric checks passed configured thresholds.'
+        ? (requiresBiometric
+          ? 'Identity document and biometric checks passed configured thresholds.'
+          : 'Cashfree Secure ID document verification passed.')
         : 'Biometric verification did not meet the configured RideOn thresholds.',
     };
   }
