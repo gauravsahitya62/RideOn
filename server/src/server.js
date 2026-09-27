@@ -442,7 +442,6 @@ const requireCustomer = requireRole('customer');
 
 const publicKycVerification = (verification) => verification ? ({
   id:verification.id,
-  clientId:verification.clientId,
   documentType:verification.documentType,
   documentStatus:verification.documentStatus,
   submittedAt:verification.submittedAt,
