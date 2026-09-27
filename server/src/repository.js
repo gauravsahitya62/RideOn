@@ -1524,6 +1524,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createOrGetPaymentOrder({ bookingId, customerId, provider, amountPaise, currency='INR', idempotencyKey, providerOrder }) {
+    const kyc = await getKycStatus(customerId);
+    if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before payment.'), { code:'KYC_REQUIRED' });
     if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
       const e=new Error('Invalid payment amount or currency.'); e.code='PAYMENT_CREATION_FAILED'; throw e;
     }
@@ -1562,6 +1564,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createFleetOrderPayment({orderId,customerId,provider,amountPaise,idempotencyKey,providerOrder}={}) {
+    const kyc = await getKycStatus(customerId);
+    if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before payment.'), { code:'KYC_REQUIRED' });
     const normalizedAmount=Number(amountPaise);
     if(!Number.isSafeInteger(normalizedAmount)||normalizedAmount<=0)throw Object.assign(new Error('Invalid payment amount.'),{code:'PAYMENT_CREATION_FAILED'});
     if(!useDatabase){
