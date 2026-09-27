@@ -2223,7 +2223,6 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
 
   async function seedMemoryVehicles(items = []) { if (useDatabase) return; for (const item of items) memory.vehicles.set(String(item.id), item); }
 
-
   const FLEET_STATES = new Set(['AVAILABLE','RESERVED','RENTED','RETURNED','INSPECTION','MAINTENANCE','INACTIVE']);
   const FLEET_STATE_TRANSITIONS = {
     AVAILABLE:new Set(['RESERVED','MAINTENANCE','INACTIVE']), RESERVED:new Set(['RENTED','AVAILABLE','INACTIVE']),
@@ -2231,14 +2230,24 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     MAINTENANCE:new Set(['AVAILABLE','INACTIVE']), INACTIVE:new Set(['AVAILABLE']),
   };
 
+  const validateFleetVehicleInput = (input={}) => {
+    const fleetVehicleClass=String(input.fleetVehicleClass||input.vehicleClass||'bike').toLowerCase();
+    const dailyRate=Number(input.dailyRate),deposit=Number(input.securityDeposit||0);
+    if(!['bike','scooter'].includes(fleetVehicleClass)) { const e=new Error('RideOn fleet currently supports bikes and scooters only.');e.code='INVALID_FLEET_VEHICLE';throw e; }
+    if(!String(input.name||'').trim()||!String(input.city||'').trim()||!Number.isFinite(dailyRate)||dailyRate<0||!Number.isFinite(deposit)||deposit<0){const e=new Error('Invalid fleet vehicle details.');e.code='INVALID_FLEET_VEHICLE';throw e;}
+    if(input.registrationNumber!=null&&String(input.registrationNumber).trim().length>30){const e=new Error('Registration number is too long.');e.code='INVALID_FLEET_VEHICLE';throw e;}
+    if(input.currentOdometer!=null&&(!Number.isInteger(Number(input.currentOdometer))||Number(input.currentOdometer)<0)){const e=new Error('Odometer must be a non-negative integer.');e.code='INVALID_FLEET_VEHICLE';throw e;}
+    if(input.currentFuelBattery!=null&&(!Number.isFinite(Number(input.currentFuelBattery))||Number(input.currentFuelBattery)<0||Number(input.currentFuelBattery)>100)){const e=new Error('Fuel/battery level must be between 0 and 100.');e.code='INVALID_FLEET_VEHICLE';throw e;}
+    return {...input,type:'bike',fleetVehicleClass,dailyRate,securityDeposit};
+  };
   async function listRideOnFleet({q='',type='',brand='',model='',city='',minPrice=null,maxPrice=null,sort='recommended',limit=50,offset=0}
 
   async function getRideOnFleetVehicle(vehicleId) {
     if(!useDatabase){
-      const v=[...memory.vehicles.values(),...fleet].find(x=>String(x.id)===String(vehicleId)&&x.active!==false&&String(x.type||'').toLowerCase()!=='car'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&x.maintenanceRequired!==true);
+      const v=[...memory.vehicles.values()].find(x=>String(x.id)===String(vehicleId)&&x.active!==false);
       return v||null;
     }
-    const {rows}=await pool.query("select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,variant,color,pickup_location,service_area,fleet_vehicle_class,operational_state,maintenance_required,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where id=$1 and active=true and type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter') and coalesce(operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE') and coalesce(maintenance_required,false)=false",[vehicleId]);
+    const {rows}=await pool.query('select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,description,image_urls,delivery_available,active,created_at,updated_at from vehicles where id=$1 and active=true',[vehicleId]);
     return rows[0]?mapManagedVehicle(rows[0]):null;
   }
 
