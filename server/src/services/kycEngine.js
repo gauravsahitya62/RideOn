@@ -199,6 +199,53 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
     return false;
   }
 
+  async createAadhaarDigiLockerUrl({ verificationId, redirectUrl }) {
+    if (!verificationId) throw Object.assign(new Error('KYC verification reference is required.'), { code:'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
+    return this.requestJson({
+      url:this.verifyUrl.replace(/\/driving-license$/i, '/digilocker'),
+      method:'POST',
+      body:{verification_id:String(verificationId),document_requested:['AADHAAR'],redirect_url:String(redirectUrl || '')},
+    });
+  }
+
+  async getAadhaarDigiLockerStatus({ verificationId, referenceId }) {
+    const params=new URLSearchParams();
+    if (referenceId != null && String(referenceId).trim()) params.set('reference_id',String(referenceId));
+    if (verificationId) params.set('verification_id',String(verificationId));
+    return this.requestJson({
+      url:this.verifyUrl.replace(/\/driving-license$/i, '/digilocker') + '?' + params.toString(),
+      method:'GET',
+    });
+  }
+
+  async getAadhaarDigiLockerDocument({ verificationId, referenceId }) {
+    const params=new URLSearchParams();
+    if (referenceId != null && String(referenceId).trim()) params.set('reference_id',String(referenceId));
+    if (verificationId) params.set('verification_id',String(verificationId));
+    return this.requestJson({
+      url:this.verifyUrl.replace(/\/driving-license$/i, '/digilocker/document/AADHAAR') + '?' + params.toString(),
+      method:'GET',
+    });
+  }
+
+  async requestJson({ url, method='GET', body }) {
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),this.timeoutMs);
+    try {
+      const response=await fetch(url,{method,headers:this.headers(),body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal});
+      const text=await response.text();
+      let payload={};
+      try { payload=text?JSON.parse(text):{}; } catch {
+        throw Object.assign(new Error('Cashfree Secure ID returned a non-JSON response.'),{code:'KYC_PROVIDER_INVALID_RESPONSE'});
+      }
+      if(!response.ok) throw Object.assign(new Error('Cashfree Secure ID rejected the verification request.'),{code:'KYC_PROVIDER_REQUEST_FAILED',status:response.status});
+      return payload;
+    } catch(error) {
+      if(error?.name==='AbortError') throw Object.assign(new Error('Cashfree Secure ID request timed out.'),{code:'KYC_PROVIDER_TIMEOUT'});
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
+
   async verifyIdentity(input) {
     if (input.documentType !== 'DRIVING_LICENSE') {
       throw Object.assign(new Error('Cashfree Secure ID currently supports Driving Licence verification only.'), { code: 'KYC_DOCUMENT_TYPE_UNSUPPORTED' });
@@ -340,6 +387,81 @@ export class KycEngine {
 
   async getStatus(customerId) {
     return this.repository.getKycStatus(customerId);
+  }
+
+  async startAadhaarDigiLocker({ customerId, redirectUrl }) {
+    if (this.provider.name !== 'cashfree' || typeof this.provider.createAadhaarDigiLockerUrl !== 'function') {
+      throw Object.assign(new Error('Cashfree Secure ID DigiLocker verification is not configured.'), { code:'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
+    }
+    const verification=await this.repository.createKycVerification({
+      clientId:this.clientId, externalUserId:customerId, documentType:'AADHAAR', documentHash:null, provider:this.provider.name,
+    });
+    try {
+      const created=await this.provider.createAadhaarDigiLockerUrl({verificationId:String(verification.id),redirectUrl});
+      if(!created?.url) throw Object.assign(new Error('Cashfree Secure ID did not return a DigiLocker URL.'),{code:'KYC_PROVIDER_INVALID_RESPONSE'});
+      const applied=await this.repository.applyKycVerificationResult({
+        verificationId:verification.id,status:'PENDING',
+        providerVerificationId:String(created.verification_id || verification.id),
+        decisionReason:'Cashfree Secure ID DigiLocker Aadhaar verification started.',
+      });
+      return {
+        verification:applied?.verification || verification,
+        verificationId:String(created.verification_id || verification.id),
+        referenceId:created.reference_id == null ? null : String(created.reference_id),
+        url:String(created.url), status:String(created.status || 'PENDING'),
+      };
+    } catch(error) {
+      await this.repository.applyKycVerificationResult({
+        verificationId:verification.id,status:'REJECTED',
+        decisionReason:error?.message || 'Cashfree Secure ID DigiLocker initialization failed.',
+      });
+      throw error;
+    }
+  }
+
+  async syncAadhaarDigiLocker({ customerId, verificationId }) {
+    const verification=await this.repository.getKycVerification(verificationId,customerId);
+    if(!verification) throw Object.assign(new Error('KYC verification not found.'),{code:'KYC_NOT_FOUND'});
+    if(verification.documentType!=='AADHAAR') throw Object.assign(new Error('This verification is not an Aadhaar verification.'),{code:'KYC_DOCUMENT_TYPE_UNSUPPORTED'});
+    if(verification.documentStatus==='APPROVED' || verification.documentStatus==='REJECTED') return verification;
+    if(this.provider.name!=='cashfree' || typeof this.provider.getAadhaarDigiLockerStatus!=='function') {
+      throw Object.assign(new Error('Cashfree Secure ID DigiLocker verification is not configured.'),{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED'});
+    }
+    const providerVerificationId=String(verification.providerVerificationId || verification.id);
+    const statusPayload=await this.provider.getAadhaarDigiLockerStatus({verificationId:providerVerificationId});
+    const statusRaw=String(statusPayload?.status || 'PENDING').trim().toUpperCase();
+    const successStatuses=new Set(['AUTHENTICATED','SUCCESS','VERIFIED','COMPLETED']);
+    const rejectedStatuses=new Set(['FAILED','FAILURE','REJECTED','DECLINED','EXPIRED','CONSENT_DENIED']);
+    if(rejectedStatuses.has(statusRaw)) {
+      const applied=await this.repository.applyKycVerificationResult({
+        verificationId:verification.id,status:'REJECTED',providerVerificationId,
+        decisionReason:'Cashfree Secure ID DigiLocker returned status ' + statusRaw + '.',
+      });
+      return applied?.verification || verification;
+    }
+    if(!successStatuses.has(statusRaw)) {
+      const applied=await this.repository.applyKycVerificationResult({
+        verificationId:verification.id,status:'PENDING',providerVerificationId,
+        decisionReason:'Cashfree Secure ID DigiLocker status: ' + statusRaw + '.',
+      });
+      return applied?.verification || verification;
+    }
+    const document=await this.provider.getAadhaarDigiLockerDocument({verificationId:providerVerificationId});
+    const documentStatus=String(document?.status || '').trim().toUpperCase();
+    const documentSuccess=documentStatus==='' || ['SUCCESS','VALID','AUTHENTICATED','VERIFIED'].includes(documentStatus);
+    if(!documentSuccess) {
+      const applied=await this.repository.applyKycVerificationResult({
+        verificationId:verification.id,status:'REJECTED',providerVerificationId,
+        decisionReason:'Cashfree Secure ID Aadhaar document retrieval returned status ' + documentStatus + '.',
+      });
+      return applied?.verification || verification;
+    }
+    const applied=await this.repository.applyKycVerificationResult({
+      verificationId:verification.id,status:'APPROVED',providerVerificationId,
+      decisionReason:'Cashfree Secure ID DigiLocker Aadhaar verification succeeded.',
+      governmentRefId:document?.uid ? 'AADHAAR:' + String(document.uid).slice(-4) : null,
+    });
+    return applied?.verification || verification;
   }
 
   async verify({ customerId, documentType, documentNumber, dateOfBirth, documentImageBase64, selfieImageBase64 }) {
