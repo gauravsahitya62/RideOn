@@ -493,6 +493,42 @@ app.get('/api/v1/kyc/status', supabaseRequireAuth, requireCustomer, async (req,r
   }
 });
 
+app.post('/api/v1/kyc/aadhaar/number/start', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
+  const parsed=z.object({aadhaarNumber:z.string().regex(/^\\s*\\d{12}\\s*$/,'Enter a valid 12-digit Aadhaar number.')}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_AADHAAR_NUMBER',message:'Enter a valid 12-digit Aadhaar number.'}});
+  if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
+  try {
+    const result=await kycEngine.startAadhaarNumberVerification({customerId:req.user.id,aadhaarNumber:parsed.data.aadhaarNumber});
+    return res.status(201).json({success:true,verificationId:result.verificationId,referenceId:result.referenceId,status:result.status,message:result.message,kyc:publicKycVerification(result.verification)});
+  } catch(error) {
+    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_start_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED'}));
+    const status=error?.code==='INVALID_AADHAAR_NUMBER'||error?.code==='KYC_BLACKLISTED'?403:error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
+    return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED',message:
+      error?.code==='KYC_BLACKLISTED'?'Identity verification cannot be completed for this account.':
+      error?.code==='INVALID_AADHAAR_NUMBER'?'Enter a valid 12-digit Aadhaar number.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.message || 'Could not send Aadhaar OTP. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/kyc/aadhaar/number/verify', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
+  const parsed=z.object({verificationId:z.string().uuid(),otp:z.string().regex(/^\\d{4,8}$/,'Enter the OTP sent to your Aadhaar-linked mobile number.')}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_AADHAAR_OTP',message:'Enter the OTP sent to your Aadhaar-linked mobile number.',details:parsed.error.flatten()}});
+  if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
+  try {
+    const verification=await kycEngine.verifyAadhaarNumberOtp({customerId:req.user.id,verificationId:parsed.data.verificationId,otp:parsed.data.otp});
+    return res.status(verification?.documentStatus==='APPROVED'?200:202).json({success:true,kyc:publicKycVerification(verification)});
+  } catch(error) {
+    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_verify_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_AADHAAR_NUMBER_VERIFY_FAILED'}));
+    const status=error?.code==='KYC_NOT_FOUND'?404:error?.code==='INVALID_AADHAAR_OTP'?400:error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
+    return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_NUMBER_VERIFY_FAILED',message:
+      error?.code==='KYC_NOT_FOUND'?'Aadhaar verification was not found.':
+      error?.code==='INVALID_AADHAAR_OTP'?'Enter the OTP sent to your Aadhaar-linked mobile number.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.message || 'Aadhaar verification could not be completed. Please retry.'}});
+  }
+});
+
 app.post('/api/v1/kyc/aadhaar/start', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
   if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
   try {
