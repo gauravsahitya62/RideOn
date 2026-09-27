@@ -92,7 +92,7 @@ class HttpKycProvider {
     return {
       status: mappedStatus,
       providerVerificationId: String(firstValue(payload, [
-        'verificationId', 'requestId', 'referenceId', 'id',
+        'verificationId', 'requestId', 'referenceId', 'clientReferenceId', 'id',
         'data.verificationId', 'data.requestId', 'data.referenceId', 'data.id',
       ]) || ''),
       governmentRefId: firstValue(payload, [
@@ -155,7 +155,7 @@ class HttpKycProvider {
     return {
       eventId,
       providerVerificationId: String(firstValue(payload, [
-        'verificationId','requestId','referenceId','id',
+        'verificationId','requestId','referenceId','clientReferenceId','id',
         'data.verificationId','data.requestId','data.referenceId','data.id',
       ]) || ''),
       status,
