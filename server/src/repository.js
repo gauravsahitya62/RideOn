@@ -3637,7 +3637,22 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return {summary:{averageRating:total?Number((weighted/total).toFixed(2)):0,totalReviewCount:total,ratingDistribution:counts},reviews:recent.rows.map(mapReview)};
   }
 
-
+  async function listSupportTickets({ userId, status, category, priority, limit=50, offset=0 }) {
+    const actor=await findCustomerById(userId);
+    if (!SUPPORT_ROLES.has(actor?.role)) throw supportError('Support staff access is required.', 'FORBIDDEN');
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
+    if (!useDatabase) {
+      let rows=[...memory.supportTickets.values()];
+      if(status)rows=rows.filter(t=>t.status===status);
+      if(category)rows=rows.filter(t=>t.category===category);
+      if(priority)rows=rows.filter(t=>t.priority===priority);
+      rows.sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt));
+      return {tickets:rows.slice(safeOffset,safeOffset+safeLimit),pagination:{limit:safeLimit,offset:safeOffset,count:rows.length}};
+    }
+    const clauses=['1=1'],params=[];
+    if(status){if(!SUPPORT_STATUSES.has(status))throw supportError('Unsupported support status.','INVALID_SUPPORT_STATUS');params.push(status);clauses.push('t.status=$'+params.length);}
+    if(category){if(!SUPPORT_CATEGORIES.has(category))throw supportError('Unsupported support category.','INVALID_SUPPORT_CATEGORY');params.push(category);clauses.push('t.category=$'+params.length);}
+    if(priority){if(!SUPPORT_PRIORITIES.has(priority))throw supportError('Unsupported support priority.','INVALID_SUPPORT_PRIORITY');params.push(priority);clauses.push('t.priority=$'+params.length);}
     params.push(safeLimit,safeOffset);
     const q=await pool.query(supportTicketSelect+' where '+clauses.join(' and ')+' order by t.updated_at desc limit $'+(params.length-1)+' offset $'+params.length,params);
     return {tickets:q.rows.map(r=>mapSupportTicket(r,true)),pagination:{limit:safeLimit,offset:safeOffset,count:q.rows.length}};
