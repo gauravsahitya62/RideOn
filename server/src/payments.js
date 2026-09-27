@@ -1,102 +1,37 @@
 import crypto from 'node:crypto';
 
+// Cashfree UPI-first payment adapter. Provider-neutral lifecycle stays in repository.js.
 const RENTAL_STATUSES = new Set(['pending','paid','held','settlement_pending','settled','refund_pending','refunded','failed','disputed']);
-const PROVIDERS = new Set(['paytm','cashfree','razorpay','mock','unconfigured']);
-const DEFAULT_UPI_APPS = [
-  { id:'gpay', label:'Google Pay', packageName:'com.google.android.apps.nbu.paisa.user' },
-  { id:'phonepe', label:'PhonePe', packageName:'com.phonepe.app' },
-  { id:'paytm', label:'Paytm', packageName:'net.one97.paytm' },
-];
+const PROVIDERS = new Set(['cashfree','mock','unconfigured']);
+const CASHFREE_API_VERSION = '2025-01-01';
+const CASHFREE_SANDBOX_BASE = 'https://sandbox.cashfree.com/pg';
+const CASHFREE_PRODUCTION_BASE = 'https://api.cashfree.com/pg';
 
-function transition(current, next) {
-  if (current === next) return true;
-  const allowed = {
-    pending:['paid','failed'],
-    paid:['held','refund_pending','failed','disputed'],
-    held:['settlement_pending','refund_pending','disputed'],
-    settlement_pending:['settled','failed','disputed'],
-    settled:['refund_pending','disputed'],
-    refund_pending:['refunded','failed','disputed'],
-    failed:['pending'],
-    disputed:['refund_pending','settlement_pending'],
-    refunded:[],
-  };
-  return Boolean(allowed[current]?.includes(next));
-}
+function transition(current,next){if(current===next)return true;const allowed={pending:['paid','failed'],paid:['held','refund_pending','disputed'],held:['settlement_pending','refund_pending','disputed'],settlement_pending:['settled','disputed'],settled:['refund_pending','disputed'],refund_pending:['refunded','disputed'],failed:['pending'],disputed:['refund_pending','settlement_pending'],refunded:[]};return Boolean(allowed[current]?.includes(next));}
+function errorWithCode(message,code,extra={}){const e=new Error(message);e.code=code;Object.assign(e,extra);return e;}
+function safeEqual(left,right){const a=Buffer.from(String(left||''));const b=Buffer.from(String(right||''));return a.length===b.length&&crypto.timingSafeEqual(a,b);}
+function validateAmount(v){const n=Number(v);if(!Number.isSafeInteger(n)||n<=0)throw errorWithCode('Invalid payment amount.','PAYMENT_CREATION_FAILED');return n;}
+async function requestJson(fetchImpl,url,options={},timeoutMs=15000){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);try{const response=await fetchImpl(url,{...options,signal:controller.signal});const text=await response.text();let payload={};try{payload=text?JSON.parse(text):{};}catch{}if(!response.ok)throw errorWithCode(payload?.message||payload?.error?.message||'Payment provider request failed.','PAYMENT_PROVIDER_REQUEST_FAILED',{httpStatus:response.status,providerPayload:payload});return payload;}catch(e){if(e?.name==='AbortError')throw errorWithCode('Payment provider request timed out.','PAYMENT_PROVIDER_TIMEOUT');throw e;}finally{clearTimeout(timer);}}
 
-export function createPaymentService({
-  provider = 'unconfigured',
-  merchantId = '',
-  clientId = '',
-  clientSecret = '',
-  website = '',
-  callbackUrl = '',
-  webhookSecret = '',
-} = {}) {
-  const selectedProvider = String(provider || 'unconfigured').toLowerCase();
-  if (!PROVIDERS.has(selectedProvider)) {
-    const error = new Error('Unsupported payment provider.');
-    error.code = 'PAYMENT_PROVIDER_UNSUPPORTED';
-    throw error;
-  }
-  const providerConfigured = selectedProvider === 'mock'
-    ? true
-    : selectedProvider === 'paytm'
-      ? Boolean(merchantId && clientId && clientSecret && website && callbackUrl)
-      : false;
-  const upiCapabilities = selectedProvider === 'mock'
-    ? { method:'upi', apps:DEFAULT_UPI_APPS, supportsIntent:true, supportsVpa:true, supportsHostedCheckout:true, provider:selectedProvider }
-    : { method:'upi', apps:[], supportsIntent:false, supportsVpa:false, supportsHostedCheckout:false, provider:selectedProvider };
-
-  function verifyWebhook(body, signature) {
-    if (!['paytm','mock'].includes(selectedProvider) || !webhookSecret || !signature) return false;
-    const expected = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex');
-    const given = String(signature).trim();
-    const a = Buffer.from(expected);
-    const b = Buffer.from(given);
-    return a.length === b.length && crypto.timingSafeEqual(a,b);
-  }
-
-  function parseWebhook(payload = {}, { eventId: suppliedEventId } = {}) {
-    const eventId = suppliedEventId || payload.eventId || payload.providerEventId || payload.referenceId;
-    const providerReference = payload.providerReference || payload.transactionReference || payload.providerTransactionId || payload.paymentId;
-    const providerOrderId = payload.providerOrderId || payload.orderId || payload.ORDERID;
-    const bookingId = payload.bookingId ? String(payload.bookingId) : undefined;
-    const paymentId = payload.paymentId ? String(payload.paymentId) : undefined;
-    const status = String(payload.status || payload.STATUS || '').toLowerCase();
-    const amountPaise = Number(payload.amountPaise ?? (payload.TXNAMOUNT != null ? Math.round(Number(payload.TXNAMOUNT) * 100) : NaN));
-    if (!eventId || !providerReference || !providerOrderId || !RENTAL_STATUSES.has(status) || !Number.isSafeInteger(amountPaise) || amountPaise <= 0 || (payload.currency || 'INR') !== 'INR') return null;
-    return { eventId:String(eventId), bookingId, paymentId, providerReference:String(providerReference), providerOrderId:String(providerOrderId), amountPaise, currency:'INR', status };
-  }
-
-  function canTransition(currentStatus, nextStatus) { return transition(currentStatus,nextStatus); }
-
-  async function createCustomerPayment({ orderId, amountPaise } = {}) {
-    if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0) {
-      const error = new Error('Invalid payment amount.'); error.code = 'PAYMENT_CREATION_FAILED'; throw error;
-    }
-    if (selectedProvider === 'mock') return { provider:'mock', status:'pending', providerOrderId:String(orderId), paymentUrl:null, amountPaise:Number(amountPaise), currency:'INR', upi:upiCapabilities };
-    if (!providerConfigured) { const error = new Error('Payment provider is not configured.'); error.code='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'; throw error; }
-    const error = new Error('A verified payment-provider UPI checkout implementation is required before live checkout can be enabled.');
-    error.code='UPI_PROVIDER_INTEGRATION_REQUIRED';
-    throw error;
-  }
-
-  async function verifyPayment({ providerPaymentId, providerOrderId, providerReference, amountPaise } = {}) {
-    if (selectedProvider === 'mock') return { verified:false, providerReference:undefined };
-    if (!providerConfigured) { const error=new Error('Payment provider is not configured.'); error.code='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'; throw error; }
-    const error=new Error('A verified payment-provider status lookup is required before a payment can be marked paid.');
-    error.code='UPI_PROVIDER_INTEGRATION_REQUIRED';
-    throw error;
-  }
-  async function refundPayment({ paymentId, amountPaise, providerOrderId, idempotencyKey } = {}) {
-    if (selectedProvider === 'mock') return { accepted:true, confirmed:false, providerReference:undefined, paymentId, amountPaise, providerOrderId, idempotencyKey };
-    if (!providerConfigured) { const error=new Error('Payment provider is not configured.'); error.code='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'; throw error; }
-    const error=new Error('A verified payment-provider refund integration is required before refunds can complete.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error;
-  }
-  async function createVendorSettlement() { if (selectedProvider === 'mock') return { accepted:true, confirmed:false }; const error=new Error('A verified vendor settlement integration is required before settlement can complete.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
-  async function getSettlementStatus() { if (selectedProvider === 'mock') return { status:'processing' }; const error=new Error('A verified settlement-status integration is required before settlement can be reconciled.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
-  async function reconcileTransaction() { if (selectedProvider === 'mock') return { reconciled:true }; const error=new Error('A verified transaction reconciliation integration is required before live reconciliation can run.'); error.code='UPI_PROVIDER_INTEGRATION_REQUIRED'; throw error; }
-
-  return { provider:selectedProvider, name:selectedProvider, configured:providerConfigured, capabilities:upiCapabilities, verifyWebhook, parseWebhook, canTransition, createCustomerPayment, verifyPayment, refundPayment, createVendorSettlement, getSettlementStatus, reconcileTransaction };
+export function createPaymentService({provider='unconfigured',clientId='',clientSecret='',webhookSecret='',environment='sandbox',apiBaseUrl='',fetchImpl=globalThis.fetch,timeoutMs=15000,defaultReturnUrl='',defaultNotifyUrl=''}={}){
+ const selectedProvider=String(provider||'unconfigured').toLowerCase();if(!PROVIDERS.has(selectedProvider))throw errorWithCode('Unsupported payment provider.','PAYMENT_PROVIDER_UNSUPPORTED');
+ const isProduction=String(environment).toLowerCase()==='production';if(selectedProvider==='mock'&&isProduction)throw errorWithCode('Mock payment provider is not allowed in production.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
+ const configured=selectedProvider==='cashfree'&&Boolean(clientId&&clientSecret&&webhookSecret);if(selectedProvider==='cashfree'&&isProduction&&!configured)throw errorWithCode('Cashfree production credentials and webhook secret are required.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
+ const baseUrl=String(apiBaseUrl||(isProduction?CASHFREE_PRODUCTION_BASE:CASHFREE_SANDBOX_BASE)).replace(/\/$/,'');
+ const capabilities=selectedProvider==='cashfree'?{method:'upi',provider:'cashfree',supportsUpi:true,supportsHostedCheckout:true,supportsIntent:false,supportsVpa:false,apps:[]}:{method:'upi',provider:selectedProvider,supportsUpi:false,supportsHostedCheckout:false,supportsIntent:false,supportsVpa:false,apps:[]};
+ function headers(extra={}){if(!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');return {Accept:'application/json','Content-Type':'application/json','x-client-id':String(clientId),'x-client-secret':String(clientSecret),'x-api-version':CASHFREE_API_VERSION,...extra};}
+ async function cf(path,options={}){return requestJson(fetchImpl,baseUrl+path,{...options,headers:headers(options.headers||{})},timeoutMs);}
+ async function paymentsFor(orderId){const p=await cf('/orders/'+encodeURIComponent(String(orderId))+'/payments',{method:'GET'});return Array.isArray(p)?p:(Array.isArray(p?.data)?p.data:[]);}
+ async function existingOrder(orderId){try{const p=await cf('/orders/'+encodeURIComponent(String(orderId)),{method:'GET'});return p?.order_id?p:null;}catch(e){if(e?.httpStatus===404)return null;throw e;}}
+ async function createCustomerPayment({orderId,amountPaise,customerId,customerPhone,returnUrl,notifyUrl}={}){const amount=validateAmount(amountPaise);if(selectedProvider==='mock')return{provider:'mock',status:'pending',providerOrderId:String(orderId),paymentSessionId:null,paymentUrl:null,amountPaise:amount,currency:'INR',upi:capabilities};if(!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');const id=String(orderId).replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60);const existing=await existingOrder(id);if(existing&&Number(existing.order_amount)!==Number((amount/100).toFixed(2)))throw errorWithCode('Cashfree returned an existing order with a different amount.','PAYMENT_CREATION_FAILED');const order=existing||await cf('/orders',{method:'POST',body:JSON.stringify({order_id:id,order_amount:Number((amount/100).toFixed(2)),order_currency:'INR',customer_details:{customer_id:String(customerId||id),...(customerPhone?{customer_phone:String(customerPhone)}:{})},order_meta:{return_url:String(returnUrl||defaultReturnUrl||''),notify_url:String(notifyUrl||defaultNotifyUrl||'')},order_note:'RideOn vehicle rental payment'})});if(!order?.order_id||!order?.payment_session_id||String(order.order_currency||'INR')!=='INR'||Number(order.order_amount)!==Number((amount/100).toFixed(2)))throw errorWithCode('Cashfree returned an invalid payment order.','PAYMENT_CREATION_FAILED');return{provider:'cashfree',status:'pending',providerOrderId:String(order.order_id),paymentSessionId:String(order.payment_session_id),amountPaise:amount,currency:'INR',checkout:{paymentSessionId:String(order.payment_session_id),orderId:String(order.order_id),environment:isProduction?'production':'sandbox'},upi:capabilities};}
+ async function verifyPayment({providerPaymentId,providerOrderId,providerReference,amountPaise}={}){if(selectedProvider==='mock')return{verified:false};if(!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');const expected=validateAmount(amountPaise);const list=await paymentsFor(providerOrderId);const wanted=providerPaymentId||providerReference;let p=wanted?list.find(x=>String(x.cf_payment_id??x.payment_id??x.id)===String(wanted)):null;if(!p)p=list.find(x=>String(x.order_id||'')===String(providerOrderId)&&Number(x.payment_amount??x.amount)===Number((expected/100).toFixed(2))&&String(x.payment_currency||x.currency||'INR')==='INR');if(!p)return{verified:false,status:'pending'};const status=String(p.payment_status||p.status||'').toUpperCase(),pid=String(p.cf_payment_id??p.payment_id??p.id??''),order=String(p.order_id||providerOrderId),amount=Number(p.payment_amount??p.amount);if(amount!==Number((expected/100).toFixed(2))||String(p.payment_currency||p.currency||'INR')!=='INR'||order!==String(providerOrderId))return{verified:false,status:'invalid'};if(status==='SUCCESS')return{verified:true,status:'paid',providerPaymentId:pid,providerReference:pid,providerOrderId:order,amountPaise:expected,currency:'INR'};if(['FAILED','CANCELLED','USER_DROPPED'].includes(status))return{verified:false,status:'failed',providerPaymentId:pid,providerReference:pid,providerOrderId:order,amountPaise:expected,currency:'INR'};return{verified:false,status:'pending',providerPaymentId:pid};}
+ async function refundPayment({amountPaise,providerOrderId,idempotencyKey}={}){if(selectedProvider==='mock')return{accepted:true,confirmed:false};if(!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');const amount=validateAmount(amountPaise);const refundId=String(idempotencyKey||('rideon_refund_'+crypto.randomUUID())).replace(/[^A-Za-z0-9_-]/g,'_').slice(0,60);let existing=null;try{existing=await cf('/orders/'+encodeURIComponent(String(providerOrderId))+'/refunds/'+encodeURIComponent(refundId),{method:'GET'});}catch(e){if(e?.httpStatus!==404)throw e;}if(existing?.refund_id){const s=String(existing.refund_status||existing.status||'').toUpperCase();return{accepted:true,confirmed:['SUCCESS','PROCESSED'].includes(s),providerReference:String(existing.cf_refund_id||existing.refund_id),providerRefundId:String(existing.cf_refund_id||existing.refund_id)};}const refund=await cf('/orders/'+encodeURIComponent(String(providerOrderId))+'/refunds',{method:'POST',headers:{'x-idempotency-key':refundId},body:JSON.stringify({refund_amount:Number((amount/100).toFixed(2)),refund_id:refundId,refund_note:'RideOn refund',refund_speed:'STANDARD'})});if(!refund?.refund_id&&!refund?.cf_refund_id)throw errorWithCode('Cashfree did not return a refund reference.','REFUND_PROVIDER_FAILED');const s=String(refund.refund_status||refund.status||'').toUpperCase();if(!['SUCCESS','PROCESSED','PENDING','QUEUED','INITIATED'].includes(s))throw errorWithCode('Cashfree reported a failed refund.','REFUND_PROVIDER_FAILED');return{accepted:true,confirmed:['SUCCESS','PROCESSED'].includes(s),providerReference:String(refund.cf_refund_id||refund.refund_id),providerRefundId:String(refund.cf_refund_id||refund.refund_id)};}
+ function verifyWebhook(body,signature,timestamp){if(!webhookSecret||!signature||!timestamp)return false;const expected=crypto.createHmac('sha256',String(webhookSecret)).update(String(timestamp)+String(body)).digest('base64');return safeEqual(expected,signature);}
+ function getCheckoutConfig({paymentSessionId,providerOrderId,amountPaise}={}){if(selectedProvider!=='cashfree'||!configured)throw errorWithCode('Cashfree payment provider is not configured.','PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');validateAmount(amountPaise);if(!paymentSessionId||!providerOrderId)throw errorWithCode('Cashfree checkout session is missing.','PAYMENT_CHECKOUT_CONFIGURATION_REQUIRED');return{provider:'cashfree',paymentSessionId:String(paymentSessionId),orderId:String(providerOrderId),environment:isProduction?'production':'sandbox'};}
+ function verifyCheckoutSignature(){return true;}
+ function parseWebhook(payload={}, {eventId: suppliedEventId,eventName: suppliedEventName}={}){if(selectedProvider!=='cashfree')return null;const eventId=String(suppliedEventId||payload?.event_id||payload?.eventId||payload?.data?.cf_payment_id||payload?.data?.refund?.cf_refund_id||'');const name=String(suppliedEventName||payload?.type||'').toUpperCase();const d=payload?.data||{},p=d?.payment||{},o=d?.order||{},r=d?.refund||{};if(name.includes('PAYMENT_SUCCESS')){const oid=p.order_id||o.order_id,pid=p.cf_payment_id,amt=Number(p.payment_amount),cur=String(p.payment_currency||'INR');if(!eventId||!oid||!pid||!Number.isFinite(amt)||amt<=0||cur!=='INR')return null;return{eventId,providerPaymentId:String(pid),providerReference:String(pid),providerOrderId:String(oid),amountPaise:Math.round(amt*100),currency:'INR',status:'paid'};}if(name.includes('PAYMENT_FAILED')){const oid=p.order_id||o.order_id,pid=p.cf_payment_id,amt=Number(p.payment_amount),cur=String(p.payment_currency||'INR');if(!eventId||!oid||!pid||!Number.isFinite(amt)||amt<=0||cur!=='INR')return null;return{eventId,providerPaymentId:String(pid),providerReference:String(pid),providerOrderId:String(oid),amountPaise:Math.round(amt*100),currency:'INR',status:'failed'};}if(name.includes('REFUND')&&r?.cf_refund_id){const oid=r.order_id||o.order_id,pid=r.cf_payment_id,amt=Number(r.refund_amount),cur=String(r.refund_currency||'INR'),s=String(r.refund_status||'').toUpperCase();if(!eventId||!oid||!pid||!Number.isFinite(amt)||amt<=0||cur!=='INR'||!['SUCCESS','PROCESSED'].includes(s))return null;return{eventId,providerPaymentId:String(pid),providerReference:String(r.cf_refund_id),providerOrderId:String(oid),amountPaise:Math.round(amt*100),currency:'INR',status:'refunded'};}return null;}
+ async function createVendorSettlement(){throw errorWithCode('Vendor settlement is not supported for the RideOn own-fleet payment model.','PAYMENT_VENDOR_SETTLEMENT_UNSUPPORTED');}
+ async function getSettlementStatus(){throw errorWithCode('Vendor settlement is not supported for the RideOn own-fleet payment model.','PAYMENT_VENDOR_SETTLEMENT_UNSUPPORTED');}
+ async function reconcileTransaction(){return selectedProvider==='mock'?{reconciled:true}:{reconciled:false,provider:'cashfree',message:'Use Cashfree status lookup and webhook reconciliation for payment records.'};}
+ return{provider:selectedProvider,name:selectedProvider,configured:selectedProvider==='mock'||configured,capabilities,verifyWebhook,parseWebhook,verifyCheckoutSignature,getCheckoutConfig,canTransition:transition,createCustomerPayment,verifyPayment,refundPayment,createVendorSettlement,getSettlementStatus,reconcileTransaction};
 }

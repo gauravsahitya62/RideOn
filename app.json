@@ -2,6 +2,7 @@
   "expo": {
     "name": "RideOn",
     "slug": "rideon",
+    "scheme": "rideon",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
