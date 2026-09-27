@@ -12,6 +12,7 @@ import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
 import { createTrackingRealtimeServer } from './trackingRealtime.js';
+import { KycEngine } from './services/kycEngine.js';
 
 const fleet = [];
 
@@ -62,6 +63,8 @@ const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHead
 const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const supportRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const paymentRateLimit = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: true, legacyHeaders: false });
+const kycRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 5, standardHeaders: true, legacyHeaders: false });
+const kycWebhookRateLimit = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
@@ -277,6 +280,18 @@ const payments = createPaymentService({
   defaultNotifyUrl: cashfreeNotifyUrl,
 });
 
+let kycEngine = null;
+try {
+  kycEngine = new KycEngine({ repository });
+} catch (error) {
+  console.error(JSON.stringify({
+    level:'error',
+    event:'kyc_engine_not_configured',
+    code:error?.code || 'KYC_PROVIDER_CONFIGURATION_REQUIRED',
+  }));
+}
+
+
 function createCheckoutToken({paymentId,customerId}) {
   const expiresAt = Math.floor(Date.now()/1000) + 15 * 60;
   const payload = Buffer.from(JSON.stringify({paymentId:String(paymentId),customerId:String(customerId),exp:expiresAt})).toString('base64url');
@@ -424,6 +439,22 @@ const requireRole = (...roles) => (req, res, next) => {
 };
 
 const requireCustomer = requireRole('customer');
+
+const KYC_REQUIRED_RESPONSE = {
+  success: false,
+  error_code: 'KYC_REQUIRED',
+  message: 'Verify your driver credentials before booking a vehicle.',
+};
+
+async function requireVerifiedKyc(req, res) {
+  const status = await repository.getKycStatus(req.user.id);
+  if (!status || status.status !== 'VERIFIED') {
+    res.status(403).json(KYC_REQUIRED_RESPONSE);
+    return false;
+  }
+  return true;
+}
+
 const requireSupport = requireRole('support','admin');
 
 const requireVendor = async (req, res, next) => {
@@ -440,6 +471,72 @@ const requireVendor = async (req, res, next) => {
     return res.status(404).json({ error:{ code:'VENDOR_NOT_FOUND', message:'Vendor profile not found.' } });
   }
 };
+
+app.get('/api/v1/kyc/status', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  try {
+    const status = await repository.getKycStatus(req.user.id);
+    if (!status) return res.status(404).json({error:{code:'USER_NOT_FOUND',message:'RideOn account not found.'}});
+    const active = status.activeKycId ? await repository.getKycVerification(status.activeKycId, req.user.id) : null;
+    res.json({kyc:{status:status.status,activeVerification:active}});
+  } catch(error) {
+    console.error(JSON.stringify({level:'error',event:'kyc_status_failed',requestId:req.requestId,code:error?.code||'KYC_STATUS_FAILED'}));
+    res.status(503).json({error:{code:'KYC_UNAVAILABLE',message:'Identity verification status is temporarily unavailable.'}});
+  }
+});
+
+app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
+  const parsed=z.object({
+    documentType:z.enum(['DRIVING_LICENSE','AADHAAR']),
+    documentNumber:z.string().trim().min(6).max(40),
+    documentImageBase64:z.string().min(100).max(6_000_000),
+    selfieImageBase64:z.string().min(100).max(6_000_000),
+  }).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'KYC_VALIDATION_ERROR',message:'Provide a valid identity document number and both required images.',details:parsed.error.flatten()}});
+  if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
+  try {
+    const verification=await kycEngine.verify({customerId:req.user.id,...parsed.data});
+    res.status(verification?.documentStatus==='APPROVED'?200:202).json({success:true,kyc:verification});
+  } catch(error) {
+    const statusByCode={
+      INVALID_DOCUMENT_NUMBER:400,
+      KYC_IMAGES_REQUIRED:400,
+      KYC_BLACKLISTED:403,
+      KYC_PROVIDER_CONFIGURATION_REQUIRED:503,
+      KYC_PROVIDER_REQUEST_FAILED:502,
+      KYC_PROVIDER_INVALID_RESPONSE:502,
+      KYC_PROVIDER_TIMEOUT:504,
+    };
+    const status=statusByCode[error?.code]||500;
+    console.error(JSON.stringify({level:'warn',event:'kyc_verify_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_VERIFY_FAILED'}));
+    return res.status(status).json({error:{code:error?.code||'KYC_VERIFY_FAILED',message:
+      error?.code==='KYC_BLACKLISTED'?'Identity verification cannot be completed for this account.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
+      error?.code==='KYC_PROVIDER_REQUEST_FAILED'?'Identity verification provider rejected the verification request. Please retry.':
+      'We could not complete identity verification. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/kyc/webhook', kycWebhookRateLimit, async (req,res) => {
+  if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED'}});
+  const signature=req.get('x-kyc-signature') || req.get('x-signature') || req.get('x-hv-signature') || req.get('x-signzy-signature') || '';
+  const timestamp=req.get('x-kyc-timestamp') || req.get('x-timestamp') || '';
+  try {
+    const result=await kycEngine.handleWebhook({
+      rawBody:req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body||{}),
+      payload:req.body||{},
+      signature,
+      timestamp,
+      headers:Object.fromEntries(Object.entries(req.headers).map(([k,v])=>[String(k).toLowerCase(),Array.isArray(v)?v[0]:v])),
+    });
+    res.status(200).json({received:true,applied:Boolean(result.applied),duplicate:Boolean(result.duplicate)});
+  } catch(error) {
+    console.error(JSON.stringify({level:'warn',event:'kyc_webhook_failed',requestId:req.requestId,code:error?.code||'KYC_WEBHOOK_FAILED'}));
+    if(error?.code==='INVALID_KYC_WEBHOOK_SIGNATURE') return res.status(401).json({error:{code:'INVALID_KYC_WEBHOOK_SIGNATURE'}});
+    if(error?.code==='INVALID_KYC_WEBHOOK') return res.status(400).json({error:{code:'INVALID_KYC_WEBHOOK'}});
+    res.status(500).json({error:{code:'KYC_WEBHOOK_FAILED',message:'The KYC provider event could not be processed.'}});
+  }
+});
 
 app.get('/api/v1/version', (_req, res) => {
   res.json({ service:'rideon-api', buildCommit, nodeEnv:process.env.NODE_ENV || 'development', timestamp:new Date().toISOString() });
@@ -654,6 +751,7 @@ app.post('/api/v1/quotes/multi', supabaseRequireAuth, requireCustomer, async (re
 });
 
 app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  if (!(await requireVerifiedKyc(req,res))) return;
   const parsed=z.object({
     vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
     pickupAt:z.string().datetime(),
@@ -685,6 +783,7 @@ app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async 
 });
 
 app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  if (!(await requireVerifiedKyc(req,res))) return;
   const parsed=z.object({idempotencyKey:z.string().trim().min(8).max(128).optional()}).safeParse(req.body||{});
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid payment request.'}});
   try{
@@ -1454,6 +1553,7 @@ app.post('/api/v1/bookings/:id/route', supabaseRequireAuth, requireCustomer, asy
 });
 
 app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
+  if (!(await requireVerifiedKyc(req,res))) return;
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
   try { validateBookingWindow(parsed.data.startAt, parsed.data.endAt); } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
@@ -1541,6 +1641,7 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
 });
 
 app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
+  if (!(await requireVerifiedKyc(req,res))) return;
   const parsed=z.object({ bookingId:z.string().uuid(), idempotencyKey:z.string().trim().min(8).max(128).optional() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'bookingId is required.',details:parsed.error.flatten()}});
   const booking=await repository.getBooking(parsed.data.bookingId, req.user.id);
