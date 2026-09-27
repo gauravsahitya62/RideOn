@@ -41,6 +41,10 @@ CREATE INDEX IF NOT EXISTS kyc_verifications_status_created_idx
 CREATE INDEX IF NOT EXISTS kyc_verifications_client_user_idx
   ON kyc_core.verifications(client_id, external_user_id);
 
+CREATE UNIQUE INDEX IF NOT EXISTS kyc_verifications_provider_event_unique_idx
+  ON kyc_core.verifications(provider_event_id)
+  WHERE provider_event_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS kyc_verifications_provider_ref_idx
   ON kyc_core.verifications(provider, provider_verification_id)
   WHERE provider_verification_id IS NOT NULL;
