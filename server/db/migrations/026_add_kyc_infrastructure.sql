@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS kyc_core.verifications (
   verified_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (document_type IN ('DRIVING_LICENSE','AADHAAR')),
   CHECK (liveness_score IS NULL OR (liveness_score >= 0 AND liveness_score <= 1)),
   CHECK (face_match_score IS NULL OR (face_match_score >= 0 AND face_match_score <= 1))
 );
