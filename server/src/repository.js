@@ -2240,7 +2240,53 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     if(input.currentFuelBattery!=null&&(!Number.isFinite(Number(input.currentFuelBattery))||Number(input.currentFuelBattery)<0||Number(input.currentFuelBattery)>100)){const e=new Error('Fuel/battery level must be between 0 and 100.');e.code='INVALID_FLEET_VEHICLE';throw e;}
     return {...input,type:'bike',fleetVehicleClass,dailyRate,securityDeposit};
   };
-  async function listRideOnFleet({q='',type='',brand='',model='',city='',minPrice=null,maxPrice=null,sort='recommended',limit=50,offset=0}
+
+  async function listRideOnFleet({q='',type='',brand='',model='',city='',minPrice=null,maxPrice=null,sort='recommended',limit=50,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
+    const query=String(q||'').trim().toLowerCase();
+    const typeFilter=String(type||'').trim().toLowerCase();
+    const brandFilter=String(brand||'').trim().toLowerCase();
+    const modelFilter=String(model||'').trim().toLowerCase();
+    const cityFilter=String(city||'').trim().toLowerCase();
+    const min=minPrice==null||minPrice===''?null:Number(minPrice);
+    const max=maxPrice==null||maxPrice===''?null:Number(maxPrice);
+    const sortValue=String(sort||'recommended').toLowerCase();
+    const classFilter=typeFilter==='scooter'?'scooter':typeFilter==='bike'?'bike':'';
+    if(!useDatabase){
+      let rows=[...memory.vehicles.values(),...fleet].filter(v=>v.active!==false);
+      rows=rows.filter(v=>{
+        const vehicleClass=String(v.fleetVehicleClass||v.vehicleClass||((/activa|access|scooty|scooter/i.test(String(v.name||'')+' '+String(v.model||'')))?'scooter':'bike')).toLowerCase();
+        const sourceType=String(v.type||'').toLowerCase();
+        const text=[v.name,v.make,v.model,v.variant,v.city].filter(Boolean).join(' ').toLowerCase();
+        const price=Number(v.pricePerDay??v.dailyRate??0);
+        return (!query||text.includes(query))&&(!classFilter||vehicleClass===classFilter)&&sourceType!=='car'&&(!brandFilter||String(v.make||'').toLowerCase()===brandFilter)&&(!modelFilter||String(v.model||'').toLowerCase()===modelFilter)&&(!cityFilter||String(v.city||'').toLowerCase()===cityFilter)&&(min==null||price>=min)&&(max==null||price<=max)&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&v.maintenanceRequired!==true;
+      });
+      if(sortValue==='price_asc')rows.sort((a,b)=>Number(a.pricePerDay??a.dailyRate)-Number(b.pricePerDay??b.dailyRate));else if(sortValue==='price_desc')rows.sort((a,b)=>Number(b.pricePerDay??b.dailyRate)-Number(a.pricePerDay??a.dailyRate));else rows.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
+      return rows.slice(safeOffset,safeOffset+safeLimit);
+    }
+    const params=[];const where=["v.active=true","coalesce(v.type::text,'') <> 'car'","coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter')","coalesce(v.operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE')","coalesce(v.maintenance_required,false)=false"];
+    if(query){params.push('%'+query+'%');where.push("lower(coalesce(v.name,'') || ' ' || coalesce(v.make,'') || ' ' || coalesce(v.model,'') || ' ' || coalesce(v.variant,'')) like $"+params.length);}
+    if(classFilter){params.push(classFilter);where.push("lower(coalesce(v.fleet_vehicle_class,'bike'))=$"+params.length);}
+    if(brandFilter){params.push(brandFilter);where.push("lower(coalesce(v.make,''))=$"+params.length);}
+    if(modelFilter){params.push(modelFilter);where.push("lower(coalesce(v.model,''))=$"+params.length);}
+    if(cityFilter){params.push(cityFilter);where.push("lower(trim(coalesce(v.city,'')))=lower(trim($"+params.length+"))");}
+    if(min!=null&&Number.isFinite(min)){params.push(Math.round(min*100));where.push("v.daily_rate_paise>=$"+params.length);}
+    if(max!=null&&Number.isFinite(max)){params.push(Math.round(max*100));where.push("v.daily_rate_paise<=$"+params.length);}
+    let order='v.name asc,v.created_at desc';
+    if(sortValue==='price_asc')order='v.daily_rate_paise asc,v.name asc';
+    else if(sortValue==='price_desc')order='v.daily_rate_paise desc,v.name asc';
+    const limitParam=params.length+1;
+    const offsetParam=params.length+2;
+    const {rows}=await pool.query(
+      `select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,variant,color,pickup_location,service_area,fleet_vehicle_class,operational_state,maintenance_required,description,image_urls,delivery_available,active,created_at,updated_at
+       from vehicles v
+       where ${where.join(' and ')}
+       order by ${order}
+       limit $${limitParam} offset $${offsetParam}`,
+      [...params,safeLimit,safeOffset]
+    );
+    return rows.map(mapManagedVehicle);
+  }
 
   async function getRideOnFleetVehicle(vehicleId) {
     if(!useDatabase){
@@ -2251,7 +2297,21 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows[0]?mapManagedVehicle(rows[0]):null;
   }
 
-  async function listRideOnFleetAdmin({q='',type='',city='',status='',registration='',model='',limit=50,offset=0}
+  async function listRideOnFleetAdmin({q='',type='',city='',status='',registration='',model='',limit=50,offset=0}={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
+    const typeFilter=String(type||'').trim().toLowerCase(),statusFilter=String(status||'').trim().toUpperCase();
+    if(!useDatabase){ let rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car'); rows=rows.filter(v=>(!typeFilter||String(v.fleetVehicleClass||v.vehicleClass||'bike').toLowerCase()===typeFilter)&&(!statusFilter||String(v.operationalState||'AVAILABLE').toUpperCase()===statusFilter)&&(!city||String(v.city||'').toLowerCase()===String(city).toLowerCase())&&(!registration||String(v.registrationNumber||'').toLowerCase().includes(String(registration).toLowerCase()))&&(!model||String(v.model||'').toLowerCase().includes(String(model).toLowerCase()))&&(!q||[v.name,v.make,v.model,v.variant,v.city,v.registrationNumber].filter(Boolean).join(' ').toLowerCase().includes(String(q).toLowerCase()))); return rows.slice(safeOffset,safeOffset+safeLimit); }
+    const params=[],where=["v.type::text<>'car'"];
+    if(typeFilter){params.push(typeFilter);where.push('lower(coalesce(v.fleet_vehicle_class,\'bike\'))=$'+params.length);}
+    if(statusFilter){if(!FLEET_STATES.has(statusFilter)){const e=new Error('Invalid fleet status.');e.code='INVALID_FLEET_STATE';throw e;}params.push(statusFilter);where.push('v.operational_state=$'+params.length);}
+    if(city){params.push(String(city));where.push('lower(trim(v.city))=lower(trim($'+params.length+'))');}
+    if(registration){params.push('%'+String(registration).toLowerCase()+'%');where.push('lower(coalesce(v.registration_number,\'\')) like $'+params.length);}
+    if(model){params.push('%'+String(model).toLowerCase()+'%');where.push('lower(coalesce(v.model,\'\')) like $'+params.length);}
+    if(q){params.push('%'+String(q).toLowerCase()+'%');where.push("lower(coalesce(v.name,'') || ' ' || coalesce(v.make,'') || ' ' || coalesce(v.model,'') || ' ' || coalesce(v.variant,'') || ' ' || coalesce(v.registration_number,'')) like $"+params.length);}
+    params.push(safeLimit,safeOffset);
+    const qResult=await pool.query('select id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,variant,color,pickup_location,pickup_latitude,pickup_longitude,service_area,fleet_vehicle_class,operational_state,maintenance_required,current_odometer,current_fuel_battery,active,created_at,updated_at from vehicles v where '+where.join(' and ')+' order by created_at desc limit $'+(params.length-1)+' offset $'+params.length,params);
+    return qResult.rows.map(mapManagedVehicle);
+  }
 
   async function getRideOnFleetDashboard() {
     if(!useDatabase){const rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car');const count=s=>rows.filter(v=>String(v.operationalState||'AVAILABLE').toUpperCase()===s).length;return {totalFleet:rows.length,available:count('AVAILABLE'),reserved:count('RESERVED'),rented:count('RENTED'),maintenance:count('MAINTENANCE'),inactive:count('INACTIVE')};}
@@ -2276,11 +2336,24 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     const client=await pool.connect();try{await client.query('begin');const q=await client.query("select id,operational_state,active from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);if(!q.rows[0])return null;const current=String(q.rows[0].operational_state||'AVAILABLE').toUpperCase();if(current!==state&&!FLEET_STATE_TRANSITIONS[current]?.has(state)){const e=new Error('Vehicle state transition is not allowed.');e.code='INVALID_FLEET_TRANSITION';throw e;}await client.query('update vehicles set operational_state=$2,maintenance_required=$3,active=$4,updated_at=now() where id=$1',[vehicleId,state,state==='MAINTENANCE',state!=='INACTIVE']);await client.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,previous_state,next_state) values($1,$2,\'status_changed\',$3,$4)',[vehicleId,actorUserId||null,current,state]);await client.query('commit');return getRideOnFleetVehicle(vehicleId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
   }
 
-  async function recordFleetMaintenance({vehicleId,status,notes='',cost=0,serviceDate=null,nextServiceDate=null,odometerAtService=null,actorUserId}
+  async function recordFleetMaintenance({vehicleId,status,notes='',cost=0,serviceDate=null,nextServiceDate=null,odometerAtService=null,actorUserId}) {
+    const normalized=String(status||'').toLowerCase();if(!['required','scheduled','started','completed'].includes(normalized)){const e=new Error('Invalid maintenance status.');e.code='INVALID_MAINTENANCE_STATUS';throw e;}const costNumber=Number(cost);if(!Number.isFinite(costNumber)||costNumber<0){const e=new Error('Maintenance cost is invalid.');e.code='INVALID_MAINTENANCE';throw e;}
+    if(!useDatabase){const v=memory.vehicles.get(String(vehicleId));if(!v)return null;v.maintenanceRequired=normalized!=='completed';v.operationalState=normalized==='completed'?'INSPECTION':'MAINTENANCE';v.updatedAt=new Date().toISOString();return v;}
+    const client=await pool.connect();try{await client.query('begin');const v=await client.query("select id,operational_state from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);if(!v.rows[0])return null;await client.query('insert into vehicle_maintenance(vehicle_id,status,notes,cost_paise,service_date,next_service_date,odometer_at_service,created_by) values($1,$2,$3,$4,$5,$6,$7,$8)',[vehicleId,normalized,String(notes||'').slice(0,2000),Math.round(costNumber*100),serviceDate,nextServiceDate,odometerAtService,actorUserId||null]);const next=normalized==='completed'?'INSPECTION':'MAINTENANCE';await client.query('update vehicles set operational_state=$2,maintenance_required=$3,updated_at=now() where id=$1',[vehicleId,next,normalized!=='completed']);await client.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,previous_state,next_state,details) values($1,$2,$3,$4,$5,$6)',[vehicleId,actorUserId||null,'maintenance_'+normalized,v.rows[0].operational_state,next,JSON.stringify({cost:costNumber})]);await client.query('commit');return getRideOnFleetVehicle(vehicleId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
+  }
 
-  async function recordFleetInspection({vehicleId,bookingId=null,inspectionType='routine',odometer=null,fuelBattery=null,exteriorCondition='',damageNotes='',inspectionStatus='passed',conditionPhotos=[],actorUserId}
+  async function recordFleetInspection({vehicleId,bookingId=null,inspectionType='routine',odometer=null,fuelBattery=null,exteriorCondition='',damageNotes='',inspectionStatus='passed',conditionPhotos=[],actorUserId}) {
+    if(!['pickup','return','maintenance','routine'].includes(inspectionType)||!['pending','passed','failed','damage_review'].includes(inspectionStatus)){const e=new Error('Invalid inspection data.');e.code='INVALID_INSPECTION';throw e;}
+    if(!useDatabase){const v=memory.vehicles.get(String(vehicleId));if(!v)return null;v.currentOdometer=odometer??v.currentOdometer;v.currentFuelBattery=fuelBattery??v.currentFuelBattery;v.operationalState=inspectionStatus==='passed'?'AVAILABLE':'MAINTENANCE';return v;}
+    const client=await pool.connect();try{await client.query('begin');const v=await client.query("select id,operational_state from vehicles where id=$1 and type::text<>'car' for update",[vehicleId]);if(!v.rows[0])return null;await client.query('insert into vehicle_inspections(vehicle_id,booking_id,inspection_type,odometer,fuel_battery,exterior_condition,damage_notes,inspection_status,condition_photos,inspected_by) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[vehicleId,bookingId,inspectionType,odometer,fuelBattery,String(exteriorCondition||'').slice(0,2000),String(damageNotes||'').slice(0,2000),inspectionStatus,conditionPhotos,actorUserId||null]);const next=inspectionStatus==='passed'?'AVAILABLE':'MAINTENANCE';await client.query('update vehicles set current_odometer=coalesce($2,current_odometer),current_fuel_battery=coalesce($3,current_fuel_battery),operational_state=$4,maintenance_required=$5,updated_at=now() where id=$1',[vehicleId,odometer,fuelBattery,next,next==='MAINTENANCE']);await client.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,previous_state,next_state) values($1,$2,$3,\'inspection_completed\',$4,$5)',[vehicleId,bookingId,actorUserId||null,v.rows[0].operational_state,next]);await client.query('commit');return getRideOnFleetVehicle(vehicleId);}catch(e){try{await client.query('rollback')}catch{}throw e;}finally{client.release();}
+  }
 
-  async function assignFleetDeliveryStaff({bookingId,vehicleId,staffUserId,assignmentType='delivery',scheduledAt=null,actorUserId}
+  async function assignFleetDeliveryStaff({bookingId,vehicleId,staffUserId,assignmentType='delivery',scheduledAt=null,actorUserId}) {
+    const staff=await findCustomerById(staffUserId);if(!staff||staff.role!=='delivery_staff'){const e=new Error('Assigned user is not delivery staff.');e.code='INVALID_ASSIGNEE';throw e;}
+    if(!useDatabase)return {id:crypto.randomUUID(),bookingId:String(bookingId),vehicleId:String(vehicleId),assignmentType,staffUserId:String(staffUserId),status:'assigned',scheduledAt};
+    const b=await pool.query('select id,vehicle_id from bookings where id=$1 and vehicle_id=$2',[bookingId,vehicleId]);if(!b.rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+    const q=await pool.query("insert into vehicle_assignments(booking_id,vehicle_id,assignment_type,staff_user_id,status,scheduled_at) values($1,$2,$3,$4,'assigned',$5) returning *",[bookingId,vehicleId,assignmentType,staffUserId,scheduledAt||null]);await pool.query('update bookings set assigned_staff_user_id=$2,scheduled_fulfillment_at=coalesce($3,scheduled_fulfillment_at),updated_at=now() where id=$1',[bookingId,staffUserId,scheduledAt||null]);await pool.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,details) values($1,$2,$3,\'assignment_created\',$4)',[vehicleId,bookingId,actorUserId||null,JSON.stringify({staffUserId,assignmentType})]);return q.rows[0];
+  }
 
   return {health,close,getCancellationPreview,listVehicles,listLocations,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
 }
