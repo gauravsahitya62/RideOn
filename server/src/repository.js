@@ -564,7 +564,7 @@ export function createRepository({ databaseUrl, fleet }) {
     if(brandFilter){params.push(brandFilter);where.push("lower(coalesce(v.make,''))=$"+params.length);}
     if(modelFilter){params.push(modelFilter);where.push("lower(coalesce(v.model,''))=$"+params.length);}
     if(cityFilter){params.push(cityFilter);where.push("lower(trim(coalesce(v.city,'')))=lower(trim($"+params.length+"))");}
-    if(min!=null&&Number.isFinite(min)){params.push(Math.round(min*100));where.push('v.daily_rate_paise>=  async function getRideOnFleetVehicle(vehicleId) {
+    if(min!=null&&Number.isFinite(min)){params.push(Math.round(min*100));where.push("v.daily_rate_paise>=$"+params.length);}
     if(!useDatabase){
       const v=[...memory.vehicles.values(),...fleet].find(x=>String(x.id)===String(vehicleId)&&x.active!==false&&String(x.type||'').toLowerCase()!=='car'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(x.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&x.maintenanceRequired!==true);
       return v||null;
