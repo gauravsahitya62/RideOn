@@ -20,7 +20,7 @@ RideOn API
         |       +--> SHA-256 document fingerprint
         |       +--> global blacklist check
         |       +--> provider adapter
-        |       +--> liveness / face-match policy
+        |       +--> provider-specific verification policy
         |       +--> webhook processing
         |
         +--> PostgreSQL
@@ -40,22 +40,23 @@ Provider OCR output is persisted in ocr_data_extracted because it is part of the
 
 ## Verification lifecycle
 
+For the current Cashfree Secure ID integration, RideOn verifies the Driving Licence number and date of birth through the Secure ID Driving Licence API.
+
 ~~~text
 UNVERIFIED
     |
     v
 PENDING
     |
-    +---- provider rejected ----> REJECTED
+    +---- Cashfree rejected ----> REJECTED
     |
-    +---- provider approved
+    +---- Cashfree approved
               |
-              +-- liveness >= threshold
-              +-- face match >= threshold
-                       |
-                       v
-                    VERIFIED
+              v
+           VERIFIED
 ~~~
+
+The KYC engine still supports biometric policy fields for providers that require them. Cashfree Driving Licence verification does not automatically imply face liveness or face match; those are separate Secure ID products and must not be treated as completed unless explicitly integrated.
 
 A document matching kyc_core.global_blacklist is rejected before any external provider request and the customer is moved to BLACKLISTED.
 
@@ -81,13 +82,15 @@ The authoritative failure contract is:
 
 ## Provider adapter
 
-server/src/services/kycEngine.js contains provider adapters for the common authentication patterns used by:
+server/src/services/kycEngine.js contains provider adapters for:
 
-- Cashfree Verification
+- Cashfree Secure ID
 - Signzy
 - HyperVerge
 
-The verification endpoint and credentials are deployment configuration. No fake provider or production mock is included.
+The active Cashfree integration uses the Secure ID Driving Licence endpoint with X-Client-Id, X-Client-Secret, and x-api-version: 2024-12-01 headers. Sandbox and production Secure ID base URLs are selected by environment, with sandbox as the safe default.
+
+The verification endpoint and credentials remain deployment configuration. No fake provider or production mock is included.
 
 The adapter normalizes provider responses into:
 
@@ -110,35 +113,31 @@ Set a real provider before enabling KYC:
 ~~~env
 KYC_PROVIDER=cashfree
 KYC_CLIENT_ID=rideon_internal
-KYC_PROVIDER_VERIFY_URL=
-KYC_PROVIDER_API_KEY=
-KYC_PROVIDER_CLIENT_ID=
-KYC_PROVIDER_CLIENT_SECRET=
-KYC_PROVIDER_API_VERSION=
-KYC_WEBHOOK_SECRET=
+KYC_PROVIDER_ENVIRONMENT=sandbox
+KYC_PROVIDER_CLIENT_ID=<Cashfree Secure ID Client ID>
+KYC_PROVIDER_CLIENT_SECRET=<Cashfree Secure ID Client Secret>
+KYC_PROVIDER_API_VERSION=2024-12-01
+KYC_PROVIDER_VERIFY_URL=https://sandbox.cashfree.com/verification/driving-license
 KYC_WEBHOOK_URL=https://rideon-api-262g.onrender.com/api/v1/kyc/webhook
 KYC_PROVIDER_TIMEOUT_MS=30000
 KYC_LIVENESS_THRESHOLD=0.70
 KYC_FACE_MATCH_THRESHOLD=0.80
 ~~~
 
-KYC_PROVIDER_VERIFY_URL must be the verification endpoint supplied by the selected provider/account. Do not point production at a fake or test implementation.
+For production, switch KYC_PROVIDER_ENVIRONMENT=production and use production Secure ID credentials. The base URL becomes https://api.cashfree.com/verification; do not use sandbox credentials against production endpoints.
+
+KYC_PROVIDER_VERIFY_URL is optional for Cashfree because the adapter derives it from the environment. If set explicitly, it must match the selected environment.
 
 ## Mobile
 
-src/screens/KycVerificationScreen.js captures:
+The current mobile KYC flow collects:
 
-1. Driving licence or Aadhaar document
-2. Live selfie
+1. Driving Licence number
+2. Date of birth in YYYY-MM-DD format
 
-Both captures use:
+The backend sends these values directly to Cashfree Secure ID. Cashfree credentials are never sent to the Expo application.
 
-~~~text
-quality: 0.7
-base64: true
-~~~
-
-The app uses expo-image-picker camera capture and has the required Expo config-plugin permissions.
+DigiLocker/Aadhaar and Secure ID biometric products remain separate integrations and are not presented as completed by the current Driving Licence flow.
 
 ## Future B2B extraction
 
