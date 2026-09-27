@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { KycEngine, sha256Document } from './kycEngine.js';
+import { KycEngine, createProviderFromEnv, sha256Document } from './kycEngine.js';
 
 function repositoryFixture({ blacklisted=false } = {}) {
   const verifications = new Map();
@@ -43,6 +43,14 @@ test('blacklisted documents are rejected before provider invocation', async () =
   );
   assert.equal(called,false);
   assert.equal(repository.customers.get('customer-1').kycStatus,'BLACKLISTED');
+});
+
+test('Cashfree document verification can approve without biometric fields', () => {
+  const engine=new KycEngine({
+    repository:repositoryFixture(),
+    provider:{name:'cashfree',requiresBiometricChecks:()=>false},
+  });
+  assert.equal(engine.evaluateProviderResult({status:'APPROVED'}).status,'APPROVED');
 });
 
 test('approved provider result requires both configured biometric thresholds', () => {
@@ -88,4 +96,60 @@ test('provider approval is represented as customer VERIFIED state', async () => 
   });
   assert.equal(verification.documentStatus,'APPROVED');
   assert.equal(repository.customers.get('customer-1').kycStatus,'VERIFIED');
+});
+
+
+test('Cashfree Secure ID adapter sends the Driving Licence payload and maps id_found to APPROVED', async () => {
+  const envKeys = [
+    'KYC_PROVIDER','KYC_PROVIDER_VERIFY_URL','KYC_PROVIDER_CLIENT_ID',
+    'KYC_PROVIDER_CLIENT_SECRET','KYC_PROVIDER_API_VERSION'
+  ];
+  const previous = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  const originalFetch = globalThis.fetch;
+
+  try {
+    process.env.KYC_PROVIDER='cashfree';
+    process.env.KYC_PROVIDER_VERIFY_URL='https://sandbox.cashfree.com/verification/driving-license';
+    process.env.KYC_PROVIDER_CLIENT_ID='test-client';
+    process.env.KYC_PROVIDER_CLIENT_SECRET='test-secret';
+    process.env.KYC_PROVIDER_API_VERSION='2024-12-01';
+
+    let request;
+    globalThis.fetch = async (url, options) => {
+      request={url,options};
+      return new Response(JSON.stringify({
+        status:'id_found',
+        reference_id:12345,
+        details_of_driving_licence:{status:'ACTIVE'}
+      }), {status:200,headers:{'content-type':'application/json'}});
+    };
+
+    const provider=createProviderFromEnv();
+    const result=await provider.verifyIdentity({
+      documentType:'DRIVING_LICENSE',
+      documentNumber:'RJ1420200012345',
+      dateOfBirth:'1994-08-05',
+      clientReferenceId:'verification-1',
+    });
+
+    assert.equal(result.status,'APPROVED');
+    assert.equal(result.providerVerificationId,'12345');
+    assert.equal(request.url,'https://sandbox.cashfree.com/verification/driving-license');
+
+    const body=JSON.parse(request.options.body);
+    assert.deepEqual(body,{
+      verification_id:'verification-1',
+      dl_number:'RJ1420200012345',
+      dob:'1994-08-05',
+    });
+    assert.equal(request.options.headers['x-client-id'],'test-client');
+    assert.equal(request.options.headers['x-client-secret'],'test-secret');
+    assert.equal(request.options.headers['x-api-version'],'2024-12-01');
+  } finally {
+    globalThis.fetch=originalFetch;
+    for (const key of envKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key]=previous[key];
+    }
+  }
 });
