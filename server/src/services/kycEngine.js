@@ -199,6 +199,28 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
     return false;
   }
 
+  async sendAadhaarOtp({ aadhaarNumber, verificationId }) {
+    const normalized=String(aadhaarNumber || '').replace(/\s+/g,'');
+    if (!/^\d{12}$/.test(normalized)) throw Object.assign(new Error('Enter a valid 12-digit Aadhaar number.'),{code:'INVALID_AADHAAR_NUMBER'});
+    return this.requestJson({
+      url:this.verifyUrl.replace(/\/driving-license$/i, '/offline-aadhaar/otp'),
+      method:'POST',
+      body:{aadhaar_number:normalized},
+    });
+  }
+
+  async verifyAadhaarOtp({ otp, referenceId }) {
+    const code=String(otp || '').trim();
+    const ref=String(referenceId || '').trim();
+    if (!/^\d{4,8}$/.test(code)) throw Object.assign(new Error('Enter the OTP sent to your Aadhaar-linked mobile number.'),{code:'INVALID_AADHAAR_OTP'});
+    if (!ref) throw Object.assign(new Error('Aadhaar verification reference is required.'),{code:'KYC_PROVIDER_INVALID_RESPONSE'});
+    return this.requestJson({
+      url:this.verifyUrl.replace(/\/driving-license$/i, '/offline-aadhaar/verify'),
+      method:'POST',
+      body:{otp:code,ref_id:ref},
+    });
+  }
+
   async createAadhaarDigiLockerUrl({ verificationId, redirectUrl }) {
     if (!verificationId) throw Object.assign(new Error('KYC verification reference is required.'), { code:'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
     return this.requestJson({
@@ -387,6 +409,54 @@ export class KycEngine {
 
   async getStatus(customerId) {
     return this.repository.getKycStatus(customerId);
+  }
+
+  async startAadhaarNumberVerification({ customerId, aadhaarNumber }) {
+    if (this.provider.name !== 'cashfree' || typeof this.provider.sendAadhaarOtp !== 'function') {
+      throw Object.assign(new Error('Cashfree Secure ID Aadhaar OTP verification is not configured.'), { code:'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
+    }
+    const normalized=String(aadhaarNumber || '').replace(/\s+/g,'');
+    if (!/^\d{12}$/.test(normalized)) throw Object.assign(new Error('Enter a valid 12-digit Aadhaar number.'),{code:'INVALID_AADHAAR_NUMBER'});
+    const documentHash=sha256Document(normalized);
+    if (await this.repository.isKycBlacklisted(documentHash)) {
+      const verification=await this.repository.createKycVerification({clientId:this.clientId,externalUserId:customerId,documentType:'AADHAAR',documentHash,provider:this.provider.name});
+      await this.repository.applyKycVerificationResult({verificationId:verification.id,status:'REJECTED',decisionReason:'Aadhaar document matched the RideOn KYC risk blacklist.',blacklist:true});
+      throw Object.assign(new Error('Identity verification cannot be completed for this account.'),{code:'KYC_BLACKLISTED'});
+    }
+    const verification=await this.repository.createKycVerification({clientId:this.clientId,externalUserId:customerId,documentType:'AADHAAR',documentHash,provider:this.provider.name});
+    try {
+      const result=await this.provider.sendAadhaarOtp({aadhaarNumber:normalized,verificationId:String(verification.id)});
+      const ref=String(result?.ref_id || result?.reference_id || '').trim();
+      if(!ref) throw Object.assign(new Error('Cashfree Secure ID did not return an Aadhaar verification reference.'),{code:'KYC_PROVIDER_INVALID_RESPONSE'});
+      const applied=await this.repository.applyKycVerificationResult({
+        verificationId:verification.id,status:'PENDING',providerVerificationId:ref,
+        decisionReason:'Cashfree Secure ID Aadhaar OTP sent.',
+      });
+      return {verification:applied?.verification || verification,verificationId:String(verification.id),referenceId:ref,status:String(result?.status || 'PENDING'),message:String(result?.message || '')};
+    } catch(error) {
+      await this.repository.applyKycVerificationResult({verificationId:verification.id,status:'REJECTED',decisionReason:error?.message || 'Cashfree Secure ID Aadhaar OTP initialization failed.'});
+      throw error;
+    }
+  }
+
+  async verifyAadhaarNumberOtp({ customerId, verificationId, otp }) {
+    const verification=await this.repository.getKycVerification(verificationId,customerId);
+    if(!verification) throw Object.assign(new Error('KYC verification not found.'),{code:'KYC_NOT_FOUND'});
+    if(verification.documentType!=='AADHAAR') throw Object.assign(new Error('This verification is not an Aadhaar verification.'),{code:'KYC_DOCUMENT_TYPE_UNSUPPORTED'});
+    if(verification.documentStatus!=='PENDING') return verification;
+    if(this.provider.name!=='cashfree' || typeof this.provider.verifyAadhaarOtp!=='function') throw Object.assign(new Error('Cashfree Secure ID Aadhaar OTP verification is not configured.'),{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED'});
+    const ref=String(verification.providerVerificationId || '').trim();
+    const result=await this.provider.verifyAadhaarOtp({otp,referenceId:ref});
+    const statusRaw=String(result?.status || '').trim().toUpperCase();
+    const approved=['SUCCESS','AUTHENTICATED','VERIFIED','VALID'].includes(statusRaw);
+    const rejected=['FAILED','FAILURE','REJECTED','INVALID','ERROR'].includes(statusRaw);
+    const applied=await this.repository.applyKycVerificationResult({
+      verificationId:verification.id,
+      status:approved?'APPROVED':rejected?'REJECTED':'PENDING',
+      providerVerificationId:String(result?.ref_id || result?.reference_id || ref),
+      decisionReason:approved?'Cashfree Secure ID Aadhaar OTP verification succeeded.':rejected?'Cashfree Secure ID rejected Aadhaar OTP verification.':'Cashfree Secure ID returned a pending Aadhaar verification result.',
+    });
+    return applied?.verification || verification;
   }
 
   async startAadhaarDigiLocker({ customerId, redirectUrl }) {
