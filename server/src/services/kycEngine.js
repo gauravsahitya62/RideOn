@@ -459,7 +459,7 @@ export class KycEngine {
     const applied=await this.repository.applyKycVerificationResult({
       verificationId:verification.id,status:'APPROVED',providerVerificationId,
       decisionReason:'Cashfree Secure ID DigiLocker Aadhaar verification succeeded.',
-      governmentRefId:document?.uid ? 'AADHAAR:' + String(document.uid).slice(-4) : null,
+      governmentRefId:null,
     });
     return applied?.verification || verification;
   }
