@@ -382,11 +382,12 @@ export class KycEngine {
       ? await this.repository.findKycVerificationById(event.clientReferenceId)
       : null;
 
-    if (!verification && event.providerVerificationId) verification = await this.repository.findKycVerificationByProviderReference({
-          provider:this.provider.name,
-          providerVerificationId:event.providerVerificationId,
-        })
-      : null;
+    if (!verification && event.providerVerificationId) {
+      verification = await this.repository.findKycVerificationByProviderReference({
+        provider:this.provider.name,
+        providerVerificationId:event.providerVerificationId,
+      });
+    }
 
     if (!verification && event.externalUserId) {
       const status = await this.repository.getKycStatus(event.externalUserId);
