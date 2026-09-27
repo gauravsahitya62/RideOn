@@ -122,7 +122,7 @@ class HttpKycProvider {
     if (!this.webhookSecret || !signature) return false;
     const raw = String(rawBody || '');
     const candidates = [raw];
-    if (timestamp) candidates.push(timestamp + '.' + raw);
+    if (timestamp) candidates.push(timestamp + raw, timestamp + '.' + raw);
     return candidates.some(value => {
       const digest = crypto.createHmac('sha256', this.webhookSecret).update(value, 'utf8');
       const expectedHex = digest.digest('hex');
