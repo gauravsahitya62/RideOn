@@ -12,6 +12,7 @@ import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
 import { createTrackingRealtimeServer } from './trackingRealtime.js';
+import { KycEngine } from './services/kycEngine.js';
 
 const fleet = [];
 
@@ -62,6 +63,8 @@ const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHead
 const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const supportRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const paymentRateLimit = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: true, legacyHeaders: false });
+const kycRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 5, standardHeaders: true, legacyHeaders: false });
+const kycWebhookRateLimit = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
@@ -277,6 +280,18 @@ const payments = createPaymentService({
   defaultNotifyUrl: cashfreeNotifyUrl,
 });
 
+let kycEngine = null;
+try {
+  kycEngine = new KycEngine({ repository });
+} catch (error) {
+  console.error(JSON.stringify({
+    level:'error',
+    event:'kyc_engine_not_configured',
+    code:error?.code || 'KYC_PROVIDER_CONFIGURATION_REQUIRED',
+  }));
+}
+
+
 function createCheckoutToken({paymentId,customerId}) {
   const expiresAt = Math.floor(Date.now()/1000) + 15 * 60;
   const payload = Buffer.from(JSON.stringify({paymentId:String(paymentId),customerId:String(customerId),exp:expiresAt})).toString('base64url');
@@ -424,6 +439,31 @@ const requireRole = (...roles) => (req, res, next) => {
 };
 
 const requireCustomer = requireRole('customer');
+
+const publicKycVerification = (verification) => verification ? ({
+  id:verification.id,
+  documentType:verification.documentType,
+  documentStatus:verification.documentStatus,
+  submittedAt:verification.submittedAt,
+  verifiedAt:verification.verifiedAt,
+  decisionReason:verification.decisionReason || null,
+}) : null;
+
+const KYC_REQUIRED_RESPONSE = {
+  success: false,
+  error_code: 'KYC_REQUIRED',
+  message: 'Verify your driver credentials before booking a vehicle.',
+};
+
+async function requireVerifiedKyc(req, res) {
+  const status = await repository.getKycStatus(req.user.id);
+  if (!status || status.status !== 'VERIFIED') {
+    res.status(403).json(KYC_REQUIRED_RESPONSE);
+    return false;
+  }
+  return true;
+}
+
 const requireSupport = requireRole('support','admin');
 
 const requireVendor = async (req, res, next) => {
@@ -440,6 +480,75 @@ const requireVendor = async (req, res, next) => {
     return res.status(404).json({ error:{ code:'VENDOR_NOT_FOUND', message:'Vendor profile not found.' } });
   }
 };
+
+app.get('/api/v1/kyc/status', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  try {
+    const status = await repository.getKycStatus(req.user.id);
+    if (!status) return res.status(404).json({error:{code:'USER_NOT_FOUND',message:'RideOn account not found.'}});
+    const active = status.activeKycId ? await repository.getKycVerification(status.activeKycId, req.user.id) : null;
+    res.json({kyc:{status:status.status,activeVerification:publicKycVerification(active)}});
+  } catch(error) {
+    console.error(JSON.stringify({level:'error',event:'kyc_status_failed',requestId:req.requestId,code:error?.code||'KYC_STATUS_FAILED'}));
+    res.status(503).json({error:{code:'KYC_UNAVAILABLE',message:'Identity verification status is temporarily unavailable.'}});
+  }
+});
+
+app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
+  const parsed=z.object({
+    documentType:z.literal('DRIVING_LICENSE'),
+    documentNumber:z.string().trim().min(6).max(40),
+    dateOfBirth:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/,'Use date of birth in YYYY-MM-DD format.'),
+  }).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'KYC_VALIDATION_ERROR',message:'Provide a valid Driving Licence number and date of birth.',details:parsed.error.flatten()}});
+  if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
+  try {
+    const verification=await kycEngine.verify({customerId:req.user.id,...parsed.data});
+    res.status(verification?.documentStatus==='APPROVED'?200:202).json({success:true,kyc:publicKycVerification(verification)});
+  } catch(error) {
+    const statusByCode={
+      INVALID_DOCUMENT_NUMBER:400,
+      KYC_DOB_REQUIRED:400,
+      KYC_DOCUMENT_TYPE_UNSUPPORTED:400,
+      KYC_IMAGES_REQUIRED:400,
+      KYC_BLACKLISTED:403,
+      KYC_PROVIDER_CONFIGURATION_REQUIRED:503,
+      KYC_PROVIDER_REQUEST_FAILED:502,
+      KYC_PROVIDER_INVALID_RESPONSE:502,
+      KYC_PROVIDER_TIMEOUT:504,
+    };
+    const status=statusByCode[error?.code]||500;
+    console.error(JSON.stringify({level:'warn',event:'kyc_verify_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_VERIFY_FAILED'}));
+    return res.status(status).json({error:{code:error?.code||'KYC_VERIFY_FAILED',message:
+      error?.code==='KYC_BLACKLISTED'?'Identity verification cannot be completed for this account.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_DOB_REQUIRED'?'Date of birth is required for Driving Licence verification.':
+      error?.code==='KYC_DOCUMENT_TYPE_UNSUPPORTED'?'This identity document type is not supported by the configured provider.':
+      error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
+      error?.code==='KYC_PROVIDER_REQUEST_FAILED'?'Identity verification provider rejected the verification request. Please retry.':
+      'We could not complete identity verification. Please retry.'}});
+  }
+});
+
+app.post('/api/v1/kyc/webhook', kycWebhookRateLimit, async (req,res) => {
+  if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED'}});
+  const signature=req.get('x-webhook-signature') || req.get('x-kyc-signature') || req.get('x-signature') || req.get('x-hv-signature') || req.get('x-signzy-signature') || '';
+  const timestamp=req.get('x-webhook-timestamp') || req.get('x-kyc-timestamp') || req.get('x-timestamp') || '';
+  try {
+    const result=await kycEngine.handleWebhook({
+      rawBody:req.rawBody ? req.rawBody.toString('utf8') : JSON.stringify(req.body||{}),
+      payload:req.body||{},
+      signature,
+      timestamp,
+      headers:Object.fromEntries(Object.entries(req.headers).map(([k,v])=>[String(k).toLowerCase(),Array.isArray(v)?v[0]:v])),
+    });
+    res.status(200).json({received:true,applied:Boolean(result.applied),duplicate:Boolean(result.duplicate)});
+  } catch(error) {
+    console.error(JSON.stringify({level:'warn',event:'kyc_webhook_failed',requestId:req.requestId,code:error?.code||'KYC_WEBHOOK_FAILED'}));
+    if(error?.code==='INVALID_KYC_WEBHOOK_SIGNATURE') return res.status(401).json({error:{code:'INVALID_KYC_WEBHOOK_SIGNATURE'}});
+    if(error?.code==='INVALID_KYC_WEBHOOK') return res.status(400).json({error:{code:'INVALID_KYC_WEBHOOK'}});
+    res.status(500).json({error:{code:'KYC_WEBHOOK_FAILED',message:'The KYC provider event could not be processed.'}});
+  }
+});
 
 app.get('/api/v1/version', (_req, res) => {
   res.json({ service:'rideon-api', buildCommit, nodeEnv:process.env.NODE_ENV || 'development', timestamp:new Date().toISOString() });
@@ -477,7 +586,18 @@ app.post('/api/v1/fleet-ops/rentals/overdue/check',supabaseRequireAuth,requireFl
 app.get('/api/v1/fleet-ops/bookings',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const bookings=await repository.getFleetBookingOperations({limit:req.query.limit});res.json({bookings,data:bookings});}catch(error){res.status(503).json({error:{code:'FLEET_OPERATIONS_UNAVAILABLE',message:'Rental operations are temporarily unavailable.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/inspection',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({vehicleId:z.string().min(1).max(64),inspectionType:z.enum(['pickup','return','maintenance','routine']).default('return'),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),exteriorCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),inspectionStatus:z.enum(['pending','passed','failed','damage_review']).default('passed'),conditionPhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid inspection details.',details:p.error.flatten()}});try{const result=await repository.recordFleetInspection({bookingId:req.params.id,...p.data,actorUserId:req.user.id});res.json(result);}catch(error){res.status(409).json({error:{code:error?.code||'INSPECTION_FAILED',message:error?.message||'Inspection could not be completed.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/deposit/settle',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({deductionPaise:z.number().int().min(0).default(0),reason:z.string().max(2000).optional().default(''),evidenceReference:z.string().max(500).optional().default(''),refundProviderReference:z.string().max(255).optional().default('')}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid deposit settlement details.',details:p.error.flatten()}});try{const result=await repository.settleFleetSecurityDeposit({bookingId:req.params.id,actorUserId:req.user.id,...p.data});res.json(result);}catch(error){const status=['DEPOSIT_ALREADY_SETTLED','DEPOSIT_SETTLEMENT_NOT_ALLOWED','DEPOSIT_DEDUCTION_INVALID','DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'].includes(error?.code)?409:error?.code==='FORBIDDEN'?403:404;res.status(status).json({error:{code:error?.code||'DEPOSIT_SETTLEMENT_FAILED',message:error?.message||'Security deposit settlement could not be completed.'}});}});
-app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => { res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...(payments.capabilities||{})}}); });
+app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => {
+  const capabilities={...(payments.capabilities||{})};
+  // App availability is resolved by the native Cashfree SDK at runtime. Never claim
+  // a specific UPI app is installed from the server.
+  capabilities.apps=Array.isArray(capabilities.apps)?capabilities.apps:[];
+  if(capabilities.provider==='cashfree'){
+    capabilities.supportsIntent=true;
+    capabilities.supportsVpa=true;
+    capabilities.appAvailability='device_runtime';
+  }
+  res.json({payment:{method:'upi',provider:payments.name,configured:payments.configured,...capabilities}});
+});
 
 app.get('/health', async (_req, res) => {
   const storage = await repository.health();
@@ -643,6 +763,7 @@ app.post('/api/v1/quotes/multi', supabaseRequireAuth, requireCustomer, async (re
 });
 
 app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  if (!(await requireVerifiedKyc(req,res))) return;
   const parsed=z.object({
     vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
     pickupAt:z.string().datetime(),
@@ -659,7 +780,8 @@ app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (re
     const order=await repository.createFleetOrder({customerId:req.user.id,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
     res.status(201).json({order,data:order});
   }catch(error){
-    const map={INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404,VEHICLE_NOT_FOUND:404};
+    const map={KYC_REQUIRED:403,INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404,VEHICLE_NOT_FOUND:404};
+    if(error?.code==='KYC_REQUIRED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
     res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_ORDER_FAILED',message:error?.code==='MULTI_VEHICLE_UNAVAILABLE'?'One or more selected vehicles became unavailable. No vehicles were booked.':'We could not create the fleet booking. Please retry.',vehicleIds:error?.vehicleIds}});
   }
 });
@@ -674,6 +796,7 @@ app.get('/api/v1/fleet-orders/:id', supabaseRequireAuth, requireCustomer, async 
 });
 
 app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustomer, async (req,res)=>{
+  if (!(await requireVerifiedKyc(req,res))) return;
   const parsed=z.object({idempotencyKey:z.string().trim().min(8).max(128).optional()}).safeParse(req.body||{});
   if(!parsed.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid payment request.'}});
   try{
@@ -686,13 +809,16 @@ app.post('/api/v1/fleet-orders/:id/payment', supabaseRequireAuth, requireCustome
     const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
     const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
     const customer=await repository.findCustomerById(req.user.id);
+    const latestKyc=await repository.getKycStatus(req.user.id);
+    if (!latestKyc || latestKyc.status !== 'VERIFIED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
     const paymentRequest=await payments.createCustomerPayment({orderId:'rideon_fleet_'+order.id,amountPaise,customerId:req.user.id,customerPhone:customer?.phone,returnUrl,notifyUrl});
     console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',fleetOrderId:order.id}));
     const result=await repository.createFleetOrderPayment({orderId:order.id,customerId:req.user.id,provider:paymentProvider,amountPaise,idempotencyKey:parsed.data.idempotencyKey,providerOrder:{id:paymentRequest.providerOrderId,reference:paymentRequest.paymentSessionId,amountPaise:paymentRequest.amountPaise,currency:'INR'}});
     const checkoutUrl=paymentProvider==='cashfree'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
     res.status(result.created?201:200).json({payment:{...result.payment,paymentUrl:checkoutUrl,amount:result.payment.amountPaise,currency:'INR'},order});
   }catch(error){
-    const map={FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,PAYMENT_PROVIDER_REQUEST_FAILED:502,PAYMENT_PROVIDER_TIMEOUT:504};
+    if(error?.code==='KYC_REQUIRED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
+    const map={KYC_REQUIRED:403,FLEET_ORDER_NOT_FOUND:404,PAYMENT_ALREADY_PAID:409,QUOTE_EXPIRED:409,PAYMENT_CREATION_FAILED:400,PAYMENT_PROVIDER_CONFIGURATION_REQUIRED:503,PAYMENT_PROVIDER_REQUEST_FAILED:502,PAYMENT_PROVIDER_TIMEOUT:504};
     res.status(map[error?.code]||503).json({error:{code:error?.code||'FLEET_PAYMENT_FAILED',message:error?.code==='QUOTE_EXPIRED'?'This fleet quote has expired. Please recheck availability.':error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'?'Cashfree checkout is not configured on the RideOn server.':'We could not start fleet checkout right now. Please retry.'}});
   }
 });
@@ -1443,6 +1569,7 @@ app.post('/api/v1/bookings/:id/route', supabaseRequireAuth, requireCustomer, asy
 });
 
 app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, res) => {
+  if (!(await requireVerifiedKyc(req,res))) return;
   const parsed = bookingSchema.safeParse(normalizeBookingInput(req.body));
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Please check the booking details.', details: parsed.error.flatten() } });
   try { validateBookingWindow(parsed.data.startAt, parsed.data.endAt); } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
@@ -1476,6 +1603,7 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
     res.status(201).json({ data: publicBooking(booking), booking: publicBooking(booking) });
   } catch (error) {
     if (error.code === 'IDEMPOTENCY_REPLAY') return res.status(200).json({ data: publicBooking(error.booking), booking: publicBooking(error.booking) });
+    if (error.code === 'KYC_REQUIRED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
     if (error.code === 'VEHICLE_UNAVAILABLE') return res.status(409).json({ error: { code: 'VEHICLE_UNAVAILABLE', message: 'This vehicle is unavailable for part of those dates.' } });
     if (error.code === 'VEHICLE_INACTIVE') return res.status(409).json({ error:{code:'VEHICLE_INACTIVE',message:'This vehicle is not currently available for booking.'} });
     if (error.code === 'VEHICLE_NOT_FOUND') return res.status(404).json({ error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'} });
@@ -1530,6 +1658,7 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
 });
 
 app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
+  if (!(await requireVerifiedKyc(req,res))) return;
   const parsed=z.object({ bookingId:z.string().uuid(), idempotencyKey:z.string().trim().min(8).max(128).optional() }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'bookingId is required.',details:parsed.error.flatten()}});
   const booking=await repository.getBooking(parsed.data.bookingId, req.user.id);
@@ -1555,6 +1684,8 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
       const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
       const customer=await repository.findCustomerById(req.user.id);
+      const latestKyc=await repository.getKycStatus(req.user.id);
+      if (!latestKyc || latestKyc.status !== 'VERIFIED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
       const paymentRequest=await payments.createCustomerPayment({ orderId:paymentReference, amountPaise, customerId:req.user.id, customerPhone:customer?.phone, returnUrl, notifyUrl });
       console.log(JSON.stringify({level:'info',event:'payment_order_created',requestId:req.requestId,provider:payments.name,providerOrderId:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR',bookingId:booking.id}));
       const result=await repository.createOrGetPaymentOrder({
@@ -1580,6 +1711,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
       }});
     });
   } catch(error) {
+    if(error.code==='KYC_REQUIRED') return res.status(403).json(KYC_REQUIRED_RESPONSE);
     if(error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED'||error.code==='PAYMENT_NOT_CONFIGURED') return res.status(503).json({error:{code:'PAYMENT_PROVIDER_CONFIGURATION_REQUIRED',message:'Online payment is not configured on the RideOn server.'}});
     if(error.code==='PAYMENT_CREATION_FAILED') return res.status(502).json({error:{code:error.code,message:error.message}});
     if(error.code==='PAYMENT_PROVIDER_REQUEST_FAILED') return res.status(502).json({error:{code:error.code,message:'The payment provider could not create the checkout order. Please retry.'}});
@@ -1631,6 +1763,35 @@ app.get('/api/v1/payments/checkout/callback', async (req,res) => {
   }catch(error){
     console.error(JSON.stringify({level:'error',event:'payment_checkout_callback_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_CALLBACK_FAILED'}));
     res.status(error?.code==='PAYMENT_VERIFICATION_PENDING'?409:502).type('html').send(checkoutPage({status:'pending',title:'Payment status pending',message:'RideOn could not complete provider verification yet. Return to the app and refresh payment status.',returnUrl:'rideon://payment-return'}));
+  }
+});
+
+app.get('/api/v1/payments/:id/status', supabaseRequireAuth, requireCustomer, paymentRateLimit, async (req,res) => {
+  const payment=await repository.findPaymentById(req.params.id, req.user.id);
+  if(!payment) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
+  const booking=await repository.getBooking(payment.bookingId, req.user.id);
+  if(!booking || (req.query.bookingId && String(booking.id)!==String(req.query.bookingId))) return res.status(404).json({error:{code:'PAYMENT_NOT_FOUND',message:'Payment not found.'}});
+  if(payment.status==='paid') return res.json({payment,verification:'already_verified',bookingPaymentStatus:'paid'});
+  try {
+    const verified=await payments.verifyPayment({providerOrderId:payment.providerOrderId,providerPaymentId:payment.providerPaymentId,providerReference:payment.providerReference,amountPaise:payment.amountPaise});
+    if(verified?.status==='failed'){
+      const applied=await repository.applyPaymentEvent({eventId:`status-failed:${payment.id}:${verified.providerPaymentId||verified.providerReference||'unknown'}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference:verified.providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(payment.amountPaise),currency:'INR',status:'failed'});
+      if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking payment.'}});
+    } else if(verified?.verified){
+      const providerReference=String(verified.providerReference||payment.providerReference||payment.providerPaymentId||'').trim();
+      if(providerReference){
+        const applied=await repository.applyPaymentEvent({eventId:`status-paid:${payment.id}:${providerReference}`,bookingId:String(payment.bookingId),paymentId:String(payment.id),providerPaymentId:verified.providerPaymentId,providerReference,providerOrderId:String(payment.providerOrderId),amountPaise:Number(verified.amountPaise||payment.amountPaise),currency:'INR',status:'paid'});
+        if(applied.invalid) return res.status(409).json({error:{code:'PAYMENT_NOT_VERIFIED',message:'The provider response did not match the booking amount or payment order.'}});
+      }
+    }
+    const latestPayment=await repository.findPaymentById(payment.id,req.user.id);
+    const latestBooking=await repository.getBooking(payment.bookingId,req.user.id);
+    return res.json({payment:latestPayment,verification:verified?.verified?'verified':verified?.status==='failed'?'failed':'pending',bookingPaymentStatus:latestBooking?.paymentStatus||latestPayment?.status||'pending'});
+  } catch(error) {
+    if(error?.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED') return res.status(503).json({error:{code:error.code,message:'Cashfree payment verification is not configured on the RideOn server.'}});
+    if(error?.code==='PAYMENT_PROVIDER_REQUEST_FAILED') return res.status(502).json({error:{code:error.code,message:'Cashfree payment verification could not be completed. Please retry.'}});
+    if(error?.code==='PAYMENT_PROVIDER_TIMEOUT') return res.status(504).json({error:{code:error.code,message:'Cashfree payment verification timed out. Please retry.'}});
+    throw error;
   }
 });
 

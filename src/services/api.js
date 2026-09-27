@@ -206,6 +206,8 @@ export const rideOnApi = {
   verifyOtp: (payload) => request('/api/v1/auth/verify-otp', { method: 'POST', body: JSON.stringify(payload) }),
   completeRegistration: (payload) => request('/api/v1/auth/complete-registration', { method: 'POST', body: JSON.stringify(payload) }),
   me: () => request('/api/v1/me'),
+  getKycStatus: () => request('/api/v1/kyc/status'),
+  submitKycVerification: (payload) => request('/api/v1/kyc/verify', { method:'POST', body:JSON.stringify(payload) }),
   register: (payload) => request('/api/v1/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
   login: (payload) => request('/api/v1/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
   vendorMe: () => request('/api/v1/vendor/me'),
@@ -241,6 +243,8 @@ export const rideOnApi = {
   getVendorCustomerReviews: (bookingId) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/customer-reviews`),
   updateVendorBookingStatus: (id,payload) => request(`/api/v1/vendor/bookings/${encode(id)}/status`, { method:'PATCH', body:JSON.stringify(payload) }),
   getPaymentCapabilities: () => request('/api/v1/payments/capabilities'),
+  getPaymentStatus: (paymentId, bookingId) => request(`/api/v1/payments/${encode(paymentId)}/status?bookingId=${encode(bookingId)}`),
+
   createPaymentOrder: (payload) => request('/api/v1/payments/create-order', { method:'POST', body:JSON.stringify(payload) }),
   getPayment: (id) => request(`/api/v1/payments/${encode(id)}`),
   getPaymentByBooking: async (bookingId) => {

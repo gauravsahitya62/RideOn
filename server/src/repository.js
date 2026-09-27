@@ -13,7 +13,7 @@ export function createRepository({ databaseUrl, fleet }) {
     max: Number(process.env.DATABASE_POOL_MAX || 10),
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   }) : null;
-  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), financialTransactions:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map() };
+  const memory = { customers:new Map(), bookings:new Map(), idempotency:new Map(), paymentEvents:new Map(), payments:new Map(), financialTransactions:new Map(), vendors:new Map(), vehicles:new Map(), securityDeposits:new Map(),trackingSessions:new Map(),reviews:new Map(),supportTickets:new Map(),supportMessages:new Map(),kycVerifications:new Map(),kycBlacklist:new Map() };
 
   const mapPaymentRow = (row) => row && ({
     id:String(row.id),
@@ -31,7 +31,7 @@ export function createRepository({ databaseUrl, fleet }) {
     updatedAt:iso(row.updated_at)
   });
 
-  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined });
+  const mapCustomer = (row) => row && ({ id:String(row.id), fullName:row.full_name ?? row.fullName, phone:row.phone, email:row.email || undefined, role:row.role || 'customer', supabaseUserId:row.supabase_user_id || row.supabaseUserId || undefined, kycStatus:row.kyc_status || row.kycStatus || 'UNVERIFIED', activeKycId:row.active_kyc_id ? String(row.active_kyc_id) : (row.activeKycId ? String(row.activeKycId) : null) });
   const mapBooking = (row) => {
     if (!row) return null;
     const vehicle = row.vehicle || fleet.find((v) => v.id === row.vehicle_id);
@@ -559,6 +559,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createFleetOrder({customerId,vendorId,vehicleIds,startAt,endAt,delivery=true,address='',deliveryLatitude=null,deliveryLongitude=null,idempotencyKey=null}={}) {
+    const kyc = await getKycStatus(customerId);
+    if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before fleet checkout.'), { code:'KYC_REQUIRED' });
     const normalizedKey=idempotencyKey?String(idempotencyKey).trim():null;
     if(!useDatabase){
       if(!memory.fleetOrders)memory.fleetOrders=new Map();
@@ -1052,6 +1054,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createBooking(input) {
+    const kyc = await getKycStatus(input.customerId);
+    if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before booking.'), { code:'KYC_REQUIRED' });
     if (useDatabase) {
       const client=await pool.connect();
       try {
@@ -1520,6 +1524,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createOrGetPaymentOrder({ bookingId, customerId, provider, amountPaise, currency='INR', idempotencyKey, providerOrder }) {
+    const kyc = await getKycStatus(customerId);
+    if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before payment.'), { code:'KYC_REQUIRED' });
     if (!Number.isSafeInteger(Number(amountPaise)) || Number(amountPaise) <= 0 || currency !== 'INR') {
       const e=new Error('Invalid payment amount or currency.'); e.code='PAYMENT_CREATION_FAILED'; throw e;
     }
@@ -1558,6 +1564,8 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function createFleetOrderPayment({orderId,customerId,provider,amountPaise,idempotencyKey,providerOrder}={}) {
+    const kyc = await getKycStatus(customerId);
+    if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before payment.'), { code:'KYC_REQUIRED' });
     const normalizedAmount=Number(amountPaise);
     if(!Number.isSafeInteger(normalizedAmount)||normalizedAmount<=0)throw Object.assign(new Error('Invalid payment amount.'),{code:'PAYMENT_CREATION_FAILED'});
     if(!useDatabase){
@@ -1693,12 +1701,12 @@ export function createRepository({ databaseUrl, fleet }) {
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = [...memory.customers.values()].find(v => String(v.email || '').toLowerCase() === String(email).toLowerCase());
-    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash, role:c.role || 'customer', supabaseUserId:c.supabaseUserId } : null;
+    return c ? { id:c.id, fullName:c.fullName, phone:c.phone, email:c.email, passwordHash:c.passwordHash, role:c.role || 'customer', supabaseUserId:c.supabaseUserId, kycStatus:c.kycStatus || 'UNVERIFIED', activeKycId:c.activeKycId || null } : null;
   }
 
   async function findCustomerById(id) {
     if (useDatabase) {
-      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,supabase_user_id from customers where id=$1', [id]);
+      const { rows } = await pool.query('select id,full_name,phone,email,password_hash,role,supabase_user_id,kyc_status,active_kyc_id from customers where id=$1', [id]);
       return rows[0] ? { ...mapCustomer(rows[0]), passwordHash: rows[0].password_hash } : null;
     }
     const c = memory.customers.get(id);
@@ -2355,5 +2363,178 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     const q=await pool.query("insert into vehicle_assignments(booking_id,vehicle_id,assignment_type,staff_user_id,status,scheduled_at) values($1,$2,$3,$4,'assigned',$5) returning *",[bookingId,vehicleId,assignmentType,staffUserId,scheduledAt||null]);await pool.query('update bookings set assigned_staff_user_id=$2,scheduled_fulfillment_at=coalesce($3,scheduled_fulfillment_at),updated_at=now() where id=$1',[bookingId,staffUserId,scheduledAt||null]);await pool.query('insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,details) values($1,$2,$3,\'assignment_created\',$4)',[vehicleId,bookingId,actorUserId||null,JSON.stringify({staffUserId,assignmentType})]);return q.rows[0];
   }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket};
+
+  async function getKycStatus(customerId) {
+    if (!useDatabase) {
+      const customer = memory.customers.get(String(customerId));
+      return customer ? { status: customer.kycStatus || 'UNVERIFIED', activeKycId: customer.activeKycId || null } : null;
+    }
+    const { rows } = await pool.query(
+      'select id,kyc_status,active_kyc_id from public.customers where id=$1',
+      [customerId]
+    );
+    return rows[0] ? { customerId:String(rows[0].id), status:rows[0].kyc_status || 'UNVERIFIED', activeKycId:rows[0].active_kyc_id ? String(rows[0].active_kyc_id) : null } : null;
+  }
+
+  async function createKycVerification({ clientId='rideon_internal', externalUserId, documentType, documentHash, provider }) {
+    if (!useDatabase) {
+      const id=crypto.randomUUID();
+      const row={id,clientId,externalUserId:String(externalUserId),documentType,documentHash:documentHash||null,documentStatus:'PENDING',ocrDataExtracted:{},livenessScore:null,faceMatchScore:null,governmentRefId:null,provider:provider||null,providerVerificationId:null,providerEventId:null,decisionReason:null,submittedAt:new Date().toISOString(),verifiedAt:null,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      memory.kycVerifications.set(id,row);
+      const customer=memory.customers.get(String(externalUserId)); if(customer){customer.kycStatus='PENDING';customer.activeKycId=id;}
+      return row;
+    }
+    const client=await pool.connect();
+    try {
+      await client.query('begin');
+      const user=await client.query('select id from public.customers where id=$1 for update',[externalUserId]);
+      if(!user.rows[0]) { const e=new Error('Customer not found.'); e.code='CUSTOMER_NOT_FOUND'; throw e; }
+      const { rows }=await client.query(
+        `insert into kyc_core.verifications(client_id,external_user_id,document_type,document_hash,document_status,provider)
+         values($1,$2,$3,$4,'PENDING',$5)
+         returning *`,
+        [clientId,externalUserId,documentType,documentHash||null,provider||null]
+      );
+      await client.query('update public.customers set kyc_status=$2,active_kyc_id=$3,updated_at=now() where id=$1',[externalUserId,'PENDING',rows[0].id]);
+      await client.query('commit');
+      return mapKycVerification(rows[0]);
+    } catch(error) { try{await client.query('rollback');}catch{}; throw error; } finally { client.release(); }
+  }
+
+  const mapKycVerification = (row) => row && ({
+    id:String(row.id),
+    clientId:row.client_id,
+    externalUserId:String(row.external_user_id),
+    documentType:row.document_type,
+    documentHash:row.document_hash || null,
+    documentStatus:row.document_status,
+    ocrDataExtracted:row.ocr_data_extracted || {},
+    livenessScore:row.liveness_score == null ? null : Number(row.liveness_score),
+    faceMatchScore:row.face_match_score == null ? null : Number(row.face_match_score),
+    governmentRefId:row.government_ref_id || null,
+    provider:row.provider || null,
+    providerVerificationId:row.provider_verification_id || null,
+    providerEventId:row.provider_event_id || null,
+    decisionReason:row.decision_reason || null,
+    submittedAt:iso(row.submitted_at),
+    verifiedAt:iso(row.verified_at),
+    createdAt:iso(row.created_at),
+    updatedAt:iso(row.updated_at),
+  });
+
+  async function getKycVerification(id, customerId) {
+    if (!useDatabase) {
+      const row=memory.kycVerifications.get(String(id));
+      return row && String(row.externalUserId)===String(customerId) ? row : null;
+    }
+    const { rows }=await pool.query(
+      'select * from kyc_core.verifications where id=$1 and external_user_id=$2',
+      [id,customerId]
+    );
+    return rows[0] ? mapKycVerification(rows[0]) : null;
+  }
+
+  async function findKycVerificationById(id) {
+    if (!useDatabase) return memory.kycVerifications.get(String(id)) || null;
+    const { rows }=await pool.query('select * from kyc_core.verifications where id=$1 limit 1',[id]);
+    return rows[0] ? mapKycVerification(rows[0]) : null;
+  }
+
+  async function findKycVerificationByProviderReference({ provider, providerVerificationId }) {
+    if (!providerVerificationId) return null;
+    if (!useDatabase) {
+      return [...memory.kycVerifications.values()].find(v=>String(v.provider||'')===String(provider||'') && String(v.providerVerificationId||'')===String(providerVerificationId)) || null;
+    }
+    const { rows }=await pool.query(
+      'select * from kyc_core.verifications where provider=$1 and provider_verification_id=$2 limit 1',
+      [provider,providerVerificationId]
+    );
+    return rows[0] ? mapKycVerification(rows[0]) : null;
+  }
+
+  async function findKycVerificationByProviderEvent(providerEventId) {
+    if (!providerEventId) return null;
+    if (!useDatabase) return [...memory.kycVerifications.values()].find(v=>String(v.providerEventId||'')===String(providerEventId)) || null;
+    const { rows }=await pool.query('select * from kyc_core.verifications where provider_event_id=$1 limit 1',[providerEventId]);
+    return rows[0] ? mapKycVerification(rows[0]) : null;
+  }
+
+  async function isKycBlacklisted(documentHash) {
+    if (!documentHash) return false;
+    if (!useDatabase) return memory.kycBlacklist.has(String(documentHash));
+    const { rowCount }=await pool.query('select 1 from kyc_core.global_blacklist where document_hash=$1 limit 1',[documentHash]);
+    return rowCount>0;
+  }
+
+  async function addKycBlacklist({ documentHash, reason }) {
+    if (!documentHash) throw Object.assign(new Error('Document hash is required.'),{code:'INVALID_DOCUMENT_HASH'});
+    if (!useDatabase) {
+      const row={documentHash:String(documentHash),reason:String(reason||'Risk policy violation'),createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      memory.kycBlacklist.set(String(documentHash),row); return row;
+    }
+    const { rows }=await pool.query(
+      `insert into kyc_core.global_blacklist(document_hash,reason)
+       values($1,$2)
+       on conflict(document_hash) do update set reason=excluded.reason,updated_at=now()
+       returning id,document_hash,reason,created_at,updated_at`,
+      [documentHash,String(reason||'Risk policy violation')]
+    );
+    return rows[0];
+  }
+
+  async function applyKycVerificationResult({ verificationId, status, ocrDataExtracted={}, livenessScore=null, faceMatchScore=null, governmentRefId=null, providerVerificationId=null, providerEventId=null, decisionReason=null, blacklist=false }) {
+    const finalStatus=String(status||'PENDING').toUpperCase();
+    if(!['PENDING','APPROVED','REJECTED'].includes(finalStatus)) throw Object.assign(new Error('Invalid KYC verification status.'),{code:'INVALID_KYC_STATUS'});
+    if(!useDatabase) {
+      const row=memory.kycVerifications.get(String(verificationId)); if(!row) return null;
+      if(providerEventId && row.providerEventId && row.providerEventId===providerEventId) return {verification:row,duplicate:true};
+      Object.assign(row,{documentStatus:finalStatus,ocrDataExtracted:ocrDataExtracted||{},livenessScore:livenessScore==null?null:Number(livenessScore),faceMatchScore:faceMatchScore==null?null:Number(faceMatchScore),governmentRefId:governmentRefId||null,providerVerificationId:providerVerificationId||row.providerVerificationId,providerEventId:providerEventId||row.providerEventId,decisionReason:decisionReason||null,verifiedAt:finalStatus==='APPROVED'||finalStatus==='REJECTED'?new Date().toISOString():null,updatedAt:new Date().toISOString()});
+      const customer=memory.customers.get(String(row.externalUserId)); if(customer){const customerStatus=blacklist?'BLACKLISTED':finalStatus==='APPROVED'?'VERIFIED':finalStatus;customer.kycStatus=customerStatus;customer.activeKycId=customerStatus==='VERIFIED'?row.id:(customer.activeKycId===row.id?null:customer.activeKycId);}
+      return {verification:row,duplicate:false};
+    }
+    const client=await pool.connect();
+    try {
+      await client.query('begin');
+      const current=await client.query('select * from kyc_core.verifications where id=$1 for update',[verificationId]);
+      if(!current.rows[0]) { await client.query('rollback'); return null; }
+      if(providerEventId){
+        const prior=await client.query('select id from kyc_core.verifications where provider_event_id=$1 and id<>$2 limit 1',[providerEventId,verificationId]);
+        if(prior.rows[0]) { await client.query('commit'); return {verification:mapKycVerification(current.rows[0]),duplicate:true}; }
+      }
+      const verifiedAt=finalStatus==='APPROVED'||finalStatus==='REJECTED'?'now()':'null';
+      const { rows }=await client.query(
+        `update kyc_core.verifications
+         set document_status=$2,ocr_data_extracted=$3,liveness_score=$4,face_match_score=$5,
+             government_ref_id=coalesce($6,government_ref_id),
+             provider_verification_id=coalesce($7,provider_verification_id),
+             provider_event_id=coalesce($8,provider_event_id),
+             decision_reason=$9,
+             verified_at=${verifiedAt},
+             updated_at=now()
+         where id=$1
+         returning *`,
+        [verificationId,finalStatus,ocrDataExtracted||{},livenessScore,faceMatchScore,governmentRefId,providerVerificationId,providerEventId,decisionReason]
+      );
+      const blacklistStatus=blacklist?'BLACKLISTED':finalStatus==='APPROVED'?'VERIFIED':finalStatus;
+      await client.query(
+        `update public.customers
+         set kyc_status=$2,
+             active_kyc_id=case when $2='VERIFIED' then $3 else case when active_kyc_id=$3 then null else active_kyc_id end end,
+             updated_at=now()
+         where id=$1`,
+        [current.rows[0].external_user_id,blacklistStatus,verificationId]
+      );
+      await client.query('commit');
+      return {verification:mapKycVerification(rows[0]),duplicate:false};
+    } catch(error) {
+      try{await client.query('rollback');}catch{}
+      if(error?.code==='23505' && providerEventId){
+        const duplicate=await pool.query('select * from kyc_core.verifications where provider_event_id=$1 limit 1',[providerEventId]);
+        if(duplicate.rows[0]) return {verification:mapKycVerification(duplicate.rows[0]),duplicate:true};
+      }
+      throw error;
+    } finally { client.release(); }
+  }
+
+  return {health,close,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult};
 }

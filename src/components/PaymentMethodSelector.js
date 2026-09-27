@@ -8,8 +8,8 @@ export default function PaymentMethodSelector({disabled=false,capabilities,onCha
  const [mode,setMode]=useState(selection?.type||'intent');
  const [app,setApp]=useState(selection?.appId||intentApps[0]?.id||'');
  const [upiId,setUpiId]=useState(selection?.upiId||'');
- useEffect(()=>{if(selection){setMode(selection.type||'intent');setApp(selection.appId||'');setUpiId(selection.upiId||'');}},[selection]);
- useEffect(()=>{onChange?.(mode==='vpa'?{type:'vpa',upiId:upiId.trim()}: {type:'intent',appId:app});},[mode,app,upiId]);
+useEffect(()=>{if(selection){setMode(selection.type||'intent');setApp(selection.appId||'');setUpiId(selection.upiId||'');}},[selection]);
+ useEffect(()=>{if(mode==='intent'&&!app&&!intentApps.length)return onChange?.(null);onChange?.(mode==='vpa'?{type:'vpa',upiId:upiId.trim()}: {type:'intent',appId:app||undefined});},[mode,app,upiId,intentApps.length]);
  const canIntent=Boolean(caps.supportsIntent&&intentApps.length);
  const canVpa=Boolean(caps.supportsVpa);
  const canHosted=Boolean(caps.supportsHostedCheckout);
@@ -20,7 +20,7 @@ export default function PaymentMethodSelector({disabled=false,capabilities,onCha
   {canIntent&&<><Text style={styles.section}>{title}</Text><View style={styles.appGrid}>{intentApps.map(item=><TouchableOpacity key={item.id} disabled={disabled} accessibilityRole="radio" accessibilityState={{selected:mode==='intent'&&app===item.id,disabled}} onPress={()=>{setMode('intent');setApp(item.id)}} style={[styles.appOption,mode==='intent'&&app===item.id&&styles.appOptionActive]}><View style={styles.appIcon}><Text style={styles.appInitial}>{String(item.label||'UPI').charAt(0)}</Text></View><Text style={styles.appLabel}>{item.label}</Text>{mode==='intent'&&app===item.id&&<Text style={styles.check}>✓</Text>}</TouchableOpacity>)}</View></>}
   {canIntent&&intentApps.length>0&&canVpa&&<View style={styles.or}><View style={styles.orLine}/><Text style={styles.orText}>OR</Text><View style={styles.orLine}/></View>}
   {canVpa&&<><Text style={styles.section}>Pay using UPI ID</Text><TextInput editable={!disabled} value={upiId} onChangeText={v=>{setUpiId(v);setMode('vpa')}} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" placeholder="e.g. gaurav@upi" placeholderTextColor="#A0A7B1" style={styles.input}/><Text style={styles.hint}>Your UPI ID is validated by the payment provider during payment. Format alone never marks a payment successful.</Text></>}
-  {canHosted&&<View style={styles.hosted}><Text style={styles.hostedTitle}>Secure UPI checkout</Text><Text style={styles.hint}>Continue to the provider checkout to choose any UPI method currently enabled for your RideOn account.</Text></View>}
+  {canHosted&&!canIntent&&!canVpa&&<View style={styles.hosted}><Text style={styles.hostedTitle}>Secure UPI checkout</Text><Text style={styles.hint}>Secure checkout is available through Cashfree for payment methods enabled on your account.</Text></View>}
   {!canIntent&&!canVpa&&!canHosted&&<View style={styles.unavailable}><Text style={styles.unavailableTitle}>UPI checkout unavailable</Text><Text style={styles.hint}>The configured payment provider has not enabled a verified UPI checkout yet.</Text></View>}
  </View>;
 }
