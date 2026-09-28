@@ -1,0 +1,45 @@
+name: Build RideOn iOS App
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: EAS iOS build profile
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - production
+
+jobs:
+  build:
+    name: EAS iOS build
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Install EAS CLI
+        run: npm install --global eas-cli
+      - name: Link Expo project
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas init --non-interactive
+      - name: Build iOS app
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_BUILD_PROFILE: ${{ inputs.profile }}
+          EXPO_PUBLIC_API_URL: https://rideon-api-262g.onrender.com
+          EXPO_PUBLIC_USE_LOCAL_API: "false"
+        run: eas build --platform ios --profile "$EAS_BUILD_PROFILE" --non-interactive --wait
+      - name: Print latest iOS build
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas build:list --platform ios --limit 1
