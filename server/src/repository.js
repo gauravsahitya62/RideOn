@@ -906,6 +906,62 @@ export function createRepository({ databaseUrl, fleet }) {
     } catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
 
+  async function settleFleetSecurityDeposit({bookingId,actorUserId,deductionPaise=0,reason='',evidenceReference='',refundProviderReference='' } = {}) {
+    const deduction = Math.max(0, Math.round(Number(deductionPaise) || 0));
+    if (!useDatabase) {
+      const booking = memory.bookings.get(String(bookingId));
+      if (!booking) { const e=new Error('Booking not found.'); e.code='BOOKING_NOT_FOUND'; throw e; }
+      const deposit = memory.securityDeposits.get(String(bookingId));
+      if (!deposit) { const e=new Error('Security deposit record not found.'); e.code='DEPOSIT_NOT_FOUND'; throw e; }
+      const original = Math.round(Number(deposit.originalAmount || booking.pricing?.securityDeposit || 0) * 100);
+      if (deduction > original) { const e=new Error('Deposit deduction exceeds the collected deposit.'); e.code='DEPOSIT_DEDUCTION_INVALID'; throw e; }
+      if (deduction > 0 && !String(reason).trim()) { const e=new Error('A deduction reason is required.'); e.code='DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'; throw e; }
+      if (deduction > 0 && !String(evidenceReference).trim()) { const e=new Error('Evidence/reference is required for a deduction.'); e.code='DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'; throw e; }
+      const refundable = original - deduction;
+      if (refundable > 0 && !String(refundProviderReference).trim()) { const e=new Error('A provider refund reference is required.'); e.code='REFUND_PROVIDER_REFERENCE_REQUIRED'; throw e; }
+      deposit.approvedDeduction = deduction / 100;
+      deposit.refundableAmount = refundable / 100;
+      deposit.deductionReason = String(reason || '').trim() || undefined;
+      deposit.evidenceReference = String(evidenceReference || '').trim() || undefined;
+      deposit.status = refundable > 0 ? 'refunded' : 'deducted';
+      deposit.refundProviderReference = String(refundProviderReference || '').trim() || undefined;
+      deposit.inspectedAt = new Date().toISOString();
+      deposit.inspectedBy = actorUserId || undefined;
+      return { booking, deposit: { status: deposit.status, originalAmountPaise: original, approvedDeductionPaise: deduction, refundableAmountPaise: refundable, refundProviderReference: deposit.refundProviderReference } };
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('begin');
+      const q = await client.query(`select b.*, sd.status as sd_status, sd.original_amount_paise, sd.refundable_amount_paise
+        from bookings b left join security_deposits sd on sd.booking_id=b.id
+        where b.id=$1 for update`, [bookingId]);
+      if (!q.rows[0]) { const e=new Error('Booking not found.'); e.code='BOOKING_NOT_FOUND'; throw e; }
+      const b=q.rows[0];
+      if (!['RETURNED','INSPECTION','COMPLETED'].includes(String(b.lifecycle_state || '').toUpperCase()) && String(b.status)!=='completed') {
+        const e=new Error('Vehicle must be returned and inspected before deposit settlement.'); e.code='DEPOSIT_SETTLEMENT_NOT_ALLOWED'; throw e;
+      }
+      if (!q.rows[0].original_amount_paise && !Number(b.security_deposit_paise || 0)) {
+        const e=new Error('No security deposit is due for this booking.'); e.code='DEPOSIT_NOT_FOUND'; throw e;
+      }
+      const original=Number(q.rows[0].original_amount_paise || b.security_deposit_paise || 0);
+      if (deduction > original) { const e=new Error('Deposit deduction exceeds the collected deposit.'); e.code='DEPOSIT_DEDUCTION_INVALID'; throw e; }
+      if (deduction > 0 && !String(reason).trim()) { const e=new Error('A deduction reason is required.'); e.code='DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'; throw e; }
+      if (deduction > 0 && !String(evidenceReference).trim()) { const e=new Error('Evidence/reference is required for a deduction.'); e.code='DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'; throw e; }
+      const refundable=original-deduction;
+      if (refundable > 0 && !String(refundProviderReference).trim()) { const e=new Error('A provider refund reference is required.'); e.code='REFUND_PROVIDER_REFERENCE_REQUIRED'; throw e; }
+      if (['refunded','deducted'].includes(String(q.rows[0].sd_status))) { const e=new Error('Security deposit has already been settled.'); e.code='DEPOSIT_ALREADY_SETTLED'; throw e; }
+      const status=refundable>0?'refunded':'deducted';
+      await client.query(`insert into security_deposits
+        (booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,approved_deduction_paise,status,deduction_reason,evidence_reference,provider,refund_provider_reference,inspected_at,inspected_by,refunded_at)
+        values($1,$2,(select vendor_id from bookings where id=$1),$3,$4,$5,$6,$7,$8,null,$9,now(),$10,${refundable>0?'now()':'null'})
+        on conflict (booking_id) do update set refundable_amount_paise=excluded.refundable_amount_paise,approved_deduction_paise=excluded.approved_deduction_paise,status=excluded.status,deduction_reason=excluded.deduction_reason,evidence_reference=excluded.evidence_reference,refund_provider_reference=excluded.refund_provider_reference,inspected_at=excluded.inspected_at,inspected_by=excluded.inspected_by,refunded_at=excluded.refunded_at,updated_at=now()`,
+        [bookingId,b.customer_id,original,refundable,deduction,status,String(reason||'').trim()||null,String(evidenceReference||'').trim()||null,String(refundProviderReference||'').trim()||null,actorUserId || null]);
+      await client.query('insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$2,\'fleet_ops\',$3,$4)',[bookingId,b.status,actorUserId || null,refundable>0?'security_deposit_refunded':'security_deposit_deducted']);
+      await client.query('commit');
+      return { booking: mapBooking({...b,security_deposit_refundable_paise:refundable,security_deposit_deduction_paise:deduction,security_deposit_status:status,security_deposit_reason:String(reason||'').trim()||undefined,security_deposit_evidence:String(evidenceReference||'').trim()||undefined,security_deposit_refund_reference:String(refundProviderReference||'').trim()||undefined,security_deposit_inspected_at:new Date().toISOString(),security_deposit_inspected_by:actorUserId}), deposit:{status,originalAmountPaise:original,approvedDeductionPaise:deduction,refundableAmountPaise:refundable,refundProviderReference:String(refundProviderReference||'').trim()||undefined} };
+    } catch(error) { try{await client.query('rollback')}catch{}; throw error; } finally { client.release(); }
+  }
+
   async function recordSecurityDepositInspection(vendorId, bookingId, {deductionPaise=0, reason='', evidenceReference='', refundProviderReference=''} = {}) {
     const deduction = Math.max(0, Math.round(Number(deductionPaise)||0));
     if (!useDatabase) {
@@ -948,7 +1004,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
 
   async function createOrLinkCustomerFromSupabase({supabaseUserId,email,fullName,phone,role='customer'}) {
-    if (!['customer','vendor','support','admin'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
+    if (!['customer','vendor','delivery_staff','support','admin'].includes(role)) { const e=new Error('Invalid RideOn account type.'); e.code='INVALID_ROLE'; throw e; }
 
     const placeholderPhone = () => 'supa-' + crypto.createHash('sha256').update(String(supabaseUserId)).digest('hex').slice(0,11);
 
@@ -2845,5 +2901,5 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     } finally { client.release(); }
   }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports};
+  return {health,close,settleFleetSecurityDeposit,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports};
 }
