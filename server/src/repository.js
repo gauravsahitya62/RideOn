@@ -84,6 +84,7 @@ export function createRepository({ databaseUrl, fleet }) {
       deliveredAt:iso(row.delivered_at),
       deliveryFinalLatitude:row.delivery_final_latitude == null ? null : Number(row.delivery_final_latitude),
       deliveryFinalLongitude:row.delivery_final_longitude == null ? null : Number(row.delivery_final_longitude),
+      lifecycleState:row.lifecycle_state || null,
       createdAt:iso(row.created_at ?? row.createdAt),
       updatedAt:iso(row.updated_at ?? row.updatedAt ?? row.created_at ?? row.createdAt)
     };
@@ -2630,6 +2631,48 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
   }
 
+  async function listConditionEvidence(bookingId) {
+    if(!useDatabase) return [];
+    const {rows}=await pool.query(`select e.*,c.full_name as actor_name from rental_condition_evidence e left join customers c on c.id=e.actor_user_id where e.booking_id=$1 order by e.phase asc,e.created_at asc`,[bookingId]);
+    return rows.map(row=>({id:String(row.id),bookingId:String(row.booking_id),vehicleId:String(row.vehicle_id),phase:row.phase,actorUserId:String(row.actor_user_id),actorRole:row.actor_role,actorName:row.actor_name||null,mediaType:row.media_type,bucket:row.storage_bucket,path:row.storage_path,url:row.media_url,contentType:row.content_type,fileSizeBytes:Number(row.file_size_bytes),capturedAt:iso(row.captured_at),latitude:row.latitude==null?null:Number(row.latitude),longitude:row.longitude==null?null:Number(row.longitude),metadata:row.metadata||{},createdAt:iso(row.created_at)}));
+  }
+
+  async function addConditionEvidence({bookingId,vehicleId,actorUserId,actorRole,phase,mediaType,bucket,storagePath,mediaUrl,contentType,fileSizeBytes,capturedAt=null,latitude=null,longitude=null,metadata={}}) {
+    if(!useDatabase) return {id:crypto.randomUUID(),bookingId:String(bookingId),vehicleId:String(vehicleId),phase,actorUserId:String(actorUserId),actorRole,mediaType,bucket,path:storagePath,url:mediaUrl,contentType,fileSizeBytes,capturedAt};
+    const {rows}=await pool.query(`insert into rental_condition_evidence
+      (booking_id,vehicle_id,actor_user_id,actor_role,phase,media_type,storage_bucket,storage_path,media_url,content_type,file_size_bytes,captured_at,latitude,longitude,metadata)
+      values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) returning *`,
+      [bookingId,vehicleId,actorUserId,actorRole,phase,mediaType,bucket,storagePath,mediaUrl,contentType,fileSizeBytes,capturedAt,latitude,longitude,metadata||{}]);
+    const row=rows[0];
+    return {id:String(row.id),bookingId:String(row.booking_id),vehicleId:String(row.vehicle_id),phase:row.phase,actorUserId:String(row.actor_user_id),actorRole:row.actor_role,mediaType:row.media_type,bucket:row.storage_bucket,path:row.storage_path,url:row.media_url,contentType:row.content_type,fileSizeBytes:Number(row.file_size_bytes),capturedAt:iso(row.captured_at),latitude:row.latitude==null?null:Number(row.latitude),longitude:row.longitude==null?null:Number(row.longitude),metadata:row.metadata||{},createdAt:iso(row.created_at)};
+  }
+
+  async function upsertConditionReport({bookingId,vehicleId,actorUserId,actorRole,phase,conditionStatus,damageNotes='',odometer=null,fuelBattery=null,evidenceCount=0,acknowledged=false,capturedAt=null,latitude=null,longitude=null,metadata={}}) {
+    const allowed=['no_damage','existing_damage','new_damage','damage_review'];
+    if(!allowed.includes(String(conditionStatus))){const e=new Error('Invalid vehicle condition status.');e.code='INVALID_CONDITION_STATUS';throw e;}
+    if(!useDatabase) return {id:crypto.randomUUID(),bookingId:String(bookingId),vehicleId:String(vehicleId),phase,conditionStatus,damageNotes,evidenceCount,acknowledged};
+    const {rows}=await pool.query(`insert into rental_condition_reports
+      (booking_id,vehicle_id,actor_user_id,actor_role,phase,condition_status,damage_notes,odometer,fuel_battery,evidence_count,acknowledged,captured_at,latitude,longitude,metadata)
+      values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,coalesce($12,now()),$13,$14,$15)
+      on conflict(booking_id,phase,actor_user_id) do update set
+        condition_status=excluded.condition_status,damage_notes=excluded.damage_notes,odometer=excluded.odometer,
+        fuel_battery=excluded.fuel_battery,evidence_count=excluded.evidence_count,acknowledged=excluded.acknowledged,
+        captured_at=excluded.captured_at,latitude=excluded.latitude,longitude=excluded.longitude,metadata=excluded.metadata
+      returning *`,
+      [bookingId,vehicleId,actorUserId,actorRole,phase,conditionStatus,String(damageNotes||'').slice(0,4000),odometer==null?null:Number(odometer),fuelBattery==null?null:Number(fuelBattery),Number(evidenceCount)||0,Boolean(acknowledged),capturedAt,latitude,longitude,metadata||{}]);
+    const row=rows[0];
+    if(phase==='delivery') await pool.query('update bookings set delivery_condition_status=$2,updated_at=now() where id=$1',[bookingId,conditionStatus]);
+    if(phase==='pickup') await pool.query('update bookings set pickup_condition_status=$2,updated_at=now() where id=$1',[bookingId,conditionStatus]);
+    if(phase==='pickup') await pool.query('update rental_returns set customer_condition_status=$2,customer_evidence_count=$3 where booking_id=$1 and customer_id=$4',[bookingId,conditionStatus,Number(evidenceCount)||0,actorUserId]);
+    return {id:String(row.id),bookingId:String(row.booking_id),vehicleId:String(row.vehicle_id),phase:row.phase,actorUserId:String(row.actor_user_id),actorRole:row.actor_role,conditionStatus:row.condition_status,damageNotes:row.damage_notes||'',odometer:row.odometer==null?null:Number(row.odometer),fuelBattery:row.fuel_battery==null?null:Number(row.fuel_battery),evidenceCount:Number(row.evidence_count||0),acknowledged:Boolean(row.acknowledged),capturedAt:iso(row.captured_at),latitude:row.latitude==null?null:Number(row.latitude),longitude:row.longitude==null?null:Number(row.longitude),metadata:row.metadata||{}};
+  }
+
+  async function listConditionReports(bookingId) {
+    if(!useDatabase) return [];
+    const {rows}=await pool.query('select r.*,c.full_name as actor_name from rental_condition_reports r left join customers c on c.id=r.actor_user_id where r.booking_id=$1 order by r.phase,r.created_at',[bookingId]);
+    return rows.map(row=>({id:String(row.id),bookingId:String(row.booking_id),vehicleId:String(row.vehicle_id),phase:row.phase,actorUserId:String(row.actor_user_id),actorRole:row.actor_role,actorName:row.actor_name||null,conditionStatus:row.condition_status,damageNotes:row.damage_notes||'',odometer:row.odometer==null?null:Number(row.odometer),fuelBattery:row.fuel_battery==null?null:Number(row.fuel_battery),evidenceCount:Number(row.evidence_count||0),acknowledged:Boolean(row.acknowledged),capturedAt:iso(row.captured_at),latitude:row.latitude==null?null:Number(row.latitude),longitude:row.longitude==null?null:Number(row.longitude),metadata:row.metadata||{}}));
+  }
+
   async function getKycStatus(customerId) {
     if (!useDatabase) {
       const customer = memory.customers.get(String(customerId));
@@ -2802,5 +2845,5 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     } finally { client.release(); }
   }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports};
 }
