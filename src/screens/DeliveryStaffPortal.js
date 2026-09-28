@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Linking, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Linking, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import { rideOnApi, restoreAccessToken } from '../services/api';
+import VehicleConditionEvidence from '../components/VehicleConditionEvidence';
 
 const C={bg:'#F7F5F1',white:'#FFFFFF',ink:'#121A28',muted:'#737D8C',line:'#E7E1D9',orange:'#EF6238',green:'#198C67',red:'#C94B4B',navy:'#101827'};
 const BACKGROUND_TASK='rideon-delivery-background-location';
@@ -40,6 +41,10 @@ export default function DeliveryStaffPortal({ authenticatedUser, onLogout }) {
   const [activeJob,setActiveJob]=useState(null);
   const [tracking,setTracking]=useState(false);
   const [position,setPosition]=useState(null);
+  const [conditionReady,setConditionReady]=useState(false);
+  const [odometer,setOdometer]=useState('');
+  const [fuelBattery,setFuelBattery]=useState('');
+  const [pickupNotes,setPickupNotes]=useState('');
   const watchRef=useRef(null);
 
   const loadJobs=useCallback(async()=>{
@@ -64,6 +69,10 @@ export default function DeliveryStaffPortal({ authenticatedUser, onLogout }) {
     await SecureStore.deleteItemAsync(ACTIVE_TOKEN_KEY).catch(()=>{});
     setTracking(false);
     setActiveJob(null);
+    setConditionReady(false);
+    setOdometer('');
+    setFuelBattery('');
+    setPickupNotes('');
   },[]);
 
   const startTracking=useCallback(async(job,mode='delivery')=>{
@@ -79,6 +88,10 @@ export default function DeliveryStaffPortal({ authenticatedUser, onLogout }) {
       if(token)await SecureStore.setItemAsync(ACTIVE_TOKEN_KEY,String(token));
       const startResult=mode==='pickup'?await rideOnApi.startPickupJob(job.bookingId):await rideOnApi.startDeliveryJob(job.bookingId);
       setActiveJob({...job,trackingMode:mode});
+      setConditionReady(false);
+      setOdometer('');
+      setFuelBattery('');
+      setPickupNotes('');
       setTracking(true);
       const current=await Location.getCurrentPositionAsync({accuracy:Location.Accuracy.High});
       setPosition({latitude:current.coords.latitude,longitude:current.coords.longitude});
@@ -125,16 +138,20 @@ export default function DeliveryStaffPortal({ authenticatedUser, onLogout }) {
     if(!activeJob)return;
     setBusyId(activeJob.bookingId);setError('');
     try{
-      await rideOnApi.completePickupJob(activeJob.bookingId,{...(position||{}),returnLocation:activeJob.returnLocation||activeJob.address||null});
+      if(!conditionReady){setError('Record and confirm the vehicle condition before completing pickup.');return;}
+      await rideOnApi.completePickupJob(activeJob.bookingId,{...(position||{}),returnLocation:activeJob.returnLocation||activeJob.address||null,odometer:odometer===''?null:Number(odometer),fuelBattery:fuelBattery===''?null:Number(fuelBattery),notes:pickupNotes});
       await stopTracking();await loadJobs();
     }catch(e){setError(e?.message||'Pickup could not be completed.');}
     finally{setBusyId(null);}
   };
 
   const openNavigation=job=>{
-    const lat=job.deliveryLatitude,lon=job.deliveryLongitude;
+    const target=job.assignmentType==='pickup' ? (job.returnLocation||job.address) : null;
+    const lat=job.assignmentType==='pickup' ? job.returnLatitude : job.deliveryLatitude;
+    const lon=job.assignmentType==='pickup' ? job.returnLongitude : job.deliveryLongitude;
     const url=Number.isFinite(lat)&&Number.isFinite(lon)?`https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`:null;
     if(url)Linking.openURL(url);
+    else if(target) Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(target)}`);
   };
 
   const activeMapJob=activeJob||mine.find(j=>j.assignmentStatus==='started');
@@ -152,7 +169,23 @@ export default function DeliveryStaffPortal({ authenticatedUser, onLogout }) {
   <View style={s.welcome}><View><Text style={s.eyebrow}>RIDER DASHBOARD</Text><Text style={s.title}>Ready for your next delivery?</Text></View><TouchableOpacity onPress={loadJobs}><Text style={s.refresh}>↻</Text></TouchableOpacity></View>
   <View style={s.tabs}><TouchableOpacity style={[s.tab,tab==='available'&&s.tabActive]} onPress={()=>setTab('available')}><Text style={[s.tabText,tab==='available'&&s.tabTextActive]}>Available</Text></TouchableOpacity><TouchableOpacity style={[s.tab,tab==='mine'&&s.tabActive]} onPress={()=>setTab('mine')}><Text style={[s.tabText,tab==='mine'&&s.tabTextActive]}>My jobs</Text></TouchableOpacity></View>
   {error?<View style={s.error}><Text style={s.errorText}>{error}</Text></View>:null}
-  {tracking&&activeMapJob?<View style={s.liveCard}><View style={s.liveHeader}><View><Text style={s.liveKicker}>{activeJob?.trackingMode==='pickup'?'PICKUP':'DELIVERY'} · LIVE GPS</Text><Text style={s.liveTitle}>{activeMapJob.vehicle?.name}</Text></View><View style={s.liveDot}/></View>{region?<MapView style={s.map} initialRegion={region} region={region} showsUserLocation showsMyLocationButton><Marker coordinate={{latitude:position?.latitude??activeMapJob.deliveryLatitude,longitude:position?.longitude??activeMapJob.deliveryLongitude}} title="You"/>{Number.isFinite(activeMapJob.deliveryLatitude)&&Number.isFinite(activeMapJob.deliveryLongitude)&&<Marker coordinate={{latitude:activeMapJob.deliveryLatitude,longitude:activeMapJob.deliveryLongitude}} title="Customer"/></MapView>:null}<View style={s.liveActions}><TouchableOpacity style={s.navButton} onPress={()=>openNavigation(activeMapJob)}><Text style={s.navText}>Navigate</Text></TouchableOpacity><TouchableOpacity style={s.completeButton} onPress={activeJob?.trackingMode==='pickup'?completePickup:completeDelivery} disabled={busyId===activeMapJob.bookingId}><Text style={s.completeText}>{busyId===activeMapJob.bookingId?'Updating…':activeJob?.trackingMode==='pickup'?'Vehicle picked up':'Vehicle delivered'}</Text></TouchableOpacity></View></View>:null}
+  {tracking&&activeMapJob?<View style={s.liveCard}><View style={s.liveHeader}><View><Text style={s.liveKicker}>{activeJob?.trackingMode==='pickup'?'PICKUP':'DELIVERY'} · LIVE GPS</Text><Text style={s.liveTitle}>{activeMapJob.vehicle?.name}</Text></View><View style={s.liveDot}/></View>{region?<MapView style={s.map} initialRegion={region} region={region} showsUserLocation showsMyLocationButton><Marker coordinate={{latitude:position?.latitude??activeMapJob.deliveryLatitude,longitude:position?.longitude??activeMapJob.deliveryLongitude}} title="You"/>{Number.isFinite(activeMapJob.deliveryLatitude)&&Number.isFinite(activeMapJob.deliveryLongitude)&&<Marker coordinate={{latitude:activeMapJob.deliveryLatitude,longitude:activeMapJob.deliveryLongitude}} title="Customer"/></MapView>:null}<View style={s.liveActions}><TouchableOpacity style={s.navButton} onPress={()=>openNavigation(activeMapJob)}><Text style={s.navText}>Navigate</Text></TouchableOpacity><TouchableOpacity style={s.completeButton} onPress={activeJob?.trackingMode==='pickup'?completePickup:completeDelivery} disabled={busyId===activeMapJob.bookingId||activeJob?.trackingMode==='pickup'&&!conditionReady}><Text style={s.completeText}>{busyId===activeMapJob.bookingId?'Updating…':activeJob?.trackingMode==='pickup'&&!conditionReady?'Confirm condition first':activeJob?.trackingMode==='pickup'?'Vehicle picked up':'Vehicle delivered'}</Text></TouchableOpacity></View></View>:null}
+  {tracking&&activeJob?<View style={s.conditionPanel}>
+    <VehicleConditionEvidence
+      bookingId={activeJob.bookingId}
+      phase={activeJob.trackingMode==='pickup'?'pickup':'delivery'}
+      actor="driver"
+      latitude={position?.latitude||null}
+      longitude={position?.longitude||null}
+      onSaved={()=>setConditionReady(true)}
+    />
+    {activeJob.trackingMode==='pickup'?<View style={s.returnDetails}>
+      <Text style={s.detailTitle}>Pickup details</Text>
+      <TextInput value={odometer} onChangeText={setOdometer} keyboardType="number-pad" placeholder="Odometer (km)" placeholderTextColor="#9AA1AB" style={s.detailInput}/>
+      <TextInput value={fuelBattery} onChangeText={setFuelBattery} keyboardType="decimal-pad" placeholder="Fuel / battery (%)" placeholderTextColor="#9AA1AB" style={s.detailInput}/>
+      <TextInput value={pickupNotes} onChangeText={setPickupNotes} multiline placeholder="Pickup notes" placeholderTextColor="#9AA1AB" style={[s.detailInput,{minHeight:72,textAlignVertical:'top'}]}/>
+    </View>:null}
+  </View>:null}
   <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
     {loading&&!available.length&&!mine.length?<View style={s.center}><ActivityIndicator color={C.orange}/><Text style={s.muted}>Loading delivery jobs…</Text></View>:tab==='available'?<>{!available.length?<Empty title="No delivery requests" text="New paid doorstep bookings will appear here when they are ready for a rider."/>:available.map(job=><DeliveryCard key={job.bookingId} job={job} busy={busyId===job.bookingId} action={<TouchableOpacity style={s.primary} onPress={()=>accept(job)} disabled={busyId===job.bookingId}><Text style={s.primaryText}>{busyId===job.bookingId?'Accepting…':'Accept delivery'}</Text></TouchableOpacity>} navigate={openNavigation}/>)}</>:<>{!mine.length?<Empty title="No active jobs" text="Accept a delivery request to see it here."/>:mine.map(job=><MyJobCard key={job.assignmentId||job.bookingId+job.assignmentType} job={job} busy={busyId===job.bookingId} tracking={tracking&&activeJob?.bookingId===job.bookingId} onStart={()=>startTracking(job,'delivery')} onRequestPickup={()=>requestPickup(job)} onStartPickup={()=>startTracking(job,'pickup')} navigate={openNavigation}/>)}</>}
   </ScrollView></SafeAreaView>;
