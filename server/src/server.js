@@ -726,6 +726,7 @@ app.post('/api/v1/bookings/:id/condition-evidence/upload',supabaseRequireAuth,as
     const storageKey=process.env.SUPABASE_SERVICE_ROLE_KEY||process.env.SUPABASE_SECRET_KEY;
     const bucket=String(process.env.SUPABASE_RENTAL_EVIDENCE_BUCKET||'rental-evidence').trim();
     if(!supabaseUrl||!storageKey)return res.status(503).json({error:{code:'STORAGE_NOT_CONFIGURED',message:'Rental evidence storage is not configured on the API.'}});
+    try{await fetch(`${supabaseUrl}/storage/v1/bucket`,{method:'POST',headers:{Authorization:'Bearer '+storageKey,apikey:storageKey,'Content-Type':'application/json'},body:JSON.stringify({id:bucket,name:bucket,public:true,file_size_limit:15728640,allowed_mime_types:['image/jpeg','image/png','image/webp','video/mp4','video/quicktime','video/webm']})});}catch{}
     const ext=contentType==='image/png'?'png':contentType==='image/webp'?'webp':contentType==='video/mp4'?'mp4':contentType==='video/webm'?'webm':'mov';
     const actorRole=access.role;
     const path=`bookings/${req.params.id}/${phase}/${actorRole}/${crypto.randomUUID()}.${ext}`;
