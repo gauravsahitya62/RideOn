@@ -258,5 +258,11 @@ export const rideOnApi = {
   },
   verifyPayment: (id,payload = {}) => request(`/api/v1/payments/${encode(id)}/verify`, { method:'POST', body:JSON.stringify({ bookingId: payload.bookingId }) }),
   inspectSecurityDeposit: (bookingId,payload = {}) => request(`/api/v1/vendor/bookings/${encode(bookingId)}/security-deposit/inspection`, { method:'POST', body:JSON.stringify(payload) }),
+  listDeliveryJobs: (scope='available',params={}) => { const query = new URLSearchParams({scope,...Object.fromEntries(Object.entries(params).filter(([,v])=>v!=null&&v!==''))}).toString(); return request(`/api/v1/delivery/jobs?${query}`); },
+  acceptDeliveryJob: (bookingId) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/accept`, { method:'POST', body:JSON.stringify({}) }),
+  startDeliveryJob: (bookingId) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/start`, { method:'POST', body:JSON.stringify({}) }),
+  updateDeliveryJobLocation: (bookingId,payload) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/location`, { method:'POST', body:JSON.stringify(payload) }),
+  completeDeliveryJob: (bookingId,payload={}) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/complete`, { method:'POST', body:JSON.stringify(payload) }),
+  requestDeliveryPickup: (bookingId) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/request-pickup`, { method:'POST', body:JSON.stringify({}) }),
   listBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/bookings${query ? `?${query}` : ''}`); },
 };
