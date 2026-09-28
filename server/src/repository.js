@@ -41,7 +41,7 @@ export function createRepository({ databaseUrl, fleet }) {
       id:String(row.id),
       customerId:String(row.customer_id ?? row.customerId),
       vehicleId:String(row.vehicle_id ?? row.vehicleId),
-      vehicle:vehicle ? { id:vehicle.id, name:vehicle.name, type:vehicle.type } : undefined,
+      vehicle:vehicle ? { id:vehicle.id, name:vehicle.name, type:vehicle.type, imageUrls:Array.isArray(vehicle.image_urls)?vehicle.image_urls:[] } : undefined,
       startAt, endAt,
       delivery:row.delivery_required ?? row.delivery,
       address:row.delivery_address ?? row.address,
@@ -1125,7 +1125,7 @@ export function createRepository({ databaseUrl, fleet }) {
     return rows[0] ? mapBooking(rows[0]) : null;
   }
 
-  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:String(row.vendor_id),status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
+  const mapTrackingSession=(row)=>row&&({id:String(row.id),bookingId:String(row.booking_id),vendorId:row.vendor_id?String(row.vendor_id):null,staffUserId:row.staff_user_id?String(row.staff_user_id):null,status:row.status,startedAt:iso(row.started_at),endedAt:iso(row.ended_at),lastLatitude:row.last_latitude==null?null:Number(row.last_latitude),lastLongitude:row.last_longitude==null?null:Number(row.last_longitude),lastAccuracyMeters:row.last_accuracy_meters==null?null:Number(row.last_accuracy_meters),lastLocationAt:iso(row.last_location_at),lastRouteDistanceMeters:row.last_route_distance_meters==null?null:Number(row.last_route_distance_meters),lastRouteDurationSeconds:row.last_route_duration_seconds==null?null:Number(row.last_route_duration_seconds),lastRoutePolyline:row.last_route_polyline||null,lastRouteAt:iso(row.last_route_at),expiresAt:iso(row.expires_at)});
 
   async function startDelivery(vendorId, bookingId) {
     const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
@@ -2364,6 +2364,216 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
   }
 
 
+
+  function mapDeliveryJob(row) {
+    const vehicleImageUrls = Array.isArray(row.image_urls) ? row.image_urls.filter(Boolean) : [];
+    return {
+      assignmentId: row.assignment_id ? String(row.assignment_id) : null,
+      assignmentType: row.assignment_type || 'delivery',
+      assignmentStatus: row.assignment_status || null,
+      bookingId: String(row.booking_id),
+      vehicleId: String(row.vehicle_id),
+      vehicle: {
+        id: String(row.vehicle_id),
+        name: row.vehicle_name || 'RideOn vehicle',
+        type: row.vehicle_type || 'bike',
+        imageUrls: vehicleImageUrls,
+        pickupLocation: row.pickup_location || null,
+        pickupLatitude: row.pickup_latitude == null ? null : Number(row.pickup_latitude),
+        pickupLongitude: row.pickup_longitude == null ? null : Number(row.pickup_longitude),
+      },
+      customerId: String(row.customer_id),
+      customerName: row.customer_name || 'Customer',
+      customerPhone: row.customer_phone || null,
+      startAt: iso(row.start_at),
+      endAt: iso(row.end_at),
+      address: row.delivery_address || null,
+      deliveryLatitude: row.delivery_latitude == null ? null : Number(row.delivery_latitude),
+      deliveryLongitude: row.delivery_longitude == null ? null : Number(row.delivery_longitude),
+      deliveryStatus: row.delivery_status || 'scheduled',
+      lifecycleState: row.lifecycle_state || null,
+      bookingStatus: row.booking_status || null,
+      paymentStatus: row.payment_status || null,
+      scheduledAt: iso(row.scheduled_at),
+      pickupRequestedAt: iso(row.pickup_requested_at),
+      deliveredAt: iso(row.delivered_at),
+      assignedStaffUserId: row.assigned_staff_user_id ? String(row.assigned_staff_user_id) : null,
+      returnRequestedAt: iso(row.return_requested_at),
+      returnLocation: row.return_location || null,
+      notes: row.customer_notes || null,
+    };
+  }
+
+  async function listDeliveryJobs(staffUserId, { scope='available', limit=30, offset=0 }={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||30));
+    const safeOffset=Math.max(0,Number(offset)||0);
+    if(!useDatabase) return [];
+    const params=[safeLimit,safeOffset];
+    if(String(scope)==='mine'){
+      params.push(staffUserId);
+      const {rows}=await pool.query(
+        `select a.id as assignment_id,a.assignment_type,a.status as assignment_status,a.scheduled_at,
+                b.id as booking_id,b.vehicle_id,b.customer_id,b.start_at,b.end_at,b.delivery_address,
+                b.delivery_latitude,b.delivery_longitude,b.delivery_status,b.lifecycle_state,b.status as booking_status,
+                b.payment_status,b.pickup_requested_at,b.delivered_at,b.assigned_staff_user_id,b.return_requested_at,b.return_location,b.customer_notes,
+                c.name as customer_name,c.phone as customer_phone,
+                v.name as vehicle_name,v.type as vehicle_type,v.image_urls,v.pickup_location,v.pickup_latitude,v.pickup_longitude
+           from vehicle_assignments a
+           join bookings b on b.id=a.booking_id
+           join customers c on c.id=b.customer_id
+           join vehicles v on v.id=a.vehicle_id
+          where a.staff_user_id=$3 and a.status in ('assigned','started')
+          order by coalesce(a.scheduled_at,b.start_at) asc
+          limit $1 offset $2`,
+        params
+      );
+      return rows.map(mapDeliveryJob);
+    }
+    const {rows}=await pool.query(
+      `select null::uuid as assignment_id,'delivery'::text as assignment_type,null::text as assignment_status,
+              b.scheduled_fulfillment_at as scheduled_at,
+              b.id as booking_id,b.vehicle_id,b.customer_id,b.start_at,b.end_at,b.delivery_address,
+              b.delivery_latitude,b.delivery_longitude,b.delivery_status,b.lifecycle_state,b.status as booking_status,
+              b.payment_status,b.pickup_requested_at,b.delivered_at,b.assigned_staff_user_id,b.return_requested_at,b.return_location,b.customer_notes,
+              c.name as customer_name,c.phone as customer_phone,
+              v.name as vehicle_name,v.type as vehicle_type,v.image_urls,v.pickup_location,v.pickup_latitude,v.pickup_longitude
+         from bookings b
+         join customers c on c.id=b.customer_id
+         join vehicles v on v.id=b.vehicle_id
+        where b.status='confirmed'
+          and b.payment_status in ('paid','held','settlement_pending','settled')
+          and b.delivery_required=true
+          and b.delivery_status in ('scheduled','ready')
+          and b.assigned_staff_user_id is null
+          and not exists (
+            select 1 from vehicle_assignments ax
+             where ax.booking_id=b.id and ax.assignment_type='delivery'
+               and ax.status in ('assigned','started')
+          )
+        order by coalesce(b.scheduled_fulfillment_at,b.start_at) asc
+        limit $1 offset $2`,
+      params
+    );
+    return rows.map(mapDeliveryJob);
+  }
+
+  async function acceptDeliveryJob(staffUserId, bookingId) {
+    if(!useDatabase){const e=new Error('Delivery dispatch is unavailable.');e.code='DELIVERY_DISPATCH_UNAVAILABLE';throw e;}
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query(
+        `select b.*,v.name as vehicle_name,v.type as vehicle_type
+           from bookings b join vehicles v on v.id=b.vehicle_id
+          where b.id=$1 for update`,[bookingId]);
+      const b=rows[0];
+      if(!b){const e=new Error('Delivery request not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(b.status!=='confirmed'||!b.delivery_required||!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))){
+        const e=new Error('This delivery is not ready to be accepted.');e.code='DELIVERY_NOT_READY';throw e;
+      }
+      if(b.assigned_staff_user_id && String(b.assigned_staff_user_id)!==String(staffUserId)){const e=new Error('This delivery has already been accepted.');e.code='DELIVERY_ALREADY_ASSIGNED';throw e;}
+      const existing=await client.query("select id,staff_user_id,status from vehicle_assignments where booking_id=$1 and assignment_type='delivery' and status in ('assigned','started') for update",[bookingId]);
+      if(existing.rows[0] && String(existing.rows[0].staff_user_id)!==String(staffUserId)){const e=new Error('This delivery has already been accepted.');e.code='DELIVERY_ALREADY_ASSIGNED';throw e;}
+      let assignment=existing.rows[0];
+      if(!assignment){
+        const ins=await client.query("insert into vehicle_assignments(booking_id,vehicle_id,assignment_type,staff_user_id,status,scheduled_at) values($1,$2,'delivery',$3,'assigned',coalesce($4,$5)) returning *",[bookingId,b.vehicle_id,staffUserId,b.scheduled_fulfillment_at,b.start_at]);
+        assignment=ins.rows[0];
+      }
+      await client.query("update bookings set assigned_staff_user_id=$2,scheduled_fulfillment_at=coalesce(scheduled_fulfillment_at,start_at),updated_at=now() where id=$1",[bookingId,staffUserId]);
+      await client.query("insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,details) values($1,$2,$3,'delivery_job_accepted',$4)",[b.vehicle_id,bookingId,staffUserId,JSON.stringify({assignmentId:assignment.id})]);
+      await client.query('commit');
+      return {assignmentId:String(assignment.id),bookingId:String(bookingId),status:'assigned',staffUserId:String(staffUserId)};
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function startDeliveryForStaff(staffUserId, bookingId) {
+    const now=new Date(); const expiresAt=new Date(now.getTime()+Math.max(30,Number(process.env.TRACKING_SESSION_MAX_MINUTES||180))*60000);
+    if(!useDatabase){const e=new Error('Delivery dispatch is unavailable.');e.code='DELIVERY_DISPATCH_UNAVAILABLE';throw e;}
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query(`select b.*,v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 for update`,[bookingId]);
+      const b=rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(String(b.assigned_staff_user_id)!==String(staffUserId)){const e=new Error('This delivery is not assigned to you.');e.code='DELIVERY_NOT_ASSIGNED';throw e;}
+      if(b.status!=='confirmed'){const e=new Error('Delivery can only start after the booking is confirmed.');e.code='DELIVERY_START_NOT_ALLOWED';throw e;}
+      if(!b.delivery_required||b.delivery_latitude==null||b.delivery_longitude==null||!String(b.delivery_address||'').trim()){const e=new Error('A valid delivery location is required before delivery can start.');e.code='DELIVERY_LOCATION_REQUIRED';throw e;}
+      if(!['paid','held','settlement_pending','settled'].includes(String(b.payment_status))){const e=new Error('Payment must be confirmed before delivery can start.');e.code='PAYMENT_REQUIRED_FOR_DELIVERY';throw e;}
+      const active=await client.query("select id from tracking_sessions where booking_id=$1 and status='active' for update",[bookingId]);
+      if(active.rows[0]){const e=new Error('Delivery tracking is already active.');e.code='DELIVERY_ALREADY_ACTIVE';throw e;}
+      const {rows:created}=await client.query("insert into tracking_sessions(booking_id,vendor_id,staff_user_id,status,expires_at) values($1,null,$2,'active',$3) returning *",[bookingId,staffUserId,expiresAt]);
+      await client.query("update vehicle_assignments set status='started',updated_at=now() where booking_id=$1 and assignment_type='delivery' and staff_user_id=$2 and status='assigned'",[bookingId,staffUserId]);
+      await client.query("update bookings set delivery_status='in_delivery',delivery_started_at=now(),lifecycle_state='DELIVERY_STARTED',updated_at=now() where id=$1",[bookingId]);
+      await client.query("insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,next_state,details) values($1,$2,$3,'delivery_started','DELIVERY_STARTED',$4)",[b.vehicle_id,bookingId,staffUserId,JSON.stringify({trackingSessionId:created[0].id})]);
+      await client.query('commit');
+      return mapTrackingSession(created[0]);
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function getActiveTrackingSessionForStaff(staffUserId, bookingId) {
+    if(!useDatabase) return null;
+    const {rows}=await pool.query("select * from tracking_sessions where booking_id=$1 and staff_user_id=$2 and status='active' order by started_at desc limit 1",[bookingId,staffUserId]);
+    return rows[0]?mapTrackingSession(rows[0]):null;
+  }
+
+  async function updateDeliveryLocationForStaff(staffUserId, bookingId, {latitude,longitude,accuracyMeters,recordedAt}={}) {
+    const lat=Number(latitude),lon=Number(longitude),accuracy=accuracyMeters==null?null:Number(accuracyMeters),when=recordedAt?new Date(recordedAt):new Date();
+    if(!Number.isFinite(lat)||lat<-90||lat>90||!Number.isFinite(lon)||lon<-180||lon>180){const e=new Error('Invalid delivery location.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
+    if(accuracy!=null&&(!Number.isFinite(accuracy)||accuracy<0||accuracy>10000)){const e=new Error('Invalid GPS accuracy.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
+    if(Number.isNaN(when.getTime())||when.getTime()>Date.now()+120000){const e=new Error('Invalid location timestamp.');e.code='INVALID_DELIVERY_TIMESTAMP';throw e;}
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query("select ts.* from tracking_sessions ts where ts.booking_id=$1 and ts.staff_user_id=$2 and ts.status='active' for update",[bookingId,staffUserId]);
+      const session=rows[0];if(!session){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      if(new Date(session.expires_at)<=new Date()){await client.query("update tracking_sessions set status='expired',ended_at=now() where id=$1",[session.id]);const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
+      if(session.last_location_at&&when.getTime()<new Date(session.last_location_at).getTime()-5000){const e=new Error('Location update is older than the last accepted update.');e.code='STALE_LOCATION_UPDATE';throw e;}
+      const {rows:updated}=await client.query("update tracking_sessions set last_latitude=$2,last_longitude=$3,last_accuracy_meters=$4,last_location_at=$5 where id=$1 returning *",[session.id,lat,lon,accuracy,when.toISOString()]);
+      await client.query('commit');
+      return mapTrackingSession(updated[0]);
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function completeDeliveryForStaff(staffUserId, bookingId, {latitude=null,longitude=null}={}) {
+    const finalLat=latitude==null?null:Number(latitude),finalLon=longitude==null?null:Number(longitude);
+    if((finalLat==null)!==(finalLon==null)||finalLat!=null&&(!Number.isFinite(finalLat)||finalLat<-90||finalLat>90)||finalLon!=null&&(!Number.isFinite(finalLon)||finalLon<-180||finalLon>180)){const e=new Error('Invalid final delivery location.');e.code='INVALID_DELIVERY_LOCATION';throw e;}
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query("select ts.*,b.status as booking_status,b.vehicle_id from tracking_sessions ts join bookings b on b.id=ts.booking_id where ts.booking_id=$1 and ts.staff_user_id=$2 and ts.status='active' for update",[bookingId,staffUserId]);
+      const ts=rows[0];if(!ts){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
+      if(new Date(ts.expires_at)<=new Date()){await client.query("update tracking_sessions set status='expired',ended_at=now() where id=$1",[ts.id]);const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
+      if(ts.booking_status!=='confirmed'){const e=new Error('Delivery can no longer be completed.');e.code='DELIVERY_COMPLETION_NOT_ALLOWED';throw e;}
+      const lat=finalLat??(ts.last_latitude==null?null:Number(ts.last_latitude)),lon=finalLon??(ts.last_longitude==null?null:Number(ts.last_longitude));
+      await client.query("update tracking_sessions set status='completed',ended_at=now(),last_latitude=coalesce($2,last_latitude),last_longitude=coalesce($3,last_longitude),last_location_at=case when $2 is not null then now() else last_location_at end where id=$1",[ts.id,lat,lon]);
+      await client.query("update vehicle_assignments set status='completed',updated_at=now() where booking_id=$1 and assignment_type='delivery' and staff_user_id=$2 and status in ('assigned','started')",[bookingId,staffUserId]);
+      await client.query("update bookings set delivery_status='delivered',delivered_at=now(),delivery_final_latitude=$2,delivery_final_longitude=$3,lifecycle_state='ACTIVE_RENTAL',updated_at=now() where id=$1",[bookingId,lat,lon]);
+      await client.query("insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,next_state,details) values($1,$2,$3,'delivery_completed','ACTIVE_RENTAL',$4)",[ts.vehicle_id,bookingId,staffUserId,JSON.stringify({trackingSessionId:ts.id})]);
+      const {rows:bookingRows}=await client.query("select b.*,v.name as vehicle_name,v.type as vehicle_type,v.image_urls from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1",[bookingId]);
+      await client.query('commit');
+      return {booking:mapBooking(bookingRows[0]),session:mapTrackingSession({...ts,status:'completed',ended_at:new Date().toISOString(),last_latitude:lat,last_longitude:lon,last_location_at:lat==null?ts.last_location_at:new Date().toISOString()})};
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
+  async function requestPickupForStaff(staffUserId, bookingId) {
+    if(!useDatabase){const e=new Error('Pickup dispatch is unavailable.');e.code='PICKUP_DISPATCH_UNAVAILABLE';throw e;}
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query("select b.*,v.name as vehicle_name,v.type as vehicle_type from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 for update",[bookingId]);
+      const b=rows[0];if(!b){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(String(b.assigned_staff_user_id)!==String(staffUserId)){const e=new Error('Only the delivery rider assigned to this booking can request its pickup.');e.code='DELIVERY_NOT_ASSIGNED';throw e;}
+      if(b.delivery_status!=='delivered'){const e=new Error('Pickup can be requested only after the vehicle has been delivered.');e.code='PICKUP_NOT_READY';throw e;}
+      if(!['ACTIVE_RENTAL','RETURN_REQUESTED'].includes(String(b.lifecycle_state))){const e=new Error('This rental is not ready for pickup.');e.code='PICKUP_NOT_READY';throw e;}
+      const existing=await client.query("select id,status from vehicle_assignments where booking_id=$1 and assignment_type='pickup' and status in ('assigned','started') for update",[bookingId]);
+      if(existing.rows[0]){await client.query('commit');return {assignmentId:String(existing.rows[0].id),bookingId:String(bookingId),status:existing.rows[0].status};}
+      const {rows:created}=await client.query("insert into vehicle_assignments(booking_id,vehicle_id,assignment_type,staff_user_id,status,scheduled_at) values($1,$2,'pickup',$3,'assigned',coalesce($4,now())) returning *",[bookingId,b.vehicle_id,staffUserId,b.return_requested_at||b.end_at]);
+      await client.query("update bookings set pickup_requested_at=coalesce(pickup_requested_at,now()),pickup_requested_by=$2,lifecycle_state=case when lifecycle_state='ACTIVE_RENTAL' then 'RETURN_REQUESTED' else lifecycle_state end,updated_at=now() where id=$1",[bookingId,staffUserId]);
+      await client.query("insert into fleet_operation_audit(vehicle_id,booking_id,actor_user_id,action,details) values($1,$2,$3,'pickup_requested',$4)",[b.vehicle_id,bookingId,staffUserId,JSON.stringify({assignmentId:created[0].id})]);
+      await client.query('commit');
+      return {assignmentId:String(created[0].id),bookingId:String(bookingId),status:'assigned',scheduledAt:iso(created[0].scheduled_at)};
+    }catch(error){try{await client.query('rollback')}catch{};throw error;}finally{client.release();}
+  }
+
   async function getKycStatus(customerId) {
     if (!useDatabase) {
       const customer = memory.customers.get(String(customerId));
@@ -2536,5 +2746,5 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     } finally { client.release(); }
   }
 
-  return {health,close,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult};
+  return {health,close,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,completeDeliveryForStaff,requestPickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult};
 }
