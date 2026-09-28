@@ -1299,7 +1299,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const ts=rows[0];if(!ts){const e=new Error('Delivery tracking is not active.');e.code='TRACKING_NOT_ACTIVE';throw e;}
       if(new Date(ts.expires_at)<=new Date()){await client.query("update tracking_sessions set status='expired',ended_at=now() where id=$1",[ts.id]);const e=new Error('Delivery tracking session expired.');e.code='TRACKING_SESSION_EXPIRED';throw e;}
       if(ts.booking_status!=='confirmed'){const e=new Error('Delivery can no longer be completed.');e.code='DELIVERY_COMPLETION_NOT_ALLOWED';throw e;}
-      const condition=await client.query("select id from rental_condition_reports where booking_id=$1 and vehicle_id=$2 and phase='delivery' and actor_user_id=$3 and acknowledged=true and evidence_count>0 order by updated_at desc limit 1",[bookingId,ts.vehicle_id,staffUserId]);
+      const condition=await client.query("select id from rental_condition_reports where booking_id=$1 and vehicle_id=$2 and phase='delivery' and actor_user_id=$3 and acknowledged=true and evidence_count>0 order by captured_at desc limit 1",[bookingId,ts.vehicle_id,staffUserId]);
       if(!condition.rows[0]){const e=new Error('Vehicle condition evidence must be recorded before delivery is completed.');e.code='CONDITION_EVIDENCE_REQUIRED';throw e;}
       const lat=finalLat??(ts.last_latitude==null?null:Number(ts.last_latitude)),lon=finalLon??(ts.last_longitude==null?null:Number(ts.last_longitude));
       await client.query("update tracking_sessions set status='completed',ended_at=now(),last_latitude=coalesce($2,last_latitude),last_longitude=coalesce($3,last_longitude),last_location_at=case when $2 is not null then now() else last_location_at end where id=$1",[ts.id,lat,lon]);
