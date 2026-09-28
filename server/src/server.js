@@ -1217,6 +1217,39 @@ app.post('/api/v1/delivery/jobs/:id/complete',supabaseRequireAuth,requireDeliver
   }
 });
 
+app.post('/api/v1/delivery/jobs/:id/pickup/start',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  try{
+    const session=await repository.startPickupForStaff(req.user.id,req.params.id);
+    res.json({tracking:{session,status:'pickup_in_progress',active:true}});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,PICKUP_NOT_ASSIGNED:409,PICKUP_NOT_READY:409,DELIVERY_ALREADY_ACTIVE:409}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'PICKUP_START_FAILED',message:error?.message||'Pickup could not be started.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/pickup/complete',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  const p=z.object({
+    latitude:z.coerce.number().min(-90).max(90).nullable().optional(),
+    longitude:z.coerce.number().min(-180).max(180).nullable().optional(),
+    returnLocation:z.string().trim().max(300).nullable().optional(),
+    odometer:z.coerce.number().int().min(0).nullable().optional(),
+    fuelBattery:z.coerce.number().min(0).max(100).nullable().optional(),
+    returnedCondition:z.string().max(2000).optional(),
+    damageNotes:z.string().max(2000).optional(),
+    notes:z.string().max(2000).optional(),
+    evidencePhotos:z.array(z.string().url()).max(12).optional().default([]),
+  }).safeParse(req.body||{});
+  if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid pickup details.',details:p.error.flatten()}});
+  try{
+    const result=await repository.completePickupForStaff(req.user.id,req.params.id,p.data);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'returned',active:false}});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,PICKUP_NOT_ASSIGNED:409,PICKUP_NOT_READY:409,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,INVALID_DELIVERY_LOCATION:400,INVALID_RETURN_DETAILS:400,RETURN_NOT_ALLOWED:409}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'PICKUP_COMPLETION_FAILED',message:error?.message||'Vehicle pickup could not be completed.'}});
+  }
+});
+
 app.post('/api/v1/delivery/jobs/:id/request-pickup',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
   try{
     const assignment=await repository.requestPickupForStaff(req.user.id,req.params.id);
