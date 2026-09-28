@@ -2429,7 +2429,9 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
            join bookings b on b.id=a.booking_id
            join customers c on c.id=b.customer_id
            join vehicles v on v.id=a.vehicle_id
-          where a.staff_user_id=$3 and a.status in ('assigned','started')
+          where a.staff_user_id=$3
+            and (a.status in ('assigned','started')
+                 or (a.assignment_type='delivery' and a.status='completed' and b.delivery_status='delivered'))
           order by coalesce(a.scheduled_at,b.start_at) asc
           limit $1 offset $2`,
         params
