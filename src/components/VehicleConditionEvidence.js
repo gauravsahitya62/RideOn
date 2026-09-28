@@ -40,7 +40,7 @@ export default function VehicleConditionEvidence({bookingId,phase='delivery',lat
     setStatus('');
     try{
       const permission=await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if(permission.status!=='granted'){setStatus='';Alert.alert('Photos permission required','Allow RideOn to access photos and videos so you can record vehicle condition.');return;}
+      if(permission.status!=='granted'){setStatus('');Alert.alert('Photos permission required','Allow RideOn to access photos and videos so you can record vehicle condition.');return;}
       const result=await ImagePicker.launchImageLibraryAsync({
         mediaTypes:ImagePicker.MediaTypeOptions.All,
         allowsMultipleSelection:true,
