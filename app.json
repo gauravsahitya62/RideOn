@@ -15,7 +15,7 @@
     "plugins": [
       "expo-status-bar",
       "expo-secure-store",
-      ["expo-image-picker", {"photosPermission":"RideOn uses your photos only when you choose identity verification images.","cameraPermission":"RideOn uses your camera to capture your identity document and live selfie."}],
+      ["expo-image-picker", {"photosPermission":"RideOn uses your photos and videos when you record vehicle condition at delivery or pickup, and when you choose identity verification images.","cameraPermission":"RideOn uses your camera to capture vehicle condition evidence, identity documents and a live selfie."}],
       ["expo-location", {"locationAlwaysAndWhenInUsePermission":"RideOn uses your location while you are delivering or collecting a rental vehicle.","isIosBackgroundLocationEnabled":true,"isAndroidBackgroundLocationEnabled":true}]
     ]
   }
