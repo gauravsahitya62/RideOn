@@ -1188,7 +1188,7 @@ app.post('/api/v1/delivery/jobs/:id/location',supabaseRequireAuth,requireDeliver
       try{
         const calculated=await getDrivingRoute({latitude:p.data.latitude,longitude:p.data.longitude},{latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude});
         route={distanceMeters:calculated.distanceMeters,durationSeconds:calculated.durationSeconds,estimatedDeliveryMinutes:Math.max(1,Math.round(calculated.durationSeconds/60)),provider:calculated.provider,encodedPolyline:calculated.encodedPolyline||null};
-        await repository.updateTrackingRoute(req.user.id,req.params.id,route);
+        await repository.updateTrackingRouteForStaff(req.user.id,req.params.id,route);
       }catch(routeError){
         routeUnavailable=true;
         if(!['ROUTE_PROVIDER_NOT_CONFIGURED','ROUTE_PROVIDER_UNAVAILABLE','ROUTE_PROVIDER_TIMEOUT','ROUTE_NOT_FOUND'].includes(routeError?.code))throw routeError;
