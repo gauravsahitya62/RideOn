@@ -193,6 +193,7 @@ export const rideOnApi = {
   addSupportMessage: (ticketId,message) => request(`/api/v1/support/tickets/${encode(ticketId)}/messages`, { method:'POST', body:JSON.stringify({message}) }),
   closeSupportTicket: (ticketId) => request(`/api/v1/support/tickets/${encode(ticketId)}/close`, { method:'POST', body:JSON.stringify({}) }),
   reopenSupportTicket: (ticketId) => request(`/api/v1/support/tickets/${encode(ticketId)}/reopen`, { method:'POST', body:JSON.stringify({}) }),
+  requestRentalReturn: (bookingId,payload={}) => request(`/api/v1/bookings/${encode(bookingId)}/return-request`, { method:'POST', body:JSON.stringify(payload) }),
   getConditionEvidence: (bookingId) => request(`/api/v1/bookings/${encode(bookingId)}/condition-evidence`),
   uploadConditionEvidence: async (bookingId, payload={}) => request(`/api/v1/bookings/${encode(bookingId)}/condition-evidence/upload`, { method:'POST', body:JSON.stringify(payload) }),
   submitConditionReport: (bookingId,payload={}) => request(`/api/v1/bookings/${encode(bookingId)}/condition-evidence/report`, { method:'POST', body:JSON.stringify(payload) }),
