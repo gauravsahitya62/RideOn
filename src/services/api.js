@@ -264,5 +264,8 @@ export const rideOnApi = {
   updateDeliveryJobLocation: (bookingId,payload) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/location`, { method:'POST', body:JSON.stringify(payload) }),
   completeDeliveryJob: (bookingId,payload={}) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/complete`, { method:'POST', body:JSON.stringify(payload) }),
   requestDeliveryPickup: (bookingId) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/request-pickup`, { method:'POST', body:JSON.stringify({}) }),
+  startPickupJob: (bookingId) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/pickup/start`, { method:'POST', body:JSON.stringify({}) }),
+  completePickupJob: (bookingId,payload={}) => request(`/api/v1/delivery/jobs/${encode(bookingId)}/pickup/complete`, { method:'POST', body:JSON.stringify(payload) }),
+
   listBookings: (params = {}) => { const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value != null && value !== '')).toString(); return request(`/api/v1/bookings${query ? `?${query}` : ''}`); },
 };
