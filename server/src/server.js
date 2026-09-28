@@ -1142,6 +1142,93 @@ app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async
 
 const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false});
 
+const deliveryJobActionRateLimit=rateLimit({windowMs:60_000,limit:30,standardHeaders:true,legacyHeaders:false});
+
+app.get('/api/v1/delivery/jobs',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{
+  try{
+    const scope=req.query.scope==='mine'?'mine':'available';
+    const jobs=await repository.listDeliveryJobs(req.user.id,{scope,limit:req.query.limit,offset:req.query.offset});
+    res.json({jobs,data:jobs,scope});
+  }catch(error){
+    res.status(503).json({error:{code:error?.code||'DELIVERY_JOBS_UNAVAILABLE',message:error?.message||'Delivery jobs are temporarily unavailable.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/accept',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  try{
+    const assignment=await repository.acceptDeliveryJob(req.user.id,req.params.id);
+    res.status(201).json({assignment});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_ALREADY_ASSIGNED:409,DELIVERY_NOT_READY:409,INVALID_ASSIGNEE:403}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'DELIVERY_ACCEPT_FAILED',message:error?.message||'This delivery could not be accepted.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/start',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  try{
+    const session=await repository.startDeliveryForStaff(req.user.id,req.params.id);
+    res.json({tracking:{session,status:'in_delivery',active:true}});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,DELIVERY_START_NOT_ALLOWED:409,DELIVERY_LOCATION_REQUIRED:409,PAYMENT_REQUIRED_FOR_DELIVERY:409,DELIVERY_ALREADY_ACTIVE:409}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{
+  const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});
+  if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});
+  try{
+    const before=await repository.getActiveTrackingSessionForStaff(req.user.id,req.params.id);
+    const session=await repository.updateDeliveryLocationForStaff(req.user.id,req.params.id,p.data);
+    const booking=await repository.getBooking(req.params.id);
+    let route=null;let routeUnavailable=false;
+    const movedMeters=before?.lastLatitude!=null?Math.sqrt(Math.pow((p.data.latitude-before.lastLatitude)*111320,2)+Math.pow((p.data.longitude-before.lastLongitude)*111320*Math.cos(p.data.latitude*Math.PI/180),2)):Infinity;
+    const routeDue=!before?.lastRouteAt||Date.now()-new Date(before.lastRouteAt).getTime()>=Math.max(30,Number(process.env.TRACKING_ROUTE_REFRESH_SECONDS||60))*1000||movedMeters>=Math.max(100,Number(process.env.TRACKING_ROUTE_REFRESH_METERS||300));
+    if(routeDue&&booking?.deliveryLatitude!=null&&booking?.deliveryLongitude!=null){
+      try{
+        const calculated=await getDrivingRoute({latitude:p.data.latitude,longitude:p.data.longitude},{latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude});
+        route={distanceMeters:calculated.distanceMeters,durationSeconds:calculated.durationSeconds,estimatedDeliveryMinutes:Math.max(1,Math.round(calculated.durationSeconds/60)),provider:calculated.provider,encodedPolyline:calculated.encodedPolyline||null};
+        await repository.updateTrackingRoute(req.user.id,req.params.id,route);
+      }catch(routeError){
+        routeUnavailable=true;
+        if(!['ROUTE_PROVIDER_NOT_CONFIGURED','ROUTE_PROVIDER_UNAVAILABLE','ROUTE_PROVIDER_TIMEOUT','ROUTE_NOT_FOUND'].includes(routeError?.code))throw routeError;
+      }
+    }
+    const latest=await repository.getActiveTrackingSessionForStaff(req.user.id,req.params.id);
+    const payload={type:'tracking.update',tracking:{session:latest||session,location:{latitude:p.data.latitude,longitude:p.data.longitude,accuracyMeters:p.data.accuracyMeters||null,updatedAt:p.data.recordedAt||new Date().toISOString()},route,routeUnavailable}};
+    trackingRealtime.broadcast(req.params.id,payload);
+    res.json({tracking:payload.tracking});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,STALE_LOCATION_UPDATE:409,INVALID_DELIVERY_LOCATION:400,INVALID_DELIVERY_TIMESTAMP:400}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'DELIVERY_LOCATION_UPDATE_FAILED',message:error?.message||'We could not update the delivery location.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/complete',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  const p=z.object({latitude:z.coerce.number().min(-90).max(90).nullable().optional(),longitude:z.coerce.number().min(-180).max(180).nullable().optional()}).safeParse(req.body||{});
+  if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'The final delivery location is invalid.'}});
+  try{
+    const result=await repository.completeDeliveryForStaff(req.user.id,req.params.id,p.data);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,DELIVERY_COMPLETION_NOT_ALLOWED:409,INVALID_DELIVERY_LOCATION:400}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:error?.message||'Delivery could not be completed.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/request-pickup',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  try{
+    const assignment=await repository.requestPickupForStaff(req.user.id,req.params.id);
+    res.status(201).json({assignment});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,PICKUP_NOT_READY:409}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'PICKUP_REQUEST_FAILED',message:error?.message||'Pickup cannot be requested for this rental yet.'}});
+  }
+});
+
+
+
 app.post('/api/v1/fleet-ops/bookings/:id/delivery/start',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const booking=await repository.getRentalBookingForCustomer(req.params.id,req.body?.customerId);if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});const session=await repository.startDelivery(null,req.params.id);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/delivery/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});try{const session=await repository.updateDeliveryLocation(null,req.params.id,p.data);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_LOCATION_FAILED',message:error?.message||'Delivery location could not be updated.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/delivery/complete',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{try{const result=await repository.completeDelivery(null,req.params.id,req.body||{});res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:error?.message||'Delivery could not be completed.'}});}});
