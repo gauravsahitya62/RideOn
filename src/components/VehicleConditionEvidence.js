@@ -14,7 +14,7 @@ const toBase64=async(uri)=>{
   });
 };
 
-export default function VehicleConditionEvidence({bookingId,phase='delivery',latitude=null,longitude=null,onSaved}){
+export default function VehicleConditionEvidence({bookingId,phase='delivery',latitude=null,longitude=null,onSaved,actor='customer'}){
   const [data,setData]=useState({evidence:[],reports:[]});
   const [loading,setLoading]=useState(true);
   const [busy,setBusy]=useState(false);
@@ -75,8 +75,13 @@ export default function VehicleConditionEvidence({bookingId,phase='delivery',lat
     finally{setBusy(false);}
   };
 
-  const title=phase==='delivery'?'Check the vehicle before you accept it':'Record the vehicle condition at pickup';
-  const subtitle=phase==='delivery'?'Compare the vehicle with the delivery evidence, record any existing damage, and keep your own photos/video.':'Capture the vehicle again before it leaves. RideOn will keep this evidence alongside the delivery record.';
+  const isDriver=actor==='driver';
+  const title=isDriver
+    ? (phase==='delivery'?'Record handover condition':'Record pickup condition')
+    : (phase==='delivery'?'Check the vehicle before you accept it':'Record the vehicle condition at pickup');
+  const subtitle=isDriver
+    ? (phase==='delivery'?'Capture the vehicle condition at handover. Record visible damage before completing delivery.':'Capture the vehicle condition when you collect the vehicle. Record any new damage before completing pickup.')
+    : (phase==='delivery'?'Compare the vehicle with the delivery evidence, record any existing damage, and keep your own photos/video.':'Capture the vehicle again before it leaves. RideOn will keep this evidence alongside the delivery record.');
   const canSubmit=phaseEvidence.length>0;
   return <View style={{backgroundColor:'#fff',borderRadius:20,borderWidth:1,borderColor:'#E8E2DA',padding:16,marginTop:12}}>
     <Text style={{fontSize:18,fontWeight:'900',color:'#171A1F'}}>{title}</Text>
