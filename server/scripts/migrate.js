@@ -43,7 +43,13 @@ try {
     console.log(`Applying migration ${file}`);
     await client.query('begin');
     try {
-      await client.query(sql);
+      // Migration 024 was already applied in production but contains a legacy
+      // anonymous DO block delimiter typo. Normalize only while executing that
+      // historical migration so existing migration files remain immutable.
+      const executableSql = file === '024_rideon_fleet_operations.sql'
+        ? sql.replace('DO $\n', 'DO $\n').replace('END $;', 'END $;')
+        : sql;
+      await client.query(executableSql);
       await client.query('insert into schema_migrations(version) values ($1)', [file]);
       await client.query('commit');
     } catch (error) {

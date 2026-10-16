@@ -169,8 +169,8 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
   };
 
   const sendAadhaarOtp = async () => {
-    const normalized=aadhaarNumber.replace(/\\s/g,'');
-    if (!/^\\d{12}$/.test(normalized)) {
+    const normalized=aadhaarNumber.replace(/\s/g,'');
+    if (!/^\d{12}$/.test(normalized)) {
       setError('Enter a valid 12-digit Aadhaar number.');
       return;
     }
@@ -195,7 +195,7 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
       setError('Start Aadhaar verification again.');
       return;
     }
-    if (!/^\\d{4,8}$/.test(aadhaarOtp.trim())) {
+    if (!/^\d{4,8}$/.test(aadhaarOtp.trim())) {
       setError('Enter the OTP sent to your Aadhaar-linked mobile number.');
       return;
     }
@@ -331,7 +331,7 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
                 <Text style={styles.inputLabel}>AADHAAR NUMBER</Text>
                 <TextInput
                   value={aadhaarNumber}
-                  onChangeText={(v) => setAadhaarNumber(v.replace(/\\D/g,'').slice(0,12))}
+                  onChangeText={(v) => setAadhaarNumber(v.replace(/\D/g,'').slice(0,12))}
                   keyboardType="number-pad"
                   placeholder="12-digit Aadhaar number"
                   placeholderTextColor="#A0A7B1"
@@ -345,7 +345,7 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
                     <Text style={styles.inputLabel}>OTP</Text>
                     <TextInput
                       value={aadhaarOtp}
-                      onChangeText={(v) => setAadhaarOtp(v.replace(/\\D/g,'').slice(0,8))}
+                      onChangeText={(v) => setAadhaarOtp(v.replace(/\D/g,'').slice(0,8))}
                       keyboardType="number-pad"
                       placeholder="Enter OTP"
                       placeholderTextColor="#A0A7B1"

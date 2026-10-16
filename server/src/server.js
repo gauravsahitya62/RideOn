@@ -56,7 +56,7 @@ app.use(cors({
   },
   credentials: false,
 }));
-app.use(express.json({ limit: '12mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
+app.use(express.json({ limit: '35mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
 app.use(express.urlencoded({ extended:false, limit:'64kb' }));
 app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
@@ -668,14 +668,101 @@ app.post('/api/v1/fleet-ops/vehicles/:id/state',supabaseRequireAuth,requireFleet
 app.post('/api/v1/fleet-ops/vehicles/:id/maintenance',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({status:z.enum(['required','scheduled','started','completed']),notes:z.string().max(2000).optional(),cost:z.number().min(0).optional().default(0),serviceDate:z.string().datetime().nullable().optional(),nextServiceDate:z.string().datetime().nullable().optional(),odometerAtService:z.number().int().min(0).nullable().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid maintenance details.',details:p.error.flatten()}});try{res.json(await repository.recordFleetMaintenance({vehicleId:req.params.id,...p.data,actorUserId:req.user.id}));}catch(error){res.status(400).json({error:{code:error?.code||'MAINTENANCE_FAILED',message:error?.message||'Could not record maintenance.'}});}});
 app.post('/api/v1/fleet-ops/vehicles/:id/inspection',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({bookingId:z.string().uuid().nullable().optional(),inspectionType:z.enum(['pickup','return','maintenance','routine']).default('routine'),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),exteriorCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),inspectionStatus:z.enum(['pending','passed','failed','damage_review']).default('passed'),conditionPhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid inspection details.',details:p.error.flatten()}});try{res.json(await repository.recordFleetInspection({vehicleId:req.params.id,...p.data,actorUserId:req.user.id}));}catch(error){res.status(400).json({error:{code:error?.code||'INSPECTION_FAILED',message:error?.message||'Could not record inspection.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/assign',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({vehicleId:z.string().min(1).max(64),staffUserId:z.string().uuid(),assignmentType:z.enum(['delivery','pickup','return']).default('delivery'),scheduledAt:z.string().datetime().nullable().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid fulfillment assignment.'}});try{const a=await repository.assignFleetDeliveryStaff({bookingId:req.params.id,...p.data,actorUserId:req.user.id});res.status(201).json({assignment:a});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:400).json({error:{code:error?.code||'ASSIGNMENT_FAILED',message:error?.message||'Could not assign the RideOn operations job.'}});}});
-app.get('/api/v1/delivery/jobs',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{try{const jobs=await repository.listAssignedDeliveryJobs(req.user.id,{limit:req.query.limit,offset:req.query.offset});res.json({jobs,data:jobs});}catch(error){res.status(503).json({error:{code:'DELIVERY_JOBS_UNAVAILABLE',message:'Assigned delivery jobs are temporarily unavailable.'}});}});
+async function conditionBookingAccess(req, bookingId) {
+  const booking=await repository.getBooking(bookingId);
+  if(!booking) return {booking:null,allowed:false,role:null};
+  if(String(req.user?.id)===String(booking.customerId)) return {booking,allowed:true,role:'customer'};
+  if(req.user?.role==='delivery_staff'){
+    const mine=await repository.listDeliveryJobs(req.user.id,{scope:'mine',limit:100,offset:0});
+    if(mine.some(job=>String(job.bookingId)===String(bookingId))) return {booking,allowed:true,role:'delivery_staff'};
+  }
+  return {booking,allowed:false,role:req.user?.role||null};
+}
+
+app.get('/api/v1/bookings/:id/condition-evidence',supabaseRequireAuth,async(req,res)=>{
+  try{
+    const access=await conditionBookingAccess(req,req.params.id);
+    if(!access.booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(!access.allowed)return res.status(403).json({error:{code:'FORBIDDEN',message:'You cannot access this vehicle condition record.'}});
+    const [evidence,reports]=await Promise.all([repository.listConditionEvidence(req.params.id),repository.listConditionReports(req.params.id)]);
+    res.json({evidence,reports});
+  }catch(error){res.status(503).json({error:{code:error?.code||'CONDITION_EVIDENCE_UNAVAILABLE',message:error?.message||'Vehicle condition evidence is temporarily unavailable.'}});}
+});
+
+app.post('/api/v1/bookings/:id/condition-evidence/upload',supabaseRequireAuth,async(req,res)=>{
+  try{
+    const access=await conditionBookingAccess(req,req.params.id);
+    if(!access.booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(!access.allowed)return res.status(403).json({error:{code:'FORBIDDEN',message:'You cannot add evidence to this booking.'}});
+    const p=z.object({
+      phase:z.enum(['delivery','pickup']),
+      mediaType:z.enum(['image','video']),
+      base64:z.string().min(16).max(25_000_000),
+      contentType:z.string().min(3).max(100),
+      capturedAt:z.string().datetime().optional(),
+      latitude:z.coerce.number().min(-90).max(90).nullable().optional(),
+      longitude:z.coerce.number().min(-180).max(180).nullable().optional(),
+      metadata:z.record(z.any()).optional().default({})
+    }).safeParse(req.body||{});
+    if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid evidence upload.',details:p.error.flatten()}});
+    const {phase,mediaType}=p.data;
+    const lifecycle=String(access.booking.lifecycleState||'');
+    const deliveryOk=phase==='delivery'&&['in_delivery','delivered'].includes(String(access.booking.deliveryStatus||''));
+    const pickupOk=phase==='pickup'&&['RETURN_REQUESTED','PICKUP_STARTED','RETURNED'].includes(lifecycle);
+    if(!deliveryOk&&!pickupOk)return res.status(409).json({error:{code:'CONDITION_EVIDENCE_NOT_ALLOWED',message:phase==='delivery'?'Delivery condition evidence can be added when the vehicle is being delivered or has just been delivered.':'Pickup condition evidence can be added during the vehicle return/pickup process.'}});
+    const contentType=String(p.data.contentType).toLowerCase();
+    const allowedTypes=mediaType==='image'?['image/jpeg','image/png','image/webp']:['video/mp4','video/quicktime','video/webm'];
+    if(!allowedTypes.includes(contentType))return res.status(400).json({error:{code:'MEDIA_TYPE_UNSUPPORTED',message:'Unsupported photo/video format.'}});
+    const raw=String(p.data.base64).replace(/^data:[^;]+;base64,/i,'').replace(/\s+/g,'');
+    if(!/^[A-Za-z0-9+/]+={0,2}$/.test(raw))return res.status(400).json({error:{code:'MEDIA_INVALID',message:'The selected photo/video could not be read.'}});
+    const buffer=Buffer.from(raw,'base64');
+    const maxBytes=15*1024*1024;
+    if(!buffer.length||buffer.length>maxBytes)return res.status(413).json({error:{code:'MEDIA_TOO_LARGE',message:'Each photo or video must be 15 MB or smaller.'}});
+    const validImage=(contentType==='image/jpeg'&&buffer.subarray(0,3).equals(Buffer.from([0xff,0xd8,0xff])))||(contentType==='image/png'&&buffer.subarray(0,8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a])))||(contentType==='image/webp'&&buffer.subarray(0,4).toString('ascii')==='RIFF'&&buffer.subarray(8,12).toString('ascii')==='WEBP');
+    const validVideo=mediaType==='video'&&((contentType==='video/mp4'||contentType==='video/quicktime')&&buffer.length>12&&buffer.subarray(4,8).toString('ascii')==='ftyp'||contentType==='video/webm'&&buffer.subarray(0,4).toString('ascii')==='\x1a\x45\xdf\xa3');
+    if(mediaType==='image'&&!validImage)return res.status(400).json({error:{code:'MEDIA_INVALID',message:'The selected photo is not a valid image.'}});
+    if(mediaType==='video'&&!validVideo)return res.status(400).json({error:{code:'MEDIA_INVALID',message:'The selected video is not a valid video file.'}});
+    const supabaseUrl=String(process.env.SUPABASE_URL||'').replace(/\/$/,'');
+    const storageKey=process.env.SUPABASE_SERVICE_ROLE_KEY||process.env.SUPABASE_SECRET_KEY;
+    const bucket=String(process.env.SUPABASE_RENTAL_EVIDENCE_BUCKET||'rental-evidence').trim();
+    if(!supabaseUrl||!storageKey)return res.status(503).json({error:{code:'STORAGE_NOT_CONFIGURED',message:'Rental evidence storage is not configured on the API.'}});
+    try{await fetch(`${supabaseUrl}/storage/v1/bucket`,{method:'POST',headers:{Authorization:'Bearer '+storageKey,apikey:storageKey,'Content-Type':'application/json'},body:JSON.stringify({id:bucket,name:bucket,public:true,file_size_limit:15728640,allowed_mime_types:['image/jpeg','image/png','image/webp','video/mp4','video/quicktime','video/webm']})});}catch{}
+    const ext=contentType==='image/png'?'png':contentType==='image/webp'?'webp':contentType==='video/mp4'?'mp4':contentType==='video/webm'?'webm':'mov';
+    const actorRole=access.role;
+    const path=`bookings/${req.params.id}/${phase}/${actorRole}/${crypto.randomUUID()}.${ext}`;
+    const response=await fetch(`${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`,{method:'POST',headers:{Authorization:'Bearer '+storageKey,apikey:storageKey,'Content-Type':contentType,'x-upsert':'false'},body:buffer});
+    if(!response.ok){const details=await response.text().catch(()=> '');console.error(JSON.stringify({level:'error',event:'rental_evidence_upload_failed',requestId:req.requestId,status:response.status,details:details.slice(0,500)}));return res.status(502).json({error:{code:'MEDIA_UPLOAD_FAILED',message:'Vehicle evidence upload failed. Please try again.'}});}
+    const mediaUrl=`${supabaseUrl}/storage/v1/object/public/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+    const evidence=await repository.addConditionEvidence({bookingId:req.params.id,vehicleId:access.booking.vehicleId,actorUserId:req.user.id,actorRole,phase,mediaType,bucket,storagePath:path,mediaUrl,contentType,fileSizeBytes:buffer.length,capturedAt:p.data.capturedAt||new Date().toISOString(),latitude:p.data.latitude??null,longitude:p.data.longitude??null,metadata:p.data.metadata||{}});
+    res.status(201).json({evidence});
+  }catch(error){res.status(400).json({error:{code:error?.code||'MEDIA_UPLOAD_FAILED',message:error?.message||'Vehicle evidence upload failed.'}});}
+});
+
+app.post('/api/v1/bookings/:id/condition-evidence/report',supabaseRequireAuth,async(req,res)=>{
+  try{
+    const access=await conditionBookingAccess(req,req.params.id);
+    if(!access.booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    if(!access.allowed)return res.status(403).json({error:{code:'FORBIDDEN',message:'You cannot submit a vehicle condition report for this booking.'}});
+    const p=z.object({phase:z.enum(['delivery','pickup']),conditionStatus:z.enum(['no_damage','existing_damage','new_damage','damage_review']),damageNotes:z.string().trim().max(4000).optional().default(''),odometer:z.coerce.number().int().min(0).nullable().optional(),fuelBattery:z.coerce.number().min(0).max(100).nullable().optional(),evidenceCount:z.coerce.number().int().min(0).max(50).default(0),acknowledged:z.boolean(),capturedAt:z.string().datetime().optional(),latitude:z.coerce.number().min(-90).max(90).nullable().optional(),longitude:z.coerce.number().min(-180).max(180).nullable().optional(),metadata:z.record(z.any()).optional().default({})}).safeParse(req.body||{});
+    if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid vehicle condition report.',details:p.error.flatten()}});
+    const lifecycle=String(access.booking.lifecycleState||'');
+    const deliveryOk=p.data.phase==='delivery'&&['in_delivery','delivered'].includes(String(access.booking.deliveryStatus||''));
+    const pickupOk=p.data.phase==='pickup'&&['RETURN_REQUESTED','PICKUP_STARTED','RETURNED'].includes(lifecycle);
+    if(!deliveryOk&&!pickupOk)return res.status(409).json({error:{code:'CONDITION_REPORT_NOT_ALLOWED',message:'Vehicle condition cannot be recorded at this stage.'}});
+    if(!p.data.acknowledged)return res.status(400).json({error:{code:'ACKNOWLEDGEMENT_REQUIRED',message:'Please acknowledge the vehicle condition before submitting.'}});
+    const report=await repository.upsertConditionReport({bookingId:req.params.id,vehicleId:access.booking.vehicleId,actorUserId:req.user.id,actorRole:access.role,...p.data});
+    res.status(201).json({report});
+  }catch(error){res.status(400).json({error:{code:error?.code||'CONDITION_REPORT_FAILED',message:error?.message||'Vehicle condition report could not be saved.'}});}
+});
+
+app.get('/api/v1/delivery/jobs',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{try{const scope=req.query.scope==='mine'?'mine':'available';const jobs=await repository.listDeliveryJobs(req.user.id,{scope,limit:req.query.limit,offset:req.query.offset});res.json({jobs,data:jobs,scope});}catch(error){res.status(503).json({error:{code:error?.code||'DELIVERY_JOBS_UNAVAILABLE',message:error?.message||'Delivery jobs are temporarily unavailable.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/handover',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({customerConfirmed:z.boolean(),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),vehicleCondition:z.string().max(2000).optional(),existingDamage:z.string().max(2000).optional(),notes:z.string().max(2000).optional(),evidencePhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid handover details.',details:p.error.flatten()}});try{const booking=await repository.prepareVehicleHandover({bookingId:req.params.id,staffUserId:req.user.id,...p.data});res.json({booking,confirmation:{title:'Vehicle Handed Over',bookingId:String(req.params.id)}});}catch(error){const status=['BOOKING_NOT_FOUND'].includes(error?.code)?404:['DEPOSIT_NOT_READY_FOR_HANDOVER','PAYMENT_NOT_CONFIRMED','CUSTOMER_HANDOVER_CONFIRMATION_REQUIRED','HANDOVER_NOT_ALLOWED'].includes(error?.code)?409:403;res.status(status).json({error:{code:error?.code||'HANDOVER_FAILED',message:error?.message||'Vehicle handover could not be completed.'}});}});
 app.post('/api/v1/bookings/:id/return-request',supabaseRequireAuth,requireCustomer,async(req,res)=>{const p=z.object({returnLocation:z.string().trim().max(300).nullable().optional(),notes:z.string().trim().max(2000).nullable().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid return request.'}});try{const booking=await repository.requestRentalReturn({bookingId:req.params.id,customerId:req.user.id,...p.data});res.json({booking});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'RETURN_NOT_ALLOWED',message:error?.message||'Return cannot be requested for this rental.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/return',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({returnLocation:z.string().trim().max(300).nullable().optional(),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),returnedCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),notes:z.string().max(2000).optional(),evidencePhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid return details.',details:p.error.flatten()}});try{const booking=await repository.recordRentalReturn({bookingId:req.params.id,staffUserId:req.user.id,...p.data});res.json({booking});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'RETURN_FAILED',message:error?.message||'Vehicle return could not be recorded.'}});}});
 app.post('/api/v1/fleet-ops/rentals/overdue/check',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{try{const bookings=await repository.markOverdueRentals();res.json({bookings,count:bookings.length});}catch(error){res.status(503).json({error:{code:'OVERDUE_CHECK_FAILED',message:'Overdue rentals could not be checked.'}});}});
 app.get('/api/v1/fleet-ops/bookings',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const bookings=await repository.getFleetBookingOperations({limit:req.query.limit});res.json({bookings,data:bookings});}catch(error){res.status(503).json({error:{code:'FLEET_OPERATIONS_UNAVAILABLE',message:'Rental operations are temporarily unavailable.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/inspection',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({vehicleId:z.string().min(1).max(64),inspectionType:z.enum(['pickup','return','maintenance','routine']).default('return'),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),exteriorCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),inspectionStatus:z.enum(['pending','passed','failed','damage_review']).default('passed'),conditionPhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid inspection details.',details:p.error.flatten()}});try{const result=await repository.recordFleetInspection({bookingId:req.params.id,...p.data,actorUserId:req.user.id});res.json(result);}catch(error){res.status(409).json({error:{code:error?.code||'INSPECTION_FAILED',message:error?.message||'Inspection could not be completed.'}});}});
-app.post('/api/v1/fleet-ops/bookings/:id/deposit/settle',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({deductionPaise:z.number().int().min(0).default(0),reason:z.string().max(2000).optional().default(''),evidenceReference:z.string().max(500).optional().default(''),refundProviderReference:z.string().max(255).optional().default('')}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid deposit settlement details.',details:p.error.flatten()}});try{const result=await repository.settleFleetSecurityDeposit({bookingId:req.params.id,actorUserId:req.user.id,...p.data});res.json(result);}catch(error){const status=['DEPOSIT_ALREADY_SETTLED','DEPOSIT_SETTLEMENT_NOT_ALLOWED','DEPOSIT_DEDUCTION_INVALID','DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED'].includes(error?.code)?409:error?.code==='FORBIDDEN'?403:404;res.status(status).json({error:{code:error?.code||'DEPOSIT_SETTLEMENT_FAILED',message:error?.message||'Security deposit settlement could not be completed.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/deposit/settle',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({deductionPaise:z.number().int().min(0).default(0),reason:z.string().max(2000).optional().default(''),evidenceReference:z.string().max(500).optional().default('')}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid deposit settlement details.',details:p.error.flatten()}});try{const bookingId=req.params.id;const result=await repository.withPaymentLock('security-deposit:'+bookingId,async()=>{const booking=await repository.getBooking(bookingId,req.user.id);if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}const originalPaise=Math.round(Number(booking.pricing?.securityDeposit||0)*100);if(p.data.deductionPaise>originalPaise){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}const refundablePaise=originalPaise-p.data.deductionPaise;let refundReference='';if(refundablePaise>0){const payment=await repository.findPaymentByBooking(bookingId);if(!payment?.providerOrderId){const e=new Error('The original payment order could not be found for the security deposit refund.');e.code='REFUND_PROVIDER_PAYMENT_NOT_FOUND';throw e;}const refund=await payments.refundPayment({amountPaise:refundablePaise,providerOrderId:payment.providerOrderId,idempotencyKey:'security_deposit:'+bookingId+':'+refundablePaise});if(!refund?.confirmed){const e=new Error('Security deposit refund is pending provider confirmation.');e.code='REFUND_PENDING';e.providerReference=refund?.providerReference||'';throw e;}refundReference=String(refund.providerReference||'');}return repository.settleFleetSecurityDeposit({bookingId,actorUserId:req.user.id,...p.data,refundProviderReference:refundReference});});res.json(result);}catch(error){const status=['DEPOSIT_ALREADY_SETTLED','DEPOSIT_SETTLEMENT_NOT_ALLOWED','DEPOSIT_DEDUCTION_INVALID','DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED','DEPOSIT_NOT_FOUND'].includes(error?.code)?409:error?.code==='REFUND_PENDING'?202:error?.code==='FORBIDDEN'?403:error?.code==='BOOKING_NOT_FOUND'?404:502;res.status(status).json({error:{code:error?.code||'DEPOSIT_SETTLEMENT_FAILED',message:error?.message||'Security deposit settlement could not be completed.',details:error?.providerReference?{providerReference:error.providerReference}:undefined}});}});
 app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => {
   const capabilities={...(payments.capabilities||{})};
   // App availability is resolved by the native Cashfree SDK at runtime. Never claim
@@ -1141,6 +1228,126 @@ app.get('/api/v1/vendor/bookings/:id', supabaseRequireAuth, requireVendor, async
 });
 
 const trackingUpdateRateLimit=rateLimit({windowMs:60_000,limit:40,standardHeaders:true,legacyHeaders:false});
+
+const deliveryJobActionRateLimit=rateLimit({windowMs:60_000,limit:30,standardHeaders:true,legacyHeaders:false});
+
+app.get('/api/v1/delivery/jobs',supabaseRequireAuth,requireDeliveryStaff,async(req,res)=>{
+  try{
+    const scope=req.query.scope==='mine'?'mine':'available';
+    const jobs=await repository.listDeliveryJobs(req.user.id,{scope,limit:req.query.limit,offset:req.query.offset});
+    res.json({jobs,data:jobs,scope});
+  }catch(error){
+    res.status(503).json({error:{code:error?.code||'DELIVERY_JOBS_UNAVAILABLE',message:error?.message||'Delivery jobs are temporarily unavailable.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/accept',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  try{
+    const assignment=await repository.acceptDeliveryJob(req.user.id,req.params.id);
+    res.status(201).json({assignment});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_ALREADY_ASSIGNED:409,DELIVERY_NOT_READY:409,INVALID_ASSIGNEE:403}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'DELIVERY_ACCEPT_FAILED',message:error?.message||'This delivery could not be accepted.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/start',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  try{
+    const session=await repository.startDeliveryForStaff(req.user.id,req.params.id);
+    res.json({tracking:{session,status:'in_delivery',active:true}});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,DELIVERY_START_NOT_ALLOWED:409,DELIVERY_LOCATION_REQUIRED:409,PAYMENT_REQUIRED_FOR_DELIVERY:409,DELIVERY_ALREADY_ACTIVE:409}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{
+  const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});
+  if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});
+  try{
+    const before=await repository.getActiveTrackingSessionForStaff(req.user.id,req.params.id);
+    const session=await repository.updateDeliveryLocationForStaff(req.user.id,req.params.id,p.data);
+    const booking=await repository.getBooking(req.params.id);
+    let route=null;let routeUnavailable=false;
+    const movedMeters=before?.lastLatitude!=null?Math.sqrt(Math.pow((p.data.latitude-before.lastLatitude)*111320,2)+Math.pow((p.data.longitude-before.lastLongitude)*111320*Math.cos(p.data.latitude*Math.PI/180),2)):Infinity;
+    const routeDue=!before?.lastRouteAt||Date.now()-new Date(before.lastRouteAt).getTime()>=Math.max(30,Number(process.env.TRACKING_ROUTE_REFRESH_SECONDS||60))*1000||movedMeters>=Math.max(100,Number(process.env.TRACKING_ROUTE_REFRESH_METERS||300));
+    if(routeDue&&booking?.deliveryLatitude!=null&&booking?.deliveryLongitude!=null){
+      try{
+        const calculated=await getDrivingRoute({latitude:p.data.latitude,longitude:p.data.longitude},{latitude:booking.deliveryLatitude,longitude:booking.deliveryLongitude});
+        route={distanceMeters:calculated.distanceMeters,durationSeconds:calculated.durationSeconds,estimatedDeliveryMinutes:Math.max(1,Math.round(calculated.durationSeconds/60)),provider:calculated.provider,encodedPolyline:calculated.encodedPolyline||null};
+        await repository.updateTrackingRouteForStaff(req.user.id,req.params.id,route);
+      }catch(routeError){
+        routeUnavailable=true;
+        if(!['ROUTE_PROVIDER_NOT_CONFIGURED','ROUTE_PROVIDER_UNAVAILABLE','ROUTE_PROVIDER_TIMEOUT','ROUTE_NOT_FOUND'].includes(routeError?.code))throw routeError;
+      }
+    }
+    const latest=await repository.getActiveTrackingSessionForStaff(req.user.id,req.params.id);
+    const payload={type:'tracking.update',tracking:{session:latest||session,location:{latitude:p.data.latitude,longitude:p.data.longitude,accuracyMeters:p.data.accuracyMeters||null,updatedAt:p.data.recordedAt||new Date().toISOString()},route,routeUnavailable}};
+    trackingRealtime.broadcast(req.params.id,payload);
+    res.json({tracking:payload.tracking});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,STALE_LOCATION_UPDATE:409,INVALID_DELIVERY_LOCATION:400,INVALID_DELIVERY_TIMESTAMP:400}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'DELIVERY_LOCATION_UPDATE_FAILED',message:error?.message||'We could not update the delivery location.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/complete',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  const p=z.object({latitude:z.coerce.number().min(-90).max(90).nullable().optional(),longitude:z.coerce.number().min(-180).max(180).nullable().optional()}).safeParse(req.body||{});
+  if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'The final delivery location is invalid.'}});
+  try{
+    const result=await repository.completeDeliveryForStaff(req.user.id,req.params.id,p.data);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'delivered',active:false}});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,DELIVERY_COMPLETION_NOT_ALLOWED:409,INVALID_DELIVERY_LOCATION:400}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'DELIVERY_COMPLETION_FAILED',message:error?.message||'Delivery could not be completed.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/pickup/start',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  try{
+    const session=await repository.startPickupForStaff(req.user.id,req.params.id);
+    res.json({tracking:{session,status:'pickup_in_progress',active:true}});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,PICKUP_NOT_ASSIGNED:409,PICKUP_NOT_READY:409,DELIVERY_ALREADY_ACTIVE:409}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'PICKUP_START_FAILED',message:error?.message||'Pickup could not be started.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/pickup/complete',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  const p=z.object({
+    latitude:z.coerce.number().min(-90).max(90).nullable().optional(),
+    longitude:z.coerce.number().min(-180).max(180).nullable().optional(),
+    returnLocation:z.string().trim().max(300).nullable().optional(),
+    odometer:z.coerce.number().int().min(0).nullable().optional(),
+    fuelBattery:z.coerce.number().min(0).max(100).nullable().optional(),
+    returnedCondition:z.string().max(2000).optional(),
+    damageNotes:z.string().max(2000).optional(),
+    notes:z.string().max(2000).optional(),
+    evidencePhotos:z.array(z.string().url()).max(12).optional().default([]),
+  }).safeParse(req.body||{});
+  if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid pickup details.',details:p.error.flatten()}});
+  try{
+    const result=await repository.completePickupForStaff(req.user.id,req.params.id,p.data);
+    trackingRealtime.broadcast(req.params.id,{type:'tracking.completed',tracking:{session:result.session,booking:publicBooking(result.booking)}});
+    res.json({booking:publicBooking(result.booking),tracking:{session:result.session,status:'returned',active:false}});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,PICKUP_NOT_ASSIGNED:409,PICKUP_NOT_READY:409,TRACKING_NOT_ACTIVE:409,TRACKING_SESSION_EXPIRED:409,INVALID_DELIVERY_LOCATION:400,INVALID_RETURN_DETAILS:400,RETURN_NOT_ALLOWED:409}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'PICKUP_COMPLETION_FAILED',message:error?.message||'Vehicle pickup could not be completed.'}});
+  }
+});
+
+app.post('/api/v1/delivery/jobs/:id/request-pickup',supabaseRequireAuth,requireDeliveryStaff,deliveryJobActionRateLimit,async(req,res)=>{
+  try{
+    const assignment=await repository.requestPickupForStaff(req.user.id,req.params.id);
+    res.status(201).json({assignment});
+  }catch(error){
+    const status={BOOKING_NOT_FOUND:404,DELIVERY_NOT_ASSIGNED:403,PICKUP_NOT_READY:409}[error?.code]||409;
+    res.status(status).json({error:{code:error?.code||'PICKUP_REQUEST_FAILED',message:error?.message||'Pickup cannot be requested for this rental yet.'}});
+  }
+});
+
+
 
 app.post('/api/v1/fleet-ops/bookings/:id/delivery/start',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const booking=await repository.getRentalBookingForCustomer(req.params.id,req.body?.customerId);if(!booking)return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});const session=await repository.startDelivery(null,req.params.id);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_START_FAILED',message:error?.message||'Delivery could not be started.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/delivery/location',supabaseRequireAuth,requireDeliveryStaff,trackingUpdateRateLimit,async(req,res)=>{const p=z.object({latitude:z.coerce.number().min(-90).max(90),longitude:z.coerce.number().min(-180).max(180),accuracyMeters:z.coerce.number().min(0).max(10000).optional(),recordedAt:z.string().datetime().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'INVALID_DELIVERY_LOCATION',message:'We could not use that GPS location.'}});try{const session=await repository.updateDeliveryLocation(null,req.params.id,p.data);res.json({tracking:{session,status:'in_delivery',active:true}});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'DELIVERY_LOCATION_FAILED',message:error?.message||'Delivery location could not be updated.'}});}});
@@ -1915,7 +2122,8 @@ app.post('/api/v1/payments/webhook', async (req, res) => {
   // (for example, webhook endpoint tests or unrelated orders). Acknowledge
   // those events without creating local payment state.
   if(!matchingPayment)return res.json({received:true,applied:false});
-  const result=await repository.applyPaymentEvent(event);
+  const depositRefund=event.status==='refunded' ? await repository.applyDepositRefundEvent(event) : {handled:false};
+  const result=depositRefund.handled ? depositRefund : await repository.applyPaymentEvent(event);
   console.log(JSON.stringify({level:'info',event:'payment_webhook_processed',requestId:req.requestId,provider:payments.name,providerOrderId:event.providerOrderId,providerPaymentId:event.providerPaymentId,status:event.status,applied:result.applied,duplicate:result.duplicate,invalid:result.invalid}));
   if(result.invalid)return res.status(400).json({error:{code:'INVALID_PAYMENT_EVENT',message:'Payment event does not match the booking payment.'}});
   res.json({received:true,applied:result.applied,duplicate:result.duplicate});

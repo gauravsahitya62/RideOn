@@ -4,6 +4,7 @@ import { authService } from './authService';
 import AuthScreen from './AuthScreen';
 import RideOnApp from '../screens/RideOnApp';
 import VendorPortalReady from '../screens/VendorPortalReady';
+import DeliveryStaffPortal from '../screens/DeliveryStaffPortal';
 
 export default function AuthGate() {
   const [status, setStatus] = useState('loading');
@@ -29,8 +30,9 @@ export default function AuthGate() {
 
   if (status === 'loading') return <LoadingScreen />;
   if (status === 'unauthenticated') return <AuthScreen onAuthenticated={handleAuthenticated} />;
-  if (!user || !['customer', 'vendor'].includes(user.role)) return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  if (!user || !['customer', 'vendor', 'delivery_staff'].includes(user.role)) return <AuthScreen onAuthenticated={handleAuthenticated} />;
   if (user.role === 'vendor') return <VendorPortalReady user={user} onLogout={signOut} />;
+  if (user.role === 'delivery_staff') return <DeliveryStaffPortal authenticatedUser={user} onLogout={signOut} />;
   return <RideOnApp authenticatedUser={user} onLogout={signOut} />;
 }
 
