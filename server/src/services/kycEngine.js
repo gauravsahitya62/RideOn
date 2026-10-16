@@ -7,7 +7,20 @@ const normalizeDocumentNumber = (value) =>
 
 const aadhaarDigits = (value) => String(value ?? '').replace(/\D/g, '');
 
-const redactDigits = (value) => String(value ?? '').replace(/\d{4,}/g, (match) => `${match.length}digits`);
+const normalizeCashfreePublicKey = (value) => {
+  const raw = String(value || '').trim().replace(/^["']|["']$/g, '');
+  if (!raw) return '';
+  return raw.includes('\\n') ? raw.replace(/\\n/g, '\n') : raw;
+};
+
+const cashfreeRequestSignature = (clientId, publicKeyPem) => {
+  const stamped = `${clientId}.${Math.floor(Date.now() / 1000)}`;
+  return crypto.publicEncrypt({
+    key: publicKeyPem,
+    padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+    oaepHash: 'sha1',
+  }, Buffer.from(stamped)).toString('base64');
+};
 
 const redactProviderValue = (value, depth = 0) => {
   if (value == null || depth > 4) return value ?? null;
@@ -229,11 +242,23 @@ class HttpKycProvider {
 }
 
 class CashfreeVerificationAdapter extends HttpKycProvider {
+  constructor(options) {
+    super(options);
+    this.publicKey = normalizeCashfreePublicKey(options.publicKey);
+  }
+
   headers() {
     const headers = super.headers();
     if (this.clientId) headers['x-client-id'] = this.clientId;
     if (this.clientSecret) headers['x-client-secret'] = this.clientSecret;
     if (this.version) headers['x-api-version'] = this.version;
+    if (this.publicKey && this.clientId) {
+      try {
+        headers['x-cf-signature'] = cashfreeRequestSignature(this.clientId, this.publicKey);
+      } catch {
+        throw Object.assign(new Error('Cashfree public key could not sign the verification request.'), { code: 'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
+      }
+    }
     return headers;
   }
 
@@ -250,6 +275,7 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
     return this.requestJson({
       url:this.verifyUrl.replace(/\/driving-license$/i, '/offline-aadhaar/otp'),
       method:'POST',
+      apiVersion:false,
       body:{aadhaar_number:normalized},
     });
   }
@@ -262,6 +288,7 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
     return this.requestJson({
       url:this.verifyUrl.replace(/\/driving-license$/i, '/offline-aadhaar/verify'),
       method:'POST',
+      apiVersion:false,
       body:{otp:code,ref_id:ref},
     });
   }
@@ -295,11 +322,13 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
     });
   }
 
-  async requestJson({ url, method='GET', body }) {
+  async requestJson({ url, method='GET', body, apiVersion=true }) {
     const controller=new AbortController();
     const timer=setTimeout(()=>controller.abort(),this.timeoutMs);
     try {
-      const response=await fetch(url,{method,headers:this.headers(),body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal});
+      const headers=this.headers();
+      if (!apiVersion) delete headers['x-api-version'];
+      const response=await fetch(url,{method,headers,body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal});
       const text=await response.text();
       let payload={};
       try { payload=text?JSON.parse(text):{}; } catch {
@@ -313,9 +342,13 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
         try { pathName=new URL(url).pathname; } catch {}
         console.warn(JSON.stringify({level:'warn',event:'kyc_provider_rejected',method,path:pathName,status:response.status,providerCode,providerMessage,providerBody}));
         const exact=[response.status, providerCode, providerMessage].filter(Boolean).join(' ');
+        const sandbox=/sandbox\.cashfree\.com/i.test(url);
+        const legacyAadhaar=pathName.includes('/offline-aadhaar/');
         const message=providerCode==='ip_validation_failed'
           ? `Cashfree blocked the RideOn API server because its IP is not whitelisted. ${providerMessage}`
-          : exact
+          : legacyAadhaar && providerCode==='verification_failed' && sandbox
+            ? 'Cashfree test mode cannot send an OTP for this Aadhaar number. Use sample number 655675523712 and OTP 111000, or verify with DigiLocker.'
+            : exact
             ? `Cashfree Secure ID rejected the verification request: ${exact}`
             : 'Cashfree Secure ID rejected the verification request.';
         throw Object.assign(new Error(message),{code:'KYC_PROVIDER_REQUEST_FAILED',status:response.status,providerCode,providerMessage,providerPath:pathName,providerBody});
@@ -439,6 +472,7 @@ function createProviderFromEnv(env = process.env) {
     clientId: String(env.KYC_PROVIDER_CLIENT_ID || (name === 'cashfree' ? env.CASHFREE_SECURE_ID_CLIENT_ID : '') || '').trim(),
     clientSecret: String(env.KYC_PROVIDER_CLIENT_SECRET || (name === 'cashfree' ? env.CASHFREE_SECURE_ID_CLIENT_SECRET : '') || '').trim(),
     webhookSecret: String(env.KYC_WEBHOOK_SECRET || '').trim(),
+    publicKey: String(env.KYC_CASHFREE_PUBLIC_KEY || env.CASHFREE_SECURE_ID_PUBLIC_KEY || '').trim(),
     timeoutMs: Math.max(5000, Math.min(60000, Number(env.KYC_PROVIDER_TIMEOUT_MS || 30000))),
     version: String(env.KYC_PROVIDER_API_VERSION || (name === 'cashfree' ? '2024-12-01' : '')).trim(),
   };
@@ -538,7 +572,7 @@ export class KycEngine {
       });
       return {
         verification:applied?.verification || verification,
-        verificationId:String(created.verification_id || verification.id),
+        verificationId:String(verification.id),
         referenceId:created.reference_id == null ? null : String(created.reference_id),
         url:String(created.url), status:String(created.status || 'PENDING'),
       };
@@ -578,15 +612,20 @@ export class KycEngine {
       });
       return applied?.verification || verification;
     }
-    const document=await this.provider.getAadhaarDigiLockerDocument({verificationId:providerVerificationId});
-    const documentStatus=String(document?.status || '').trim().toUpperCase();
-    const documentSuccess=documentStatus==='' || ['SUCCESS','VALID','AUTHENTICATED','VERIFIED'].includes(documentStatus);
-    if(!documentSuccess) {
-      const applied=await this.repository.applyKycVerificationResult({
-        verificationId:verification.id,status:'REJECTED',providerVerificationId,
-        decisionReason:'Cashfree Secure ID Aadhaar document retrieval returned status ' + documentStatus + '.',
-      });
-      return applied?.verification || verification;
+    const document=await this.provider.getAadhaarDigiLockerDocument({verificationId:providerVerificationId}).catch((error) => {
+      console.warn(JSON.stringify({level:'warn',event:'kyc_digilocker_document_failed',code:error?.code||null,providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null}));
+      return null;
+    });
+    if (document) {
+      const documentStatus=String(document?.status || '').trim().toUpperCase();
+      const documentSuccess=documentStatus==='' || ['SUCCESS','VALID','AUTHENTICATED','VERIFIED'].includes(documentStatus);
+      if(!documentSuccess) {
+        const applied=await this.repository.applyKycVerificationResult({
+          verificationId:verification.id,status:'REJECTED',providerVerificationId,
+          decisionReason:'Cashfree Secure ID Aadhaar document retrieval returned status ' + documentStatus + '.',
+        });
+        return applied?.verification || verification;
+      }
     }
     const applied=await this.repository.applyKycVerificationResult({
       verificationId:verification.id,status:'APPROVED',providerVerificationId,

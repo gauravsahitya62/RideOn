@@ -4,6 +4,8 @@ import {
   Alert,
   AppState,
   Linking,
+  Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -11,6 +13,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
 import { rideOnApi } from '../services/api';
 
 const C = {
@@ -37,6 +40,11 @@ const cashfreeErrorText = (error, fallback) => {
   return error?.message || fallback;
 };
 
+const isDigilockerReturn = (url) => {
+  const value = String(url || '');
+  return value.includes('/kyc/digilocker/callback') || value.startsWith('rideon://') || value.startsWith('exp://');
+};
+
 export default function KycVerificationScreen({ onBack, onVerified }) {
   const [method, setMethod] = useState('DRIVING_LICENSE');
   const [documentNumber, setDocumentNumber] = useState('');
@@ -51,7 +59,12 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
   const [aadhaarOtpSent, setAadhaarOtpSent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const appState = useRef(AppState.currentState);
+  const [digilockerNote, setDigilockerNote] = useState('');
+  const [digilockerUrl, setDigilockerUrl] = useState(null);
+  const pendingAadhaarId = useRef(null);
+  const syncingAadhaar = useRef(false);
+  const syncAadhaarRef = useRef(async () => null);
+  const closingDigilocker = useRef(false);
 
   const applyKyc = (next) => {
     setVerification(next || null);
@@ -72,61 +85,66 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
   };
 
   const syncAadhaar = async (verificationId) => {
-    if (!verificationId || busy) return null;
+    const id = verificationId || pendingAadhaarId.current;
+    if (!id || syncingAadhaar.current) return null;
+    syncingAadhaar.current = true;
+    setBusy(true);
+    setError('');
     try {
-      setBusy(true);
-      setError('');
-      const result = await rideOnApi.syncAadhaarKyc(verificationId);
+      const result = await rideOnApi.syncAadhaarKyc(id);
       const next = applyKyc(result?.kyc);
       if (next?.documentStatus === 'APPROVED') {
+        pendingAadhaarId.current = null;
+        setDigilockerNote('');
         Alert.alert('Aadhaar verified', 'Your Aadhaar identity has been verified through Cashfree Secure ID. You can now book RideOn vehicles.');
       } else if (next?.documentStatus === 'REJECTED') {
+        pendingAadhaarId.current = null;
+        setDigilockerNote('');
         setError('Aadhaar verification was not approved. Please start the verification again.');
+      } else {
+        setDigilockerNote('DigiLocker is finished. RideOn is still waiting for Cashfree to confirm Aadhaar. Tap Check DigiLocker status.');
       }
       return next;
     } catch (e) {
-      if (e?.status !== 202) {
-        setError(e?.message || 'We could not update Aadhaar verification status.');
-      }
+      console.warn('[RideOnKyc][CASHFREE_ERROR]', JSON.stringify({flow:'digilocker-sync',code:e?.code||null,status:e?.status||null,message:e?.message||null,details:e?.details||null}));
+      setError(cashfreeErrorText(e, 'We could not update Aadhaar verification status.'));
       return null;
     } finally {
+      syncingAadhaar.current = false;
       setBusy(false);
     }
   };
+  syncAadhaarRef.current = syncAadhaar;
 
   useEffect(() => {
     loadStatus();
 
     const handleUrl = ({ url }) => {
       const id = extractVerificationId(url);
-      if (id) {
-        setAadhaarVerificationId(id);
-        syncAadhaar(id);
-      }
+      if (!id) return;
+      pendingAadhaarId.current = id;
+      setAadhaarVerificationId(id);
+      syncAadhaarRef.current(id);
     };
 
     const subscription = Linking.addEventListener('url', handleUrl);
     Linking.getInitialURL().then((url) => {
       const id = extractVerificationId(url);
-      if (id) {
-        setAadhaarVerificationId(id);
-        syncAadhaar(id);
-      }
+      if (!id) return;
+      pendingAadhaarId.current = id;
+      setAadhaarVerificationId(id);
+      syncAadhaarRef.current(id);
     }).catch(() => {});
 
     const appSubscription = AppState.addEventListener('change', (nextState) => {
-      const wasBackgrounded = appState.current === 'background' || appState.current === 'inactive';
-      appState.current = nextState;
-      if (wasBackgrounded && nextState === 'active' && aadhaarVerificationId) {
-        syncAadhaar(aadhaarVerificationId);
-      }
+      if (nextState === 'active' && pendingAadhaarId.current) syncAadhaarRef.current(pendingAadhaarId.current);
     });
 
     return () => {
       subscription.remove();
       appSubscription.remove();
     };
-  }, [aadhaarVerificationId]);
+  }, []);
 
   const submitDrivingLicence = async () => {
     setError('');
@@ -166,13 +184,21 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
     try {
       const result = await rideOnApi.startAadhaarKyc();
       if (!result?.url || !result?.verificationId) throw new Error('Cashfree did not return an Aadhaar verification URL.');
+      pendingAadhaarId.current = result.verificationId;
       setAadhaarVerificationId(result.verificationId);
-      await Linking.openURL(result.url);
+      if (result.kyc) applyKyc(result.kyc);
+      setDigilockerNote('DigiLocker opens inside RideOn. When you finish, RideOn confirms Aadhaar without leaving the app.');
+      if (Platform.OS === 'web') {
+        await Linking.openURL(result.url);
+      } else {
+        closingDigilocker.current = false;
+        setDigilockerUrl(result.url);
+      }
     } catch (e) {
       console.warn('[RideOnKyc][CASHFREE_ERROR]', JSON.stringify({flow:'digilocker',code:e?.code||null,status:e?.status||null,message:e?.message||null,details:e?.details||null}));
       setError(cashfreeErrorText(e, 'Could not start Aadhaar DigiLocker verification. Please try again.'));
     } finally {
-      setBusy(false);
+      if (!syncingAadhaar.current) setBusy(false);
     }
   };
 
@@ -223,10 +249,24 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
         setError('Aadhaar verification is still pending. Please check again.');
       }
     } catch(e) {
-      setError(e?.message || 'Aadhaar OTP verification could not be completed. Please try again.');
+      setError(cashfreeErrorText(e, 'Aadhaar OTP verification could not be completed. Please try again.'));
     } finally {
       setBusy(false);
     }
+  };
+
+  const completeDigilocker = (url, force = false) => {
+    if (!force && !isDigilockerReturn(url)) return false;
+    if (closingDigilocker.current) return true;
+    closingDigilocker.current = true;
+    const id = extractVerificationId(url) || pendingAadhaarId.current;
+    setDigilockerUrl(null);
+    if (id) {
+      pendingAadhaarId.current = id;
+      setAadhaarVerificationId(id);
+      syncAadhaar(id);
+    }
+    return true;
   };
 
   const verified = status === 'VERIFIED' || status === 'APPROVED';
@@ -240,6 +280,27 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
 
   return (
     <View style={styles.safe}>
+      <Modal visible={Boolean(digilockerUrl)} animationType="slide" onRequestClose={() => completeDigilocker(null, true)}>
+        <View style={styles.browser}>
+          <View style={styles.browserBar}>
+            <Text style={styles.browserTitle}>DigiLocker</Text>
+            <TouchableOpacity onPress={() => completeDigilocker(null, true)} accessibilityRole="button">
+              <Text style={styles.browserClose}>Close</Text>
+            </TouchableOpacity>
+          </View>
+          {digilockerUrl ? (
+            <WebView
+              source={{ uri: digilockerUrl }}
+              originWhitelist={['*']}
+              setSupportMultipleWindows={false}
+              onShouldStartLoadWithRequest={(request) => !completeDigilocker(request?.url)}
+              onNavigationStateChange={(state) => { completeDigilocker(state?.url); }}
+              startInLoadingState
+              renderLoading={() => <ActivityIndicator color={C.orange} style={{ marginTop: 24 }} />}
+            />
+          ) : null}
+        </View>
+      </Modal>
       <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
           <TouchableOpacity onPress={onBack} disabled={busy} accessibilityRole="button">
@@ -334,8 +395,9 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
               <View style={styles.aadhaarInfo}>
                 <Text style={styles.aadhaarTitle}>Secure Aadhaar verification</Text>
                 <Text style={styles.aadhaarText}>
-                  Cashfree Secure ID opens DigiLocker. You sign in, give consent to share Aadhaar, and return to RideOn. RideOn never asks you to type your Aadhaar number in this mode.
+                  DigiLocker opens inside RideOn. Sign in, allow Aadhaar sharing, and RideOn confirms the result when Cashfree redirects back. This does not need the App Store app.
                 </Text>
+                {digilockerNote ? <Text style={styles.aadhaarText}>{digilockerNote}</Text> : null}
               </View>
             ) : (
               <>
@@ -402,9 +464,9 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
           )}
         </TouchableOpacity>
 
-        {method === 'AADHAAR' && aadhaarMethod === 'DIGILOCKER' && aadhaarVerificationId && status === 'PENDING' ? (
+        {method === 'AADHAAR' && aadhaarMethod === 'DIGILOCKER' && aadhaarVerificationId && status !== 'APPROVED' ? (
           <TouchableOpacity style={styles.secondaryButton} disabled={busy} onPress={() => syncAadhaar(aadhaarVerificationId)}>
-            <Text style={styles.secondaryButtonText}>Check Aadhaar verification status</Text>
+            <Text style={styles.secondaryButtonText}>Check DigiLocker status</Text>
           </TouchableOpacity>
         ) : null}
         {method === 'AADHAAR' && aadhaarMethod === 'NUMBER' && aadhaarOtpSent ? (
@@ -423,6 +485,10 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
 
 const styles = StyleSheet.create({
   safe:{flex:1,backgroundColor:C.bg},
+  browser:{flex:1,backgroundColor:C.white,paddingTop:48},
+  browserBar:{height:52,paddingHorizontal:16,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:1,borderBottomColor:C.line},
+  browserTitle:{fontSize:16,fontWeight:'900',color:C.ink},
+  browserClose:{fontSize:16,fontWeight:'800',color:C.orange},
   page:{padding:18,paddingBottom:48},
   header:{height:58,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:1,borderBottomColor:C.line,marginBottom:22},
   back:{fontSize:36,color:C.ink,lineHeight:38},

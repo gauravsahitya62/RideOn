@@ -252,16 +252,48 @@ test('Cashfree Secure ID Aadhaar number flow sends OTP and verifies it', async (
     const otp=await provider.sendAadhaarOtp({aadhaarNumber:'123456789012',verificationId:'verification-1'});
     assert.equal(otp.ref_id,'aadhaar-ref-1');
     assert.equal(calls[0].url,'https://sandbox.cashfree.com/verification/offline-aadhaar/otp');
+    assert.equal(calls[0].options.headers['x-api-version'], undefined);
     assert.deepEqual(JSON.parse(calls[0].options.body),{aadhaar_number:'123456789012'});
     const verified=await provider.verifyAadhaarOtp({otp:'123456',referenceId:'aadhaar-ref-1'});
     assert.equal(verified.status,'SUCCESS');
     assert.equal(calls[1].url,'https://sandbox.cashfree.com/verification/offline-aadhaar/verify');
     assert.deepEqual(JSON.parse(calls[1].options.body),{otp:'123456',ref_id:'aadhaar-ref-1'});
+    assert.equal(calls[1].options.headers['x-api-version'], undefined);
   } finally {
     globalThis.fetch=originalFetch;
     for(const key of envKeys) {
       if(previous[key]===undefined) delete process.env[key];
       else process.env[key]=previous[key];
+    }
+  }
+});
+
+test('Cashfree public key signs client id and timestamp with RSA-OAEP SHA-1', () => {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const pem = publicKey.export({ type: 'spki', format: 'pem' });
+  const previous = {
+    KYC_PROVIDER: process.env.KYC_PROVIDER,
+    KYC_PROVIDER_CLIENT_ID: process.env.KYC_PROVIDER_CLIENT_ID,
+    KYC_PROVIDER_CLIENT_SECRET: process.env.KYC_PROVIDER_CLIENT_SECRET,
+    KYC_CASHFREE_PUBLIC_KEY: process.env.KYC_CASHFREE_PUBLIC_KEY,
+  };
+  process.env.KYC_PROVIDER = 'cashfree';
+  process.env.KYC_PROVIDER_CLIENT_ID = 'CF_TEST_CLIENT';
+  process.env.KYC_PROVIDER_CLIENT_SECRET = 'test-secret';
+  process.env.KYC_CASHFREE_PUBLIC_KEY = pem.replace(/\n/g, '\\n');
+  try {
+    const provider = createProviderFromEnv();
+    const signature = provider.headers()['x-cf-signature'];
+    const decoded = crypto.privateDecrypt({
+      key: privateKey,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: 'sha1',
+    }, Buffer.from(signature, 'base64')).toString();
+    assert.match(decoded, /^CF_TEST_CLIENT\.\d{10}$/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 });

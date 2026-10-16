@@ -575,22 +575,34 @@ app.post('/api/v1/kyc/aadhaar/sync', supabaseRequireAuth, requireCustomer, kycRa
       kyc:publicKycVerification(verification),
     });
   } catch(error) {
-    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_sync_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_AADHAAR_SYNC_FAILED'}));
+    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_sync_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_AADHAAR_SYNC_FAILED',providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null,providerPath:error?.providerPath||null,providerBody:error?.providerBody||null,message:error?.message||null}));
     const status=error?.code==='KYC_NOT_FOUND'?404:error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
     return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_SYNC_FAILED',message:
       error?.code==='KYC_NOT_FOUND'?'Aadhaar verification was not found.':
       error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
       error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
-      error?.message || 'Could not update Aadhaar verification status. Please retry.'}});
+      error?.message || 'Could not update Aadhaar verification status. Please retry.',
+      details:{buildCommit,providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null,providerPath:error?.providerPath||null,providerBody:error?.providerBody||null}}});
   }
 });
 
-app.get('/api/v1/kyc/digilocker/callback', async (req,res) => {
-  const verificationId=String(req.query?.verification_id || '').trim();
-  if(!verificationId) return res.status(400).send('<!doctype html><title>RideOn KYC</title><p>Missing verification reference.</p>');
-  const target='rideon://kyc/aadhaar?verification_id=' + encodeURIComponent(verificationId);
-  return res.redirect(302,target);
-});
+function digilockerCallbackPage(req, res) {
+  const raw = String(req.query?.verification_id || req.query?.verificationId || req.body?.verification_id || req.body?.verificationId || '').trim();
+  const verificationId = /^[A-Za-z0-9_-]{1,80}$/.test(raw) ? raw : '';
+  console.info(JSON.stringify({level:'info',event:'kyc_digilocker_callback',requestId:req.requestId,method:req.method,hasVerificationId:Boolean(verificationId),queryKeys:Object.keys(req.query || {})}));
+  const appUrl = verificationId ? 'rideon://kyc/aadhaar?verification_id=' + encodeURIComponent(verificationId) : 'rideon://kyc/aadhaar';
+  res.status(200).type('html').send(`<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Return to RideOn</title></head>
+<body style="font-family:-apple-system,sans-serif;padding:28px;line-height:1.45;color:#17202D">
+<h1 style="font-size:22px">DigiLocker finished</h1>
+<p>Switch back to the RideOn app. RideOn confirms Aadhaar after the app is open again.</p>
+<p>This page does not open the app by itself. On Expo Go, an automatic return link is rejected by the phone.</p>
+<p><a href="${appUrl}" style="display:inline-block;background:#E85D35;color:#fff;text-decoration:none;padding:12px 16px;border-radius:8px">Open RideOn</a></p>
+</body></html>`);
+}
+
+app.get('/api/v1/kyc/digilocker/callback', digilockerCallbackPage);
+app.post('/api/v1/kyc/digilocker/callback', digilockerCallbackPage);
 
 app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
   const parsed=z.object({
