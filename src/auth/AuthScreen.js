@@ -84,7 +84,7 @@ export default function AuthScreen({onAuthenticated}) {
       } else {
         user=await authService.currentUser();
       }
-      if(!user?.id||!['customer','vendor'].includes(user.role)) throw new Error('We could not determine your RideOn account type.');
+      if(!user?.id||!['customer','vendor','delivery_staff'].includes(user.role)) throw new Error('We could not determine your RideOn account type.');
       onAuthenticated({...user,token:session.access_token});
     }catch(x){setError(normalizeAuthError(x));}
     finally{setBusy(false);}

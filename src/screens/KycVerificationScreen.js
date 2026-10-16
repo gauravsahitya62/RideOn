@@ -169,21 +169,24 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
   };
 
   const sendAadhaarOtp = async () => {
-    const normalized=aadhaarNumber.replace(/\s/g,'');
-    if (!/^\d{12}$/.test(normalized)) {
+    const digits=aadhaarNumber.replace(/\D/g,'');
+    const shape={rawLength:aadhaarNumber.length,digitCount:digits.length};
+    if (digits.length !== 12) {
+      console.warn('[RideOnKyc][AADHAAR_REJECTED]', JSON.stringify({stage:'client',reason:digits.length<12?'too_few_digits':'too_many_digits',...shape}));
       setError('Enter a valid 12-digit Aadhaar number.');
       return;
     }
     setError('');
     setBusy(true);
     try {
-      const result=await rideOnApi.startAadhaarNumberKyc(normalized);
+      const result=await rideOnApi.startAadhaarNumberKyc(digits);
       setAadhaarVerificationId(result.verificationId);
       setAadhaarReferenceId(result.referenceId);
       setAadhaarOtpSent(true);
       setAadhaarOtp('');
       Alert.alert('OTP sent', 'Cashfree sent an OTP to the mobile number linked with your Aadhaar.');
     } catch(e) {
+      console.warn('[RideOnKyc][AADHAAR_START_FAILED]', JSON.stringify({stage:'api',code:e?.code||null,status:e?.status||null,message:e?.message||null,details:e?.details||null}));
       setError(e?.message || 'Could not send Aadhaar OTP. Please try again.');
     } finally {
       setBusy(false);

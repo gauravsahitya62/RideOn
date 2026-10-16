@@ -12,7 +12,7 @@ function repositoryFixture({ blacklisted=false } = {}) {
     async getKycStatus(id){ const c=customers.get(String(id)); return c ? {status:c.kycStatus,activeKycId:c.activeKycId}:null; },
     async isKycBlacklisted(hash){ return blacklist.has(hash); },
     async createKycVerification(input){ const id=crypto.randomUUID(); const row={id,externalUserId:input.externalUserId,provider:input.provider,documentStatus:'PENDING'};verifications.set(id,row);customers.get(String(input.externalUserId)).kycStatus='PENDING';customers.get(String(input.externalUserId)).activeKycId=id;return row; },
-    async applyKycVerificationResult(input){ const row=verifications.get(String(input.verificationId));Object.assign(row,input,{documentStatus:input.status});const c=customers.get(String(row.externalUserId));c.kycStatus=input.blacklist?'BLACKLISTED':input.status;c.activeKycId=input.status==='APPROVED'?row.id:null;return {verification:row,duplicate:false}; },
+    async applyKycVerificationResult(input){ const row=verifications.get(String(input.verificationId));Object.assign(row,input,{documentStatus:input.status});const c=customers.get(String(row.externalUserId));c.kycStatus=input.blacklist?'BLACKLISTED':input.status==='APPROVED'?'VERIFIED':input.status;c.activeKycId=input.status==='APPROVED'?row.id:null;return {verification:row,duplicate:false}; },
     async findKycVerificationByProviderEvent(){return null;},
     async findKycVerificationByProviderReference(){return null;},
     async getKycVerification(id){return verifications.get(String(id))||null;},

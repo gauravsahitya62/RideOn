@@ -53,7 +53,10 @@ test.before(async () => {
 
 test.after(async () => {
   await repository.close();
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  if (!server) return;
+  server.closeIdleConnections?.();
+  server.closeAllConnections?.();
+  await new Promise((resolve) => server.close(() => resolve()));
 });
 
 test('valid signed Cashfree webhook with no local RideOn payment is acknowledged', async () => {
@@ -85,6 +88,7 @@ test('valid signed Cashfree webhook for a matching RideOn payment uses the exist
     email: 'webhook-test-' + suffix + '@example.com',
     passwordHash: 'test-password-hash',
   });
+  await repository.setKycStatus(customer.id, 'VERIFIED');
   const booking = await repository.createBooking({
     customerId: customer.id,
     vehicle: { ...vehicle, pricePerDay: 100, ownerId: vehicle.ownerId || null },

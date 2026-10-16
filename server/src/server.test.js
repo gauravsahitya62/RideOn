@@ -85,7 +85,9 @@ async function register(phone = '+911234567890', fullName = 'Test User') {
     password: 'StrongPass123!',
   });
   assert.equal(response.status, 201);
-  return response.json();
+  const body = await response.json();
+  if (body?.customer?.id) await repository.setKycStatus(body.customer.id, 'VERIFIED');
+  return body;
 }
 
 test('health endpoint reports memory storage when DATABASE_URL is absent', async () => {
@@ -600,17 +602,17 @@ test('security deposit inspection requires completed rental and protects deducti
   const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   const beforeReturn=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:0},vendorToken);
   assert.equal(beforeReturn.status,409);
-  await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'confirmed');
   const payment=await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'deposit-order-'+booking.bookingId,amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
   await repository.applyPaymentEvent({eventId:'deposit-paid-'+booking.bookingId,bookingId:booking.bookingId,providerReference:'deposit-paid-ref-'+booking.bookingId,providerOrderId:payment.payment.providerOrderId,amountPaise:payment.payment.amountPaise,currency:'INR',status:'paid'});
+  await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'confirmed');
   await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'in_progress');
   await repository.updateVendorBookingStatus(vendor.id,booking.bookingId,'completed');
   const missingEvidence=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:10000,reason:'Damage'},vendorToken);
   assert.equal(missingEvidence.status,400);
   assert.equal((await missingEvidence.json()).error.code,'DEPOSIT_EVIDENCE_REQUIRED');
-  const valid=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:10000,reason:'Damage',evidenceReference:'inspection-photo-932'},vendorToken);
-  assert.equal(valid.status,400);
-  assert.equal((await valid.json()).error.code,'DEPOSIT_DEDUCTION_INVALID');
+  const overLimit=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:100000,reason:'Damage',evidenceReference:'inspection-photo-932'},vendorToken);
+  assert.equal(overLimit.status,400);
+  assert.equal((await overLimit.json()).error.code,'DEPOSIT_DEDUCTION_INVALID');
   const release=await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/security-deposit/inspection','POST',{deductionPaise:0},vendorToken);
   assert.equal(release.status,200);
   assert.equal((await release.json()).deposit.status,'refund_pending');
@@ -731,18 +733,18 @@ test('vendor booking lifecycle is isolated and customer-visible', async () => {
 });
 
 test('active delivery tracking is vendor-authorized and stops on delivery completion', async () => {
-  const customer=await register('+911234567930','Tracking Customer');
-  const customerLogin=await legacyLogin('+911234567930');
-  const otherCustomer=await register('+911234567931','Other Tracking Customer');
-  const otherLogin=await legacyLogin('+911234567931');
-  const vendorCustomer=await register('+911234567932','Tracking Vendor');
+  const customer=await register('+911234567950','Tracking Customer');
+  const customerLogin=await legacyLogin('+911234567950');
+  const otherCustomer=await register('+911234567951','Other Tracking Customer');
+  const otherLogin=await legacyLogin('+911234567951');
+  const vendorCustomer=await register('+911234567952','Tracking Vendor');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
   const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Tracking Car',make:'Test',model:'T',year:2034,city:'Jaipur',dailyRate:1500,securityDeposit:0,transmission:'Automatic',fuel:'Petrol',seats:5,registrationNumber:'RJTRACK930',description:'Tracking vehicle',imageUrls:[],deliveryAvailable:true,active:true});
   const bookingResponse=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2036-07-10T10:00:00.000Z',endAt:'2036-07-11T10:00:00.000Z',delivery:true,address:'10 Tracking Road, Jaipur',deliveryLatitude:26.9124,deliveryLongitude:75.7873},customerLogin.accessToken,{'Idempotency-Key':'tracking-booking-1'});
   assert.equal(bookingResponse.status,201);
   const booking=(await bookingResponse.json()).booking;
   const payment=await repository.createOrGetPaymentOrder({bookingId:booking.bookingId,customerId:customer.customer.id,provider:'mock',amountPaise:Math.round(booking.pricing.total*100),currency:'INR',providerOrder:{id:'tracking-order-'+booking.bookingId,amountPaise:Math.round(booking.pricing.total*100),currency:'INR'}});
-  await repository.applyPaymentEvent({eventId:'tracking-paid-'+booking.bookingId,bookingId:booking.bookingId,paymentId:payment.id,providerReference:'tracking-ref-'+booking.bookingId,providerOrderId:'tracking-order-'+booking.bookingId,amountPaise:payment.amountPaise,currency:'INR',status:'paid'});
+  await repository.applyPaymentEvent({eventId:'tracking-paid-'+booking.bookingId,bookingId:booking.bookingId,paymentId:payment.payment.id,providerReference:'tracking-ref-'+booking.bookingId,providerOrderId:payment.payment.providerOrderId,amountPaise:payment.payment.amountPaise,currency:'INR',status:'paid'});
   const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   assert.equal((await jsonRequest('/api/v1/vendor/bookings/'+booking.bookingId+'/status','PATCH',{status:'confirmed'},vendorToken)).status,200);
   const otherTrack=await request('/api/v1/bookings/'+booking.bookingId+'/tracking',{headers:{authorization:'Bearer '+otherLogin.accessToken}});
@@ -780,19 +782,19 @@ test('Supabase identity roles persist and vendor onboarding is idempotent', asyn
   const email='supabase-role-test@example.com';
   const supabaseUserId=crypto.randomUUID();
   const first=await repository.createOrLinkCustomerFromSupabase({
-    supabaseUserId,email,fullName:'Role Vendor',phone:'+911234567899',role:'vendor'
+    supabaseUserId,email,fullName:'Role Vendor',phone:'+911234569101',role:'vendor'
   });
   const second=await repository.createOrLinkCustomerFromSupabase({
-    supabaseUserId,email,fullName:'Role Vendor Changed',phone:'+911234567899',role:'vendor'
+    supabaseUserId,email,fullName:'Role Vendor Changed',phone:'+911234569101',role:'vendor'
   });
   assert.equal(first.id,second.id);
   assert.equal(second.role,'vendor');
 
   const vendorOne=await repository.ensureVendorForCustomer(first.id,{
-    businessName:'Role Vendor',contactName:'Role Vendor',phone:'+911234567899',email
+    businessName:'Role Vendor',contactName:'Role Vendor',phone:'+911234569101',email
   });
   const vendorTwo=await repository.ensureVendorForCustomer(first.id,{
-    businessName:'Role Vendor Retry',contactName:'Role Vendor',phone:'+911234567899',email
+    businessName:'Role Vendor Retry',contactName:'Role Vendor',phone:'+911234569101',email
   });
   assert.equal(vendorOne.id,vendorTwo.id);
 });
@@ -801,11 +803,11 @@ test('Supabase identity refuses customer/vendor account-type conflicts', async (
   const email='supabase-role-conflict@example.com';
   const supabaseUserId=crypto.randomUUID();
   await repository.createOrLinkCustomerFromSupabase({
-    supabaseUserId,email,fullName:'Conflict Vendor',phone:'+911234567898',role:'vendor'
+    supabaseUserId,email,fullName:'Conflict Vendor',phone:'+911234569102',role:'vendor'
   });
   await assert.rejects(
     () => repository.createOrLinkCustomerFromSupabase({
-      supabaseUserId:crypto.randomUUID(),email,fullName:'Conflict Customer',phone:'+911234567897',role:'customer'
+      supabaseUserId:crypto.randomUUID(),email,fullName:'Conflict Customer',phone:'+911234569103',role:'customer'
     }),
     error => error.code==='ACCOUNT_TYPE_CONFLICT'
   );
@@ -870,17 +872,19 @@ test('marketplace vendor map groups active vehicles by service location', async 
 });
 
 test('route preview returns a friendly configuration error when routing is not configured', async () => {
-  await register('+911234567942','Route User');
-  const login=await legacyLogin('+911234567942');
-  const vendorCustomer=await register('+911234567943','Route Vendor');
+  await register('+911234567980','Route User');
+  const login=await legacyLogin('+911234567980');
+  const vendorCustomer=await register('+911234567981','Route Vendor');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
   const vendorToken=vendorTokenFor(vendorCustomer.customer.id);
   const saved=await jsonRequest('/api/v1/vendor/service-location','PATCH',{latitude:26.91,longitude:75.79,address:'Route Service Point',serviceCity:'Jaipur'},vendorToken);
   assert.equal(saved.status,200);
   const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Route Car',make:'Test',model:'R',year:2034,city:'Jaipur',dailyRate:1000,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJROUTE942',description:'',imageUrls:[],deliveryAvailable:true,active:true});
-  const response=await jsonRequest('/api/v1/routing/eta','GET',{},login.accessToken);
-  assert.equal(response.status,400);
-  await customer.customer.id;
+  const response=await request('/api/v1/routing/eta?vendorId='+encodeURIComponent(vendor.id)+'&latitude=26.92&longitude=75.80',{headers:{authorization:'Bearer '+login.accessToken}});
+  assert.equal(response.status,503);
+  const payload=await response.json();
+  assert.equal(payload.error.code,'ROUTE_PROVIDER_NOT_CONFIGURED');
+  assert.match(payload.error.message,/not configured/i);
   assert.ok(vehicle.id);
 });
 
@@ -966,7 +970,9 @@ test('payment provider state machine blocks client-side paid transitions', () =>
   const service = createPaymentService({ provider:'mock', webhookSecret:'mock-secret' });
   assert.equal(service.canTransition('pending','paid'), true);
   assert.equal(service.canTransition('paid','pending'), false);
-  assert.equal(service.canTransition('paid','refunded'), true);
+  assert.equal(service.canTransition('paid','refund_pending'), true);
+  assert.equal(service.canTransition('refund_pending','refunded'), true);
+  assert.equal(service.canTransition('paid','refunded'), false);
   assert.equal(service.canTransition('pending','settled'), false);
 });
 
@@ -984,29 +990,28 @@ test('mock payment provider creates a deterministic checkout order without netwo
 });
 
 test('payment webhook signature and payload are validated', () => {
-  const service = createPaymentService({ provider:'mock', webhookSecret:'mock-secret' });
+  const service = createPaymentService({ provider:'cashfree', clientId:'test-client', clientSecret:'test-secret', webhookSecret:'mock-secret' });
   const valid = {
-    eventId:'evt-payment-1',
-    bookingId:'booking-1',
-    paymentId:'payment-1',
-    providerReference:'provider-ref-1',
-    providerOrderId:'order-1',
-    amountPaise:544700,
-    currency:'INR',
-    status:'paid',
+    type:'PAYMENT_SUCCESS_WEBHOOK',
+    event_id:'evt-payment-1',
+    data:{
+      payment:{order_id:'order-1',cf_payment_id:'payment-1',payment_amount:5447,payment_currency:'INR'},
+      order:{order_id:'order-1'},
+    },
   };
   const body = JSON.stringify(valid);
-  const signature = crypto.createHmac('sha256','mock-secret').update(body).digest('hex');
-  assert.equal(service.verifyWebhook(body,signature),true);
-  assert.equal(service.verifyWebhook(body,'bad'),false);
+  const timestamp = '1710000000';
+  const signature = crypto.createHmac('sha256','mock-secret').update(timestamp+body).digest('base64');
+  assert.equal(service.verifyWebhook(body,signature,timestamp),true);
+  assert.equal(service.verifyWebhook(body,'bad',timestamp),false);
   assert.equal(service.parseWebhook(valid).status,'paid');
-  assert.equal(service.parseWebhook({...valid,amountPaise:0}),null);
+  const zero = structuredClone(valid);
+  zero.data.payment.payment_amount = 0;
+  assert.equal(service.parseWebhook(zero),null);
 });
 
-test('Razorpay without checkout credentials fails closed', async () => {
-  const service = createPaymentService({ provider:'razorpay' });
-  assert.equal(service.configured,false);
-  await assert.rejects(() => service.createCustomerPayment({orderId:'rideon-test',amountPaise:10000}),(error)=>error.code==='PAYMENT_PROVIDER_CONFIGURATION_REQUIRED');
+test('Razorpay without checkout credentials fails closed', () => {
+  assert.throws(() => createPaymentService({ provider:'razorpay' }), (error) => error.code==='PAYMENT_PROVIDER_UNSUPPORTED');
 });
 
 test('unconfigured provider exposes no customer UPI methods and fails closed', async () => {
@@ -1042,11 +1047,11 @@ test('request correlation is returned on a 404 response', async () => {
 
 
 test('reviews enforce completed booking ownership, duplicate prevention, and server aggregation', async () => {
-  const customer=await register('+911234567941','Reviews Customer');
-  const customerLogin=await legacyLogin('+911234567941');
-  const other=await register('+911234567942','Other Customer');
-  const otherLogin=await legacyLogin('+911234567942');
-  const vendorCustomer=await register('+911234567943','Reviews Vendor');
+  const customer=await register('+911234567960','Reviews Customer');
+  const customerLogin=await legacyLogin('+911234567960');
+  const other=await register('+911234567961','Other Customer');
+  const otherLogin=await legacyLogin('+911234567961');
+  const vendorCustomer=await register('+911234567962','Reviews Vendor');
   const vendor=await repository.ensureVendorForCustomer(vendorCustomer.customer.id);
   const vehicle=await repository.createVendorVehicle(vendor.id,{type:'car',name:'Reviews Car',make:'RideOn',model:'R1',year:2035,city:'Jaipur',dailyRate:1500,securityDeposit:0,transmission:'Automatic',fuel:'Petrol',seats:5,registrationNumber:'RJ14REV941',description:'Reviews test vehicle',imageUrls:[],deliveryAvailable:false,active:true});
   const created=await jsonRequest('/api/v1/bookings','POST',{vehicleId:vehicle.id,startAt:'2042-01-10T10:00:00.000Z',endAt:'2042-01-11T10:00:00.000Z',delivery:false,address:'1 Reviews Road, Jaipur'},customerLogin.accessToken,{'Idempotency-Key':'reviews-booking-941'});
@@ -1125,10 +1130,10 @@ test('reviews enforce completed booking ownership, duplicate prevention, and ser
 
 
 test('support tickets enforce ownership, booking scoping, messaging and lifecycle', async () => {
-  const customer=await register('+911234568001','Support Customer');
-  const customerLogin=await legacyLogin('+911234568001');
-  const other=await register('+911234568002','Other Support Customer');
-  const otherLogin=await legacyLogin('+911234568002');
+  const customer=await register('+911234567970','Support Customer');
+  const customerLogin=await legacyLogin('+911234567970');
+  const other=await register('+911234567971','Other Support Customer');
+  const otherLogin=await legacyLogin('+911234567971');
 
   const invalid=await jsonRequest('/api/v1/support/tickets','POST',{category:'Not real',subject:'Payment issue',description:'Something went wrong with payment.'},customerLogin.accessToken);
   assert.equal(invalid.status,400);
@@ -1192,18 +1197,18 @@ test('support tickets enforce ownership, booking scoping, messaging and lifecycl
 });
 
 test('support staff can inspect, assign and transition tickets while internal messages stay private', async () => {
-  const customer=await register('+911234568003','Support Admin Customer');
-  const customerLogin=await legacyLogin('+911234568003');
+  const customer=await register('+911234567972','Support Admin Customer');
+  const customerLogin=await legacyLogin('+911234567972');
   const created=await jsonRequest('/api/v1/support/tickets','POST',{category:'Technical Issue',subject:'App issue',description:'The support flow needs assistance.'},customerLogin.accessToken,{'Idempotency-Key':'support-admin-key-003'});
   assert.equal(created.status,201);
   const ticket=(await created.json()).ticket;
 
   const supportEmail='support-role-test@example.com';
   const support=await repository.createOrLinkCustomerFromSupabase({
-    supabaseUserId:crypto.randomUUID(),email:supportEmail,fullName:'RideOn Support',phone:'+911234568004',role:'support'
+    supabaseUserId:crypto.randomUUID(),email:supportEmail,fullName:'RideOn Support',phone:'+911234567973',role:'support'
   });
   assert.equal(support.role,'support');
-  const supportToken=jwt.sign({sub:support.id,role:'support'},'development-only-secret');
+  const supportToken=testAuth.sign({sub:support.id,role:'support'});
 
   const adminList=await request('/api/v1/support/admin/tickets',{headers:{authorization:'Bearer '+supportToken}});
   assert.equal(adminList.status,200);
@@ -1297,7 +1302,11 @@ test('multi-vehicle checkout rolls back all staged bookings when a selected vehi
 
 test.after(async () => {
   try {
-    if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
+    if (server?.listening) {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(() => resolve()));
+    }
   } finally {
     await repository.close();
   }

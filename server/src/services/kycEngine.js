@@ -5,6 +5,31 @@ const PROVIDERS = new Set(['cashfree','signzy','hyperverge']);
 const normalizeDocumentNumber = (value) =>
   String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
+const aadhaarDigits = (value) => String(value ?? '').replace(/\D/g, '');
+
+const redactDigits = (value) => String(value ?? '').replace(/\d{4,}/g, (match) => `${match.length}digits`);
+
+export function aadhaarInputShape(value) {
+  const present = value !== undefined && value !== null && value !== '';
+  const raw = value == null ? '' : String(value);
+  const digits = aadhaarDigits(raw);
+  const nonDigitCodePoints = [];
+  for (const ch of raw) {
+    if (/\d/.test(ch)) continue;
+    const point = 'U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0');
+    if (!nonDigitCodePoints.includes(point) && nonDigitCodePoints.length < 12) nonDigitCodePoints.push(point);
+  }
+  return {
+    present,
+    type: value === null ? 'null' : typeof value,
+    rawLength: raw.length,
+    digitCount: digits.length,
+    nonDigitCount: raw.length - digits.length,
+    nonDigitCodePoints,
+    valid: digits.length === 12,
+  };
+}
+
 const sha256Document = (value) =>
   crypto.createHash('sha256').update(normalizeDocumentNumber(value), 'utf8').digest('hex');
 
@@ -200,8 +225,11 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
   }
 
   async sendAadhaarOtp({ aadhaarNumber, verificationId }) {
-    const normalized=String(aadhaarNumber || '').replace(/\s+/g,'');
-    if (!/^\d{12}$/.test(normalized)) throw Object.assign(new Error('Enter a valid 12-digit Aadhaar number.'),{code:'INVALID_AADHAAR_NUMBER'});
+    const normalized=aadhaarDigits(aadhaarNumber);
+    if (!/^\d{12}$/.test(normalized)) {
+      console.warn(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_rejected',stage:'provider',reason:'not_12_digits',...aadhaarInputShape(aadhaarNumber)}));
+      throw Object.assign(new Error('Enter a valid 12-digit Aadhaar number.'),{code:'INVALID_AADHAAR_NUMBER'});
+    }
     return this.requestJson({
       url:this.verifyUrl.replace(/\/driving-license$/i, '/offline-aadhaar/otp'),
       method:'POST',
@@ -260,7 +288,14 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
       try { payload=text?JSON.parse(text):{}; } catch {
         throw Object.assign(new Error('Cashfree Secure ID returned a non-JSON response.'),{code:'KYC_PROVIDER_INVALID_RESPONSE'});
       }
-      if(!response.ok) throw Object.assign(new Error('Cashfree Secure ID rejected the verification request.'),{code:'KYC_PROVIDER_REQUEST_FAILED',status:response.status});
+      if(!response.ok) {
+        const providerCode=payload?.code || payload?.type || payload?.error?.code || null;
+        const providerMessage=redactDigits(payload?.message || payload?.error?.message || payload?.error || '').slice(0,300);
+        let pathName=url;
+        try { pathName=new URL(url).pathname; } catch {}
+        console.warn(JSON.stringify({level:'warn',event:'kyc_provider_rejected',method,path:pathName,status:response.status,providerCode,providerMessage}));
+        throw Object.assign(new Error('Cashfree Secure ID rejected the verification request.'),{code:'KYC_PROVIDER_REQUEST_FAILED',status:response.status,providerCode,providerMessage});
+      }
       return payload;
     } catch(error) {
       if(error?.name==='AbortError') throw Object.assign(new Error('Cashfree Secure ID request timed out.'),{code:'KYC_PROVIDER_TIMEOUT'});
@@ -415,8 +450,11 @@ export class KycEngine {
     if (this.provider.name !== 'cashfree' || typeof this.provider.sendAadhaarOtp !== 'function') {
       throw Object.assign(new Error('Cashfree Secure ID Aadhaar OTP verification is not configured.'), { code:'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
     }
-    const normalized=String(aadhaarNumber || '').replace(/\s+/g,'');
-    if (!/^\d{12}$/.test(normalized)) throw Object.assign(new Error('Enter a valid 12-digit Aadhaar number.'),{code:'INVALID_AADHAAR_NUMBER'});
+    const normalized=aadhaarDigits(aadhaarNumber);
+    if (!/^\d{12}$/.test(normalized)) {
+      console.warn(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_rejected',stage:'engine',reason:'not_12_digits',...aadhaarInputShape(aadhaarNumber)}));
+      throw Object.assign(new Error('Enter a valid 12-digit Aadhaar number.'),{code:'INVALID_AADHAAR_NUMBER'});
+    }
     const documentHash=sha256Document(normalized);
     if (await this.repository.isKycBlacklisted(documentHash)) {
       const verification=await this.repository.createKycVerification({clientId:this.clientId,externalUserId:customerId,documentType:'AADHAAR',documentHash,provider:this.provider.name});

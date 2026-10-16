@@ -12,7 +12,7 @@ import { createPaymentService } from './payments.js';
 import { getDrivingRoute } from './routing.js';
 import { geocodeAddress } from './geocoding.js';
 import { createTrackingRealtimeServer } from './trackingRealtime.js';
-import { KycEngine } from './services/kycEngine.js';
+import { KycEngine, aadhaarInputShape } from './services/kycEngine.js';
 
 const fleet = [];
 
@@ -58,13 +58,13 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '35mb', verify: (req, _res, buf) => { req.rawBody = Buffer.from(buf); } }));
 app.use(express.urlencoded({ extended:false, limit:'64kb' }));
-app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false }));
+app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.GLOBAL_RATE_LIMIT || 120), standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' }));
 const authRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const reviewRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const supportRateLimit = rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
-const paymentRateLimit = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: true, legacyHeaders: false });
-const kycRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 5, standardHeaders: true, legacyHeaders: false });
-const kycWebhookRateLimit = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
+const paymentRateLimit = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const kycRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 5, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
+const kycWebhookRateLimit = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
@@ -494,25 +494,34 @@ app.get('/api/v1/kyc/status', supabaseRequireAuth, requireCustomer, async (req,r
 });
 
 app.post('/api/v1/kyc/aadhaar/number/start', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
-  const parsed=z.object({aadhaarNumber:z.string().regex(/^\\s*\\d{12}\\s*$/,'Enter a valid 12-digit Aadhaar number.')}).safeParse(req.body||{});
-  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_AADHAAR_NUMBER',message:'Enter a valid 12-digit Aadhaar number.'}});
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const incoming = body.aadhaarNumber;
+  const shape = aadhaarInputShape(incoming);
+  const bodyKeys = Object.keys(body);
+  console.info(JSON.stringify({level:'info',event:'kyc_aadhaar_number_start',requestId:req.requestId,customerId:req.user.id,buildCommit,contentType:req.get('content-type')||null,bodyKeys,...shape}));
+  if(!shape.valid) {
+    const reason = !shape.present ? 'missing' : shape.digitCount < 12 ? 'too_few_digits' : 'too_many_digits';
+    console.warn(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_rejected',stage:'route',reason,requestId:req.requestId,customerId:req.user.id,buildCommit,bodyKeys,...shape}));
+    return res.status(400).json({error:{code:'INVALID_AADHAAR_NUMBER',message:'Enter a valid 12-digit Aadhaar number.',details:{stage:'route',reason,buildCommit,...shape,bodyKeys}}});
+  }
   if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
   try {
-    const result=await kycEngine.startAadhaarNumberVerification({customerId:req.user.id,aadhaarNumber:parsed.data.aadhaarNumber});
+    const result=await kycEngine.startAadhaarNumberVerification({customerId:req.user.id,aadhaarNumber:String(incoming).replace(/\D/g,'')});
     return res.status(201).json({success:true,verificationId:result.verificationId,referenceId:result.referenceId,status:result.status,message:result.message,kyc:publicKycVerification(result.verification)});
   } catch(error) {
-    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_start_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED'}));
+    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_start_failed',requestId:req.requestId,customerId:req.user.id,buildCommit,code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED',providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null,message:error?.message||null}));
     const status=error?.code==='INVALID_AADHAAR_NUMBER'?400:error?.code==='KYC_BLACKLISTED'?403:error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
     return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED',message:
       error?.code==='KYC_BLACKLISTED'?'Identity verification cannot be completed for this account.':
       error?.code==='INVALID_AADHAAR_NUMBER'?'Enter a valid 12-digit Aadhaar number.':
       error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
-      error?.message || 'Could not send Aadhaar OTP. Please retry.'}});
+      error?.message || 'Could not send Aadhaar OTP. Please retry.',
+      details:{buildCommit,providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null}}});
   }
 });
 
 app.post('/api/v1/kyc/aadhaar/number/verify', supabaseRequireAuth, requireCustomer, kycRateLimit, async (req,res) => {
-  const parsed=z.object({verificationId:z.string().uuid(),otp:z.string().regex(/^\\d{4,8}$/,'Enter the OTP sent to your Aadhaar-linked mobile number.')}).safeParse(req.body||{});
+  const parsed=z.object({verificationId:z.string().uuid(),otp:z.string().regex(/^\d{4,8}$/,'Enter the OTP sent to your Aadhaar-linked mobile number.')}).safeParse(req.body||{});
   if(!parsed.success) return res.status(400).json({error:{code:'INVALID_AADHAAR_OTP',message:'Enter the OTP sent to your Aadhaar-linked mobile number.',details:parsed.error.flatten()}});
   if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
   try {
@@ -587,7 +596,7 @@ app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimi
   const parsed=z.object({
     documentType:z.literal('DRIVING_LICENSE'),
     documentNumber:z.string().trim().min(6).max(40),
-    dateOfBirth:z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/,'Use date of birth in YYYY-MM-DD format.'),
+    dateOfBirth:z.string().regex(/^\d{4}-\d{2}-\d{2}$/,'Use date of birth in YYYY-MM-DD format.'),
   }).safeParse(req.body||{});
   if(!parsed.success) return res.status(400).json({error:{code:'KYC_VALIDATION_ERROR',message:'Provide a valid Driving Licence number and date of birth.',details:parsed.error.flatten()}});
   if(!kycEngine) return res.status(503).json({error:{code:'KYC_PROVIDER_CONFIGURATION_REQUIRED',message:'Identity verification is not configured on the RideOn server.'}});
@@ -942,6 +951,7 @@ app.post('/api/v1/quotes/multi', supabaseRequireAuth, requireCustomer, async (re
 app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req,res)=>{
   if (!(await requireVerifiedKyc(req,res))) return;
   const parsed=z.object({
+    vendorId:z.string().uuid().optional(),
     vehicleIds:z.array(z.string().trim().min(1).max(64)).min(2).max(10),
     pickupAt:z.string().datetime(),
     returnAt:z.string().datetime(),
@@ -954,7 +964,7 @@ app.post('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (re
   const idempotencyKey=req.get('Idempotency-Key')?.trim()||null;
   if(idempotencyKey&&idempotencyKey.length>128)return res.status(400).json({error:{code:'INVALID_IDEMPOTENCY_KEY'}});
   try{
-    const order=await repository.createFleetOrder({customerId:req.user.id,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
+    const order=await repository.createFleetOrder({customerId:req.user.id,vendorId:parsed.data.vendorId,vehicleIds:parsed.data.vehicleIds,startAt:parsed.data.pickupAt,endAt:parsed.data.returnAt,delivery:parsed.data.delivery,address:parsed.data.address,deliveryLatitude:parsed.data.deliveryLatitude,deliveryLongitude:parsed.data.deliveryLongitude,idempotencyKey});
     res.status(201).json({order,data:order});
   }catch(error){
     const map={KYC_REQUIRED:403,INVALID_MULTI_CART:400,INVALID_BOOKING_WINDOW:400,INVALID_DELIVERY_LOCATION:400,MULTI_VEHICLE_ACCESS_DENIED:403,MULTI_VEHICLE_UNAVAILABLE:409,VENDOR_NOT_FOUND:404,VEHICLE_NOT_FOUND:404};
@@ -1134,7 +1144,6 @@ app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, as
     const supabaseUrl=String(process.env.SUPABASE_URL||'').replace(/\/$/,'');
     const storageKey=process.env.SUPABASE_SERVICE_ROLE_KEY||process.env.SUPABASE_SECRET_KEY;
     const bucket=String(process.env.SUPABASE_VEHICLE_IMAGE_BUCKET||'vehicle-images').trim();
-    if(!supabaseUrl||!storageKey) return res.status(503).json({error:{code:'STORAGE_NOT_CONFIGURED',message:'Vehicle image storage is not configured on the API.'}});
     const base64=String(req.body?.base64||'').replace(/^data:image\/[^;]+;base64,/i,'').trim();
     const contentType=String(req.body?.contentType||'image/jpeg').toLowerCase();
     if(!base64) return res.status(400).json({error:{code:'IMAGE_REQUIRED',message:'Please select a vehicle image to upload.'}});
@@ -1150,6 +1159,7 @@ app.post('/api/v1/vendor/vehicle-images', supabaseRequireAuth, requireVendor, as
     const hasWebpMagic=imageBuffer.length>=12&&imageBuffer.subarray(0,4).toString('ascii')==='RIFF'&&imageBuffer.subarray(8,12).toString('ascii')==='WEBP';
     const contentMatchesMagic=(contentType==='image/jpeg'&&hasJpegMagic)||(contentType==='image/png'&&hasPngMagic)||(contentType==='image/webp'&&hasWebpMagic);
     if(!contentMatchesMagic) return res.status(400).json({error:{code:'IMAGE_INVALID',message:'The selected file is not a valid image of the declared type.'}});
+    if(!supabaseUrl||!storageKey) return res.status(503).json({error:{code:'STORAGE_NOT_CONFIGURED',message:'Vehicle image storage is not configured on the API.'}});
     const extension=contentType==='image/png'?'png':contentType==='image/webp'?'webp':'jpg';
     const path=`vendors/${req.vendor.id}/${crypto.randomUUID()}.${extension}`;
     const response=await fetch(`${supabaseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${path.split('/').map(encodeURIComponent).join('/')}`,{
@@ -1473,6 +1483,29 @@ app.patch('/api/v1/vendor/fleet-orders/:id/status', supabaseRequireAuth, require
   }
 });
 
+app.post('/api/v1/vendor/bookings/:id/security-deposit/inspection', supabaseRequireAuth, requireVendor, async (req,res)=>{
+  const parsed=z.object({
+    deductionPaise:z.number().int().min(0).default(0),
+    reason:z.string().trim().max(2000).optional().default(''),
+    evidenceReference:z.string().trim().max(500).optional().default(''),
+  }).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid deposit inspection details.',details:parsed.error.flatten()}});
+  try{
+    const result=await repository.recordSecurityDepositInspection(req.vendor.id, req.params.id, parsed.data);
+    res.json({deposit:result.deposit,booking:publicBooking(result.booking,{includeDeliveryLocation:true})});
+  }catch(error){
+    const map={
+      BOOKING_NOT_FOUND:[404,'Booking not found.'],
+      DEPOSIT_INSPECTION_NOT_ALLOWED:[409,'Vehicle must be returned before deposit inspection.'],
+      DEPOSIT_DEDUCTION_INVALID:[400,'Deposit deduction exceeds the collected deposit.'],
+      DEPOSIT_DEDUCTION_REASON_REQUIRED:[400,'A deduction reason is required.'],
+      DEPOSIT_EVIDENCE_REQUIRED:[400,'Evidence is required for a deposit deduction.'],
+    };
+    const [status,message]=map[error?.code]||[500,'We could not record the deposit inspection right now. Please try again.'];
+    res.status(status).json({error:{code:error?.code||'DEPOSIT_INSPECTION_FAILED',message}});
+  }
+});
+
 app.patch('/api/v1/vendor/bookings/:id/status', supabaseRequireAuth, requireVendor, async (req,res)=>{
   const parsed=z.object({status:z.enum(['confirmed','rejected','cancelled','in_progress','completed']),note:z.string().trim().max(500).optional()}).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Invalid booking status.',details:parsed.error.flatten()}});
@@ -1785,7 +1818,7 @@ app.post('/api/v1/auth/verify-otp', authRateLimit, async (req, res) => {
   }
 });
 
-app.post('/api/v1/auth/register', authRateLimit, async (req, res) => {
+app.post('/api/v1/auth/register', authRateLimit, async (req, res, next) => {
   const parsed = z.object({
     fullName: z.string().trim().min(2).max(100),
     phone: z.string().trim().regex(/^\+?[0-9]{10,15}$/),
@@ -1793,10 +1826,14 @@ app.post('/api/v1/auth/register', authRateLimit, async (req, res) => {
     password: z.string().min(8).max(128),
   }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid registration details.' } });
-  const passwordHash = await auth.hashPassword(parsed.data.password);
-  const customer = await repository.createCustomer({ fullName: parsed.data.fullName, phone: parsed.data.phone, email: parsed.data.email, passwordHash });
-  const accessToken = auth.sign({ sub: customer.id, role: 'customer' });
-  res.status(201).json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
+  try {
+    const passwordHash = await auth.hashPassword(parsed.data.password);
+    const customer = await repository.createCustomer({ fullName: parsed.data.fullName, phone: parsed.data.phone, email: parsed.data.email, passwordHash });
+    const accessToken = auth.sign({ sub: customer.id, role: 'customer' });
+    res.status(201).json({ customer: { id: customer.id, fullName: customer.fullName, phone: customer.phone, email: customer.email }, accessToken, expiresIn: auth.accessTokenTtlSeconds });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post('/api/v1/auth/login', authRateLimit, async (req, res) => {

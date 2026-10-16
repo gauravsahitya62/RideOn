@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node scripts/start.js",
-    "test": "node --test",
+    "test": "node --test --test-concurrency=1",
     "db:migrate": "node scripts/migrate.js"
   },
   "engines": {

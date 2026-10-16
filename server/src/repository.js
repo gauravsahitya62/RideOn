@@ -282,7 +282,15 @@ export function createRepository({ databaseUrl, fleet }) {
   }
 
   async function getVehicle(id) {
-    if (!useDatabase) return [...fleet, ...memory.vehicles.values()].find((v) => v.id === id && v.active !== false) || null;
+    if (!useDatabase) {
+      const vehicle = [...fleet, ...memory.vehicles.values()].find((v) => v.id === id && v.active !== false) || null;
+      if (!vehicle) return null;
+      return {
+        ...vehicle,
+        pricePerDay: Number(vehicle.pricePerDay ?? vehicle.dailyRate ?? 0),
+        securityDeposit: Number(vehicle.securityDeposit || 0),
+      };
+    }
     const { rows } = await pool.query(
       'select id, owner_id, type, name, make, model, year, city, daily_rate_paise, security_deposit_paise, active, transmission, fuel, seats, description, image_urls, delivery_available from vehicles where id = $1 and active = true',
       [id]
@@ -858,11 +866,11 @@ export function createRepository({ databaseUrl, fleet }) {
       cancelled: [],
     };
     if (!allowed[nextStatus]) { const e=new Error('invalid status'); e.code='INVALID_BOOKING_STATUS'; throw e; }
-    if (nextStatus==='rejected' && !String(note||'').trim()) { const e=new Error('A rejection reason is required.'); e.code='REJECTION_REASON_REQUIRED'; throw e; }
     if (!useDatabase) {
       const b=await getVendorBooking(vendorId,bookingId);
       if(!b){const e=new Error('booking not found');e.code='BOOKING_NOT_FOUND';throw e;}
       if(!allowed[b.status]?.includes(nextStatus)){const e=new Error('invalid transition');e.code='INVALID_BOOKING_TRANSITION';throw e;}
+      if(nextStatus==='rejected' && !String(note||'').trim()){const e=new Error('A rejection reason is required.');e.code='REJECTION_REASON_REQUIRED';throw e;}
       if(nextStatus==='completed' && b.delivery && b.deliveryStatus!=='delivered'){const e=new Error('Delivery must be completed before the rental can be completed.');e.code='DELIVERY_NOT_COMPLETED';throw e;}
       if(nextStatus==='confirmed' && !['paid','held','settlement_pending','settled'].includes(String(b.paymentStatus))){
         const e=new Error('Payment must be confirmed before the vendor can accept this booking.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;
@@ -1630,6 +1638,8 @@ export function createRepository({ databaseUrl, fleet }) {
       if (existing && ['unpaid','pending'].includes(existing.status) && existing.amountPaise===Number(amountPaise)) return { payment:existing, created:false };
       const payment={id:crypto.randomUUID(),bookingId:String(bookingId),customerId:String(customerId),provider,providerOrderId:providerOrder.id,amountPaise:Number(amountPaise),currency,status:'pending',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
       memory.payments.set(String(bookingId),payment);
+      const booking=memory.bookings.get(String(bookingId));
+      if(booking && booking.paymentStatus==='unpaid') booking.paymentStatus='pending';
       return {payment,created:true};
     }
     const client=await pool.connect();
@@ -1837,7 +1847,7 @@ export function createRepository({ databaseUrl, fleet }) {
 
   const sanitizeReviewComment = (value) => {
     if (value == null) return null;
-    const normalized = String(value).replace(/[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g, '').replace(/\\s+/g, ' ').trim();
+    const normalized = String(value).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').replace(/\s+/g, ' ').trim();
     return normalized ? normalized.slice(0, 1000) : null;
   };
 
@@ -1980,14 +1990,14 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
       const booking=await getVendorBooking(vendorId,bookingId);
       if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
       const rows=[...memory.reviews.values()]
-        .filter(x=>String(x.bookingId)===String(bookingId)&&x.reviewType==='customer_to_vendor')
+        .filter(x=>String(x.bookingId)===String(bookingId)&&x.reviewType==='vendor_to_customer')
         .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
       return {summary:reviewSummary(rows),reviews:rows.slice(safeOffset,safeOffset+safeLimit)};
     }
     const booking=await getVendorBooking(vendorId,bookingId);
     if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
     const params=[bookingId];
-    const filter="r.booking_id=$1 and r.review_type='customer_to_vendor'";
+    const filter="r.booking_id=$1 and r.review_type='vendor_to_customer'";
     const summaryRows=await pool.query('select r.rating,count(*)::int as count from reviews r where '+filter+' group by r.rating order by r.rating',params);
     const counts={1:0,2:0,3:0,4:0,5:0};let total=0,weighted=0;
     for(const row of summaryRows.rows){const rating=Number(row.rating),count=Number(row.count);if(counts[rating]!==undefined){counts[rating]=count;total+=count;weighted+=rating*count;}}
@@ -2762,6 +2772,27 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     return rows.map(row=>({id:String(row.id),bookingId:String(row.booking_id),vehicleId:String(row.vehicle_id),phase:row.phase,actorUserId:String(row.actor_user_id),actorRole:row.actor_role,actorName:row.actor_name||null,conditionStatus:row.condition_status,damageNotes:row.damage_notes||'',odometer:row.odometer==null?null:Number(row.odometer),fuelBattery:row.fuel_battery==null?null:Number(row.fuel_battery),evidenceCount:Number(row.evidence_count||0),acknowledged:Boolean(row.acknowledged),capturedAt:iso(row.captured_at),latitude:row.latitude==null?null:Number(row.latitude),longitude:row.longitude==null?null:Number(row.longitude),metadata:row.metadata||{}}));
   }
 
+  async function setKycStatus(customerId, status) {
+    const allowed = new Set(['UNVERIFIED', 'PENDING', 'VERIFIED', 'REJECTED', 'BLACKLISTED']);
+    const next = String(status || '').toUpperCase();
+    if (!allowed.has(next)) {
+      const error = new Error('Invalid KYC status.');
+      error.code = 'INVALID_KYC_STATUS';
+      throw error;
+    }
+    if (!useDatabase) {
+      const customer = memory.customers.get(String(customerId));
+      if (!customer) return null;
+      customer.kycStatus = next;
+      return { customerId: String(customerId), status: next };
+    }
+    const { rows } = await pool.query(
+      'update public.customers set kyc_status=$2, updated_at=now() where id=$1 returning id, kyc_status',
+      [customerId, next]
+    );
+    return rows[0] ? { customerId: String(rows[0].id), status: rows[0].kyc_status } : null;
+  }
+
   async function getKycStatus(customerId) {
     if (!useDatabase) {
       const customer = memory.customers.get(String(customerId));
@@ -2917,10 +2948,10 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
       await client.query(
         `update public.customers
          set kyc_status=$2,
-             active_kyc_id=case when $2='VERIFIED' then $3 else case when active_kyc_id=$3 then null else active_kyc_id end end,
+             active_kyc_id=case when $4 then $3::uuid when active_kyc_id=$3::uuid then null else active_kyc_id end,
              updated_at=now()
          where id=$1`,
-        [current.rows[0].external_user_id,blacklistStatus,verificationId]
+        [current.rows[0].external_user_id,blacklistStatus,verificationId,blacklistStatus==='VERIFIED']
       );
       await client.query('commit');
       return {verification:mapKycVerification(rows[0]),duplicate:false};
@@ -2934,5 +2965,5 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     } finally { client.release(); }
   }
 
-  return {health,close,settleFleetSecurityDeposit,applyDepositRefundEvent,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports};
+  return {health,close,settleFleetSecurityDeposit,applyDepositRefundEvent,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,setKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports,listVendorCustomerReviewsForBooking,createReview,getReviewStatus,updateReview,listReviews,listReviewsReceived};
 }
