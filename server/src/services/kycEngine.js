@@ -8,9 +8,14 @@ const normalizeDocumentNumber = (value) =>
 const aadhaarDigits = (value) => String(value ?? '').replace(/\D/g, '');
 
 const normalizeCashfreePublicKey = (value) => {
-  const raw = String(value || '').trim().replace(/^["']|["']$/g, '');
+  let raw = String(value || '').trim().replace(/\\n/g, '\n').replace(/\r/g, '');
+  raw = raw.replace(/^["']+|["']+$/g, '').trim();
   if (!raw) return '';
-  return raw.includes('\\n') ? raw.replace(/\\n/g, '\n') : raw;
+  const labeled = raw.match(/-----BEGIN [A-Z0-9 ]+-----([\s\S]*?)-----END [A-Z0-9 ]+-----/);
+  const body = (labeled ? labeled[1] : raw).replace(/[^A-Za-z0-9+/=]/g, '');
+  if (body.length < 128) return '';
+  const lines = body.match(/.{1,64}/g) || [];
+  return `-----BEGIN PUBLIC KEY-----\n${lines.join('\n')}\n-----END PUBLIC KEY-----\n`;
 };
 
 const cashfreeRequestSignature = (clientId, publicKeyPem) => {
@@ -21,6 +26,8 @@ const cashfreeRequestSignature = (clientId, publicKeyPem) => {
     oaepHash: 'sha1',
   }, Buffer.from(stamped)).toString('base64');
 };
+
+const redactDigits = (value) => String(value ?? '').replace(/\d{4,}/g, (match) => `${match.length}digits`);
 
 const redactProviderValue = (value, depth = 0) => {
   if (value == null || depth > 4) return value ?? null;
@@ -255,8 +262,9 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
     if (this.publicKey && this.clientId) {
       try {
         headers['x-cf-signature'] = cashfreeRequestSignature(this.clientId, this.publicKey);
-      } catch {
-        throw Object.assign(new Error('Cashfree public key could not sign the verification request.'), { code: 'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
+      } catch (error) {
+        console.warn(JSON.stringify({level:'warn',event:'kyc_public_key_invalid',reason:error?.code || 'sign_failed',keyCharacters:this.publicKey.length}));
+        throw Object.assign(new Error('The Cashfree public key on the RideOn server is not valid. Paste the full public key into KYC_CASHFREE_PUBLIC_KEY and redeploy.'), { code: 'KYC_PROVIDER_CONFIGURATION_REQUIRED' });
       }
     }
     return headers;

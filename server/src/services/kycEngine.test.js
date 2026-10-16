@@ -280,7 +280,7 @@ test('Cashfree public key signs client id and timestamp with RSA-OAEP SHA-1', ()
   process.env.KYC_PROVIDER = 'cashfree';
   process.env.KYC_PROVIDER_CLIENT_ID = 'CF_TEST_CLIENT';
   process.env.KYC_PROVIDER_CLIENT_SECRET = 'test-secret';
-  process.env.KYC_CASHFREE_PUBLIC_KEY = pem.replace(/\n/g, '\\n');
+  process.env.KYC_CASHFREE_PUBLIC_KEY = `  "${pem.replace(/\s+/g, ' ')}"  `;
   try {
     const provider = createProviderFromEnv();
     const signature = provider.headers()['x-cf-signature'];

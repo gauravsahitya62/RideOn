@@ -514,7 +514,7 @@ app.post('/api/v1/kyc/aadhaar/number/start', supabaseRequireAuth, requireCustome
     return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED',message:
       error?.code==='KYC_BLACKLISTED'?'Identity verification cannot be completed for this account.':
       error?.code==='INVALID_AADHAAR_NUMBER'?'Enter a valid 12-digit Aadhaar number.':
-      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?(error?.message || 'Identity verification is not configured on the RideOn server.'):
       error?.message || 'Could not send Aadhaar OTP. Please retry.',
       details:{buildCommit,providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null,providerPath:error?.providerPath||null,providerBody:error?.providerBody||null}}});
   }
@@ -533,7 +533,7 @@ app.post('/api/v1/kyc/aadhaar/number/verify', supabaseRequireAuth, requireCustom
     return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_NUMBER_VERIFY_FAILED',message:
       error?.code==='KYC_NOT_FOUND'?'Aadhaar verification was not found.':
       error?.code==='INVALID_AADHAAR_OTP'?'Enter the OTP sent to your Aadhaar-linked mobile number.':
-      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?(error?.message || 'Identity verification is not configured on the RideOn server.'):
       error?.message || 'Aadhaar verification could not be completed. Please retry.'}});
   }
 });
@@ -558,7 +558,7 @@ app.post('/api/v1/kyc/aadhaar/start', supabaseRequireAuth, requireCustomer, kycR
     console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_start_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_AADHAAR_START_FAILED'}));
     const status=error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
     return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_START_FAILED',message:
-      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?(error?.message || 'Identity verification is not configured on the RideOn server.'):
       error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
       error?.message || 'Could not start Aadhaar verification. Please retry.'}});
   }
@@ -579,7 +579,7 @@ app.post('/api/v1/kyc/aadhaar/sync', supabaseRequireAuth, requireCustomer, kycRa
     const status=error?.code==='KYC_NOT_FOUND'?404:error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
     return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_SYNC_FAILED',message:
       error?.code==='KYC_NOT_FOUND'?'Aadhaar verification was not found.':
-      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?(error?.message || 'Identity verification is not configured on the RideOn server.'):
       error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
       error?.message || 'Could not update Aadhaar verification status. Please retry.',
       details:{buildCommit,providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null,providerPath:error?.providerPath||null,providerBody:error?.providerBody||null}}});
@@ -631,7 +631,7 @@ app.post('/api/v1/kyc/verify', supabaseRequireAuth, requireCustomer, kycRateLimi
     console.error(JSON.stringify({level:'warn',event:'kyc_verify_failed',requestId:req.requestId,customerId:req.user.id,code:error?.code||'KYC_VERIFY_FAILED'}));
     return res.status(status).json({error:{code:error?.code||'KYC_VERIFY_FAILED',message:
       error?.code==='KYC_BLACKLISTED'?'Identity verification cannot be completed for this account.':
-      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
+      error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?(error?.message || 'Identity verification is not configured on the RideOn server.'):
       error?.code==='KYC_DOB_REQUIRED'?'Date of birth is required for Driving Licence verification.':
       error?.code==='KYC_DOCUMENT_TYPE_UNSUPPORTED'?'This identity document type is not supported by the configured provider.':
       error?.code==='KYC_PROVIDER_TIMEOUT'?'Identity verification timed out. Please retry.':
