@@ -9,6 +9,23 @@ const aadhaarDigits = (value) => String(value ?? '').replace(/\D/g, '');
 
 const redactDigits = (value) => String(value ?? '').replace(/\d{4,}/g, (match) => `${match.length}digits`);
 
+const redactProviderValue = (value, depth = 0) => {
+  if (value == null || depth > 4) return value ?? null;
+  if (typeof value === 'string') return redactDigits(value).slice(0, 500);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.slice(0, 20).map((item) => redactProviderValue(item, depth + 1));
+  if (typeof value === 'object') {
+    const redacted = {};
+    for (const [key, item] of Object.entries(value).slice(0, 40)) {
+      redacted[key] = /secret|token|authorization|password|aadhaar|otp/i.test(key)
+        ? '[redacted]'
+        : redactProviderValue(item, depth + 1);
+    }
+    return redacted;
+  }
+  return null;
+};
+
 export function aadhaarInputShape(value) {
   const present = value !== undefined && value !== null && value !== '';
   const raw = value == null ? '' : String(value);
@@ -289,12 +306,19 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
         throw Object.assign(new Error('Cashfree Secure ID returned a non-JSON response.'),{code:'KYC_PROVIDER_INVALID_RESPONSE'});
       }
       if(!response.ok) {
+        const providerBody=redactProviderValue(payload);
         const providerCode=payload?.code || payload?.type || payload?.error?.code || null;
-        const providerMessage=redactDigits(payload?.message || payload?.error?.message || payload?.error || '').slice(0,300);
+        const providerMessage=redactDigits(payload?.message || payload?.error?.message || (typeof payload?.error === 'string' ? payload.error : '') || '').slice(0,300);
         let pathName=url;
         try { pathName=new URL(url).pathname; } catch {}
-        console.warn(JSON.stringify({level:'warn',event:'kyc_provider_rejected',method,path:pathName,status:response.status,providerCode,providerMessage}));
-        throw Object.assign(new Error('Cashfree Secure ID rejected the verification request.'),{code:'KYC_PROVIDER_REQUEST_FAILED',status:response.status,providerCode,providerMessage});
+        console.warn(JSON.stringify({level:'warn',event:'kyc_provider_rejected',method,path:pathName,status:response.status,providerCode,providerMessage,providerBody}));
+        const exact=[response.status, providerCode, providerMessage].filter(Boolean).join(' ');
+        const message=providerCode==='ip_validation_failed'
+          ? `Cashfree blocked the RideOn API server because its IP is not whitelisted. ${providerMessage}`
+          : exact
+            ? `Cashfree Secure ID rejected the verification request: ${exact}`
+            : 'Cashfree Secure ID rejected the verification request.';
+        throw Object.assign(new Error(message),{code:'KYC_PROVIDER_REQUEST_FAILED',status:response.status,providerCode,providerMessage,providerPath:pathName,providerBody});
       }
       return payload;
     } catch(error) {

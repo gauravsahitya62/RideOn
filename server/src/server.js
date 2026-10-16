@@ -509,14 +509,14 @@ app.post('/api/v1/kyc/aadhaar/number/start', supabaseRequireAuth, requireCustome
     const result=await kycEngine.startAadhaarNumberVerification({customerId:req.user.id,aadhaarNumber:String(incoming).replace(/\D/g,'')});
     return res.status(201).json({success:true,verificationId:result.verificationId,referenceId:result.referenceId,status:result.status,message:result.message,kyc:publicKycVerification(result.verification)});
   } catch(error) {
-    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_start_failed',requestId:req.requestId,customerId:req.user.id,buildCommit,code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED',providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null,message:error?.message||null}));
+    console.error(JSON.stringify({level:'warn',event:'kyc_aadhaar_number_start_failed',requestId:req.requestId,customerId:req.user.id,buildCommit,code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED',providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null,providerPath:error?.providerPath||null,providerBody:error?.providerBody||null,message:error?.message||null}));
     const status=error?.code==='INVALID_AADHAAR_NUMBER'?400:error?.code==='KYC_BLACKLISTED'?403:error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?503:error?.code==='KYC_PROVIDER_REQUEST_FAILED'?502:error?.code==='KYC_PROVIDER_TIMEOUT'?504:500;
     return res.status(status).json({error:{code:error?.code||'KYC_AADHAAR_NUMBER_START_FAILED',message:
       error?.code==='KYC_BLACKLISTED'?'Identity verification cannot be completed for this account.':
       error?.code==='INVALID_AADHAAR_NUMBER'?'Enter a valid 12-digit Aadhaar number.':
       error?.code==='KYC_PROVIDER_CONFIGURATION_REQUIRED'?'Identity verification is not configured on the RideOn server.':
       error?.message || 'Could not send Aadhaar OTP. Please retry.',
-      details:{buildCommit,providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null}}});
+      details:{buildCommit,providerStatus:error?.status||null,providerCode:error?.providerCode||null,providerMessage:error?.providerMessage||null,providerPath:error?.providerPath||null,providerBody:error?.providerBody||null}}});
   }
 });
 

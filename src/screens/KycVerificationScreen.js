@@ -30,6 +30,13 @@ const extractVerificationId = (url) => {
   return match ? decodeURIComponent(match[1]) : null;
 };
 
+const cashfreeErrorText = (error, fallback) => {
+  const details = error?.details || {};
+  const exact = [details.providerStatus, details.providerCode, details.providerMessage].filter((part) => part != null && part !== '').join(' — ');
+  if (exact) return exact;
+  return error?.message || fallback;
+};
+
 export default function KycVerificationScreen({ onBack, onVerified }) {
   const [method, setMethod] = useState('DRIVING_LICENSE');
   const [documentNumber, setDocumentNumber] = useState('');
@@ -162,7 +169,8 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
       setAadhaarVerificationId(result.verificationId);
       await Linking.openURL(result.url);
     } catch (e) {
-      setError(e?.message || 'Could not start Aadhaar DigiLocker verification. Please try again.');
+      console.warn('[RideOnKyc][CASHFREE_ERROR]', JSON.stringify({flow:'digilocker',code:e?.code||null,status:e?.status||null,message:e?.message||null,details:e?.details||null}));
+      setError(cashfreeErrorText(e, 'Could not start Aadhaar DigiLocker verification. Please try again.'));
     } finally {
       setBusy(false);
     }
@@ -186,8 +194,8 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
       setAadhaarOtp('');
       Alert.alert('OTP sent', 'Cashfree sent an OTP to the mobile number linked with your Aadhaar.');
     } catch(e) {
-      console.warn('[RideOnKyc][AADHAAR_START_FAILED]', JSON.stringify({stage:'api',code:e?.code||null,status:e?.status||null,message:e?.message||null,details:e?.details||null}));
-      setError(e?.message || 'Could not send Aadhaar OTP. Please try again.');
+      console.warn('[RideOnKyc][CASHFREE_ERROR]', JSON.stringify({flow:'aadhaar-otp',code:e?.code||null,status:e?.status||null,message:e?.message||null,details:e?.details||null}));
+      setError(cashfreeErrorText(e, 'Could not send Aadhaar OTP. Please try again.'));
     } finally {
       setBusy(false);
     }
