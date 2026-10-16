@@ -35,9 +35,12 @@ const extractVerificationId = (url) => {
 
 const cashfreeErrorText = (error, fallback) => {
   const details = error?.details || {};
+  const serverMessage = String(error?.message || '').replace(/\s*\[[0-9]{3}\s+[^\]]+\]\s*$/, '').trim();
+  const generic = /^Cashfree Secure ID rejected the verification request\.?$/i.test(serverMessage);
+  if (serverMessage && !generic) return serverMessage;
   const exact = [details.providerStatus, details.providerCode, details.providerMessage].filter((part) => part != null && part !== '').join(' — ');
   if (exact) return exact;
-  return error?.message || fallback;
+  return serverMessage || fallback;
 };
 
 const isDigilockerReturn = (url) => {

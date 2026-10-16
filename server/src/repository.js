@@ -1626,6 +1626,18 @@ export function createRepository({ databaseUrl, fleet }) {
     } : null;
   }
 
+  async function setPaymentProviderReference(paymentId, providerReference) {
+    const reference=String(providerReference||'').trim();
+    if(!reference) return null;
+    if(!useDatabase){
+      const payment=[...(memory.payments?.values()||[])].find(item=>item.id===String(paymentId));
+      if(payment && !payment.providerReference) payment.providerReference=reference;
+      return payment || null;
+    }
+    const {rows}=await pool.query('update payments set provider_reference=coalesce(provider_reference,$2),updated_at=now() where id=$1 returning id,provider_reference',[paymentId,reference]);
+    return rows[0] ? {id:String(rows[0].id),providerReference:rows[0].provider_reference} : null;
+  }
+
   async function createOrGetPaymentOrder({ bookingId, customerId, provider, amountPaise, currency='INR', idempotencyKey, providerOrder }) {
     const kyc = await getKycStatus(customerId);
     if (!kyc || kyc.status !== 'VERIFIED') throw Object.assign(new Error('KYC verification is required before payment.'), { code:'KYC_REQUIRED' });
@@ -1636,7 +1648,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if (!memory.payments) memory.payments = new Map();
       const existing=memory.payments.get(String(bookingId));
       if (existing && ['unpaid','pending'].includes(existing.status) && existing.amountPaise===Number(amountPaise)) return { payment:existing, created:false };
-      const payment={id:crypto.randomUUID(),bookingId:String(bookingId),customerId:String(customerId),provider,providerOrderId:providerOrder.id,amountPaise:Number(amountPaise),currency,status:'pending',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+      const payment={id:crypto.randomUUID(),bookingId:String(bookingId),customerId:String(customerId),provider,providerOrderId:providerOrder.id,providerReference:providerOrder.reference||undefined,amountPaise:Number(amountPaise),currency,status:'pending',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
       memory.payments.set(String(bookingId),payment);
       const booking=memory.bookings.get(String(bookingId));
       if(booking && booking.paymentStatus==='unpaid') booking.paymentStatus='pending';
@@ -1654,17 +1666,21 @@ export function createRepository({ databaseUrl, fleet }) {
       const existing=await client.query("select id,booking_id,provider,provider_order_id,provider_payment_id,provider_reference,amount_paise,currency,status,idempotency_key,created_at,updated_at from payments where booking_id=$1 and status in ('unpaid','pending') order by created_at desc limit 1 for update",[bookingId]);
       if(existing.rows[0]){
         const row=existing.rows[0];
+        if(!row.provider_reference && providerOrder?.reference){
+          await client.query('update payments set provider_reference=$2,updated_at=now() where id=$1',[row.id,String(providerOrder.reference)]);
+          row.provider_reference=String(providerOrder.reference);
+        }
         await client.query('commit');
         return {created:false,payment:{id:String(row.id),bookingId:String(row.booking_id),provider:row.provider,providerOrderId:row.provider_order_id,providerPaymentId:row.provider_payment_id,providerReference:row.provider_reference||undefined,amountPaise:Number(row.amount_paise),currency:row.currency,status:row.status,idempotencyKey:row.idempotency_key||undefined,createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)}};
       }
       const inserted=await client.query(
-        "insert into payments(booking_id,provider,provider_order_id,amount_paise,currency,status,idempotency_key) values($1,$2,$3,$4,$5,'pending',$6) returning id,booking_id,provider,provider_order_id,amount_paise,currency,status,idempotency_key,created_at,updated_at",
-        [bookingId,provider,providerOrder.id,Number(amountPaise),currency,idempotencyKey||null]
+        "insert into payments(booking_id,provider,provider_order_id,provider_reference,amount_paise,currency,status,idempotency_key) values($1,$2,$3,$4,$5,$6,'pending',$7) returning id,booking_id,provider,provider_order_id,provider_reference,amount_paise,currency,status,idempotency_key,created_at,updated_at",
+        [bookingId,provider,providerOrder.id,providerOrder.reference||null,Number(amountPaise),currency,idempotencyKey||null]
       );
       await client.query("update bookings set payment_status='pending',payment_provider_reference=$2,updated_at=now() where id=$1 and payment_status='unpaid'",[bookingId,providerOrder.id]);
       await client.query('commit');
       const row=inserted.rows[0];
-      return {created:true,payment:{id:String(row.id),bookingId:String(row.booking_id),provider:row.provider,providerOrderId:row.provider_order_id,amountPaise:Number(row.amount_paise),currency:row.currency,status:row.status,idempotencyKey:row.idempotency_key||undefined,createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)}};
+      return {created:true,payment:{id:String(row.id),bookingId:String(row.booking_id),provider:row.provider,providerOrderId:row.provider_order_id,providerReference:row.provider_reference||undefined,amountPaise:Number(row.amount_paise),currency:row.currency,status:row.status,idempotencyKey:row.idempotency_key||undefined,createdAt:iso(row.created_at),updatedAt:iso(row.updated_at)}};
     }catch(e){try{await client.query('rollback')}catch{};throw e;}finally{client.release();}
   }
 
@@ -1694,7 +1710,7 @@ export function createRepository({ databaseUrl, fleet }) {
       if(!first.rows[0])throw Object.assign(new Error('Fleet booking has no items.'),{code:'FLEET_ORDER_INVALID'});
       const existing=await client.query(`select id,booking_id,provider,provider_order_id,provider_payment_id,provider_reference,amount_paise,currency,status,idempotency_key,created_at,updated_at from payments where booking_id=$1 and status in ('unpaid','pending') order by created_at desc limit 1 for update`,[first.rows[0].booking_id]);
       if(existing.rows[0]&&Number(existing.rows[0].amount_paise)===normalizedAmount){await client.query('update fleet_orders set payment_status=\'pending\',updated_at=now() where id=$1',[orderId]);await client.query('update bookings set payment_status=\'pending\',payment_provider_reference=$2,updated_at=now() where fleet_order_id=$1 and payment_status=\'unpaid\'',[orderId,String(providerOrder.id)]);await client.query('commit');return {payment:mapPaymentRow(existing.rows[0]),created:false};}
-      const inserted=await client.query(`insert into payments(booking_id,provider,provider_order_id,amount_paise,currency,status,idempotency_key) values($1,$2,$3,$4,'INR','pending',$5) returning id,booking_id,provider,provider_order_id,amount_paise,currency,status,idempotency_key,created_at,updated_at`,[first.rows[0].booking_id,provider,String(providerOrder.id),normalizedAmount,idempotencyKey||null]);
+      const inserted=await client.query(`insert into payments(booking_id,provider,provider_order_id,provider_reference,amount_paise,currency,status,idempotency_key) values($1,$2,$3,$4,$5,'INR','pending',$6) returning id,booking_id,provider,provider_order_id,provider_reference,amount_paise,currency,status,idempotency_key,created_at,updated_at`,[first.rows[0].booking_id,provider,String(providerOrder.id),providerOrder.reference||null,normalizedAmount,idempotencyKey||null]);
       await client.query(`update fleet_orders set payment_status='pending',updated_at=now() where id=$1`,[orderId]);
       await client.query(`update bookings set payment_status='pending',payment_provider_reference=$2,updated_at=now() where fleet_order_id=$1 and payment_status='unpaid'`,[orderId,String(providerOrder.id)]);
       await client.query('commit');return {payment:mapPaymentRow(inserted.rows[0]),created:true};
@@ -2965,5 +2981,5 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     } finally { client.release(); }
   }
 
-  return {health,close,settleFleetSecurityDeposit,applyDepositRefundEvent,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,setKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports,listVendorCustomerReviewsForBooking,createReview,getReviewStatus,updateReview,listReviews,listReviewsReceived};
+  return {health,close,settleFleetSecurityDeposit,applyDepositRefundEvent,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,setPaymentProviderReference,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,setKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports,listVendorCustomerReviewsForBooking,createReview,getReviewStatus,updateReview,listReviews,listReviewsReceived};
 }

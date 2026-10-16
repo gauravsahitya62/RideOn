@@ -2041,7 +2041,7 @@ app.post('/api/v1/payments/create-order', supabaseRequireAuth, requireCustomer, 
         amountPaise,
         currency:'INR',
         idempotencyKey:parsed.data.idempotencyKey,
-        providerOrder:{id:paymentRequest.providerOrderId,amountPaise:paymentRequest.amountPaise,currency:'INR'},
+        providerOrder:{id:paymentRequest.providerOrderId,reference:paymentRequest.paymentSessionId,amountPaise:paymentRequest.amountPaise,currency:'INR'},
       });
       const checkoutUrl=paymentProvider==='cashfree'?(()=>{const checkoutToken=createCheckoutToken({paymentId:result.payment.id,customerId:req.user.id});const url=new URL('/api/v1/payments/checkout',`${req.protocol}://${req.get('host')}`);url.searchParams.set('token',checkoutToken);return url.toString();})():null;
       return res.status(201).json({payment:{
@@ -2076,13 +2076,19 @@ app.get('/api/v1/payments/checkout', async (req,res) => {
   if(payment.status==='paid')return res.type('html').send(checkoutPage({status:'paid',title:'Payment already confirmed',message:'RideOn has already confirmed this payment.',returnUrl:'rideon://payment-return'}));
   if(payment.provider!=='cashfree')return res.status(409).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'This payment is not configured for the active checkout provider.',returnUrl:'rideon://payment-return'}));
   try{
-    const config=payments.getCheckoutConfig({providerOrderId:payment.providerOrderId,amountPaise:payment.amountPaise,paymentSessionId:payment.providerReference});
+    let sessionId=payment.providerReference;
+    if(!sessionId && payment.providerOrderId){
+      const refreshed=await payments.createCustomerPayment({orderId:payment.providerOrderId,amountPaise:payment.amountPaise,customerId:token.customerId});
+      sessionId=refreshed.paymentSessionId;
+      await repository.setPaymentProviderReference(payment.id,sessionId);
+    }
+    const config=payments.getCheckoutConfig({providerOrderId:payment.providerOrderId,amountPaise:payment.amountPaise,paymentSessionId:sessionId});
     const session=JSON.stringify(config.paymentSessionId).replace(/</g,'\\u003c');
     const environment=JSON.stringify(config.environment==='production'?'production':'sandbox');
     res.type('html').send('<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1"><script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script><script>const cashfree=Cashfree({mode:'+environment+'});cashfree.checkout({paymentSessionId:'+session+',redirectTarget:"_self"});</script></body></html>');
   }catch(error){
-    console.error(JSON.stringify({level:'error',event:'payment_checkout_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_FAILED'}));
-    res.status(503).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'RideOn could not start the provider checkout. Return to the app and retry.',returnUrl:'rideon://payment-return'}));
+    console.error(JSON.stringify({level:'error',event:'payment_checkout_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_FAILED',message:error?.message||null}));
+    res.status(503).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:error?.message || 'RideOn could not start the provider checkout. Return to the app and retry.',returnUrl:'rideon://payment-return'}));
   }
 });
 
