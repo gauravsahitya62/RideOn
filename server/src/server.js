@@ -306,6 +306,12 @@ function verifyCheckoutToken(token) {
   if(a.length!==b.length||!crypto.timingSafeEqual(a,b))return null;
   try{const data=JSON.parse(Buffer.from(payload,'base64url').toString('utf8'));if(!data?.paymentId||!data?.customerId||Number(data.exp)<=Math.floor(Date.now()/1000))return null;return data;}catch{return null;}
 }
+function cashfreeCheckoutForm({paymentSessionId,environment,returnUrl}) {
+  const safe=s=>String(s||'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const action=environment==='production'?'https://api.cashfree.com/pg/view/sessions/checkout':'https://sandbox.cashfree.com/pg/view/sessions/checkout';
+  const browserMeta=Buffer.from(JSON.stringify({userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'})).toString('base64');
+  return '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1;font-family:sans-serif;color:#6b7280"><p style="padding:28px">Opening Cashfree checkout…</p><form id="cf" method="post" action="'+safe(action)+'"><input type="hidden" name="payment_session_id" value="'+safe(paymentSessionId)+'"><input type="hidden" name="return_url" value="'+safe(returnUrl)+'"><input type="hidden" name="x_request_id" value="x_request_id_form_atom"><input type="hidden" name="form_id" value="form_id_atom"><input type="hidden" name="browser_meta" value="'+safe(browserMeta)+'"><input type="hidden" name="checkForPayFast" value="false"><button type="submit" style="margin:0 28px;background:#e56a3d;color:#fff;border:0;border-radius:14px;padding:14px 22px;font-weight:800">Continue to payment</button></form><script>document.getElementById("cf").submit()</script></body></html>';
+}
 function checkoutPage({status,title,message,returnUrl}) {
   const safe=s=>String(s||'').replace(/[&<>\"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[ch]));
   const icon=status==='paid'?'✓':status==='failed'?'!':'…';
@@ -2076,13 +2082,15 @@ app.get('/api/v1/payments/checkout', async (req,res) => {
   if(payment.status==='paid')return res.type('html').send(checkoutPage({status:'paid',title:'Payment already confirmed',message:'RideOn has already confirmed this payment.',returnUrl:'rideon://payment-return'}));
   if(String(payment.provider||'').toLowerCase()!=='cashfree')return res.status(409).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'This payment is not configured for the active checkout provider.',returnUrl:'rideon://payment-return'}));
   try{
-    const refreshed=await payments.createCustomerPayment({orderId:payment.providerOrderId,amountPaise:payment.amountPaise,customerId:token.customerId,returnUrl:cashfreeReturnUrl||undefined});
+    const publicBaseUrl=`${req.protocol}://${req.get('host')}`;
+    const returnUrl=cashfreeReturnUrl || `${publicBaseUrl}/api/v1/payments/checkout/callback?order_id={order_id}`;
+    const notifyUrl=cashfreeNotifyUrl || `${publicBaseUrl}/api/v1/payments/webhook`;
+    const refreshed=await payments.createCustomerPayment({orderId:payment.providerOrderId,amountPaise:payment.amountPaise,customerId:token.customerId,returnUrl,notifyUrl});
     const sessionId=refreshed.paymentSessionId;
     await repository.updatePaymentCheckout(payment.id,{providerOrderId:refreshed.providerOrderId,providerReference:sessionId});
     const config=payments.getCheckoutConfig({providerOrderId:refreshed.providerOrderId,amountPaise:payment.amountPaise,paymentSessionId:sessionId});
-    const session=JSON.stringify(config.paymentSessionId).replace(/</g,'\\u003c');
-    const environment=JSON.stringify(config.environment==='production'?'production':'sandbox');
-    res.type('html').send('<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1;font-family:sans-serif"><p id="status" style="padding:28px;color:#6b7280">Opening Cashfree checkout…</p><script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script><script>try{const cashfree=Cashfree({mode:'+environment+'});const started=cashfree.checkout({paymentSessionId:'+session+',redirectTarget:"_self"});if(started&&started.catch)started.catch(function(err){document.getElementById("status").textContent=err&&err.message?err.message:"Cashfree could not open checkout.";});}catch(err){document.getElementById("status").textContent=err&&err.message?err.message:"Cashfree could not open checkout.";}</script></body></html>');
+    res.set('Content-Security-Policy',"default-src 'none'; base-uri 'none'; form-action https://sandbox.cashfree.com https://api.cashfree.com; script-src 'unsafe-inline'; style-src 'unsafe-inline'");
+    res.type('html').send(cashfreeCheckoutForm({paymentSessionId:config.paymentSessionId,environment:config.environment,returnUrl}));
   }catch(error){
     console.error(JSON.stringify({level:'error',event:'payment_checkout_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_FAILED',message:error?.message||null}));
     res.status(503).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:error?.message || 'RideOn could not start the provider checkout. Return to the app and retry.',returnUrl:'rideon://payment-return'}));
