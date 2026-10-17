@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   AppState,
   Linking,
   Modal,
@@ -17,13 +16,13 @@ import { WebView } from 'react-native-webview';
 import { rideOnApi } from '../services/api';
 
 const C = {
-  bg:'#F6F4F0',
+  bg:'#F7F5F1',
   white:'#FFFFFF',
-  ink:'#17202D',
-  muted:'#77818F',
-  orange:'#E85D35',
-  green:'#258565',
-  line:'#E7E3DC',
+  ink:'#111827',
+  muted:'#6B7280',
+  orange:'#E56A3D',
+  green:'#218765',
+  line:'#E7E2DA',
   paleGreen:'#EEF8F3',
   danger:'#B23B3B',
 };
@@ -48,7 +47,7 @@ const isDigilockerReturn = (url) => {
   return value.includes('/kyc/digilocker/callback') || value.startsWith('rideon://') || value.startsWith('exp://');
 };
 
-export default function KycVerificationScreen({ onBack, onVerified }) {
+export default function KycVerificationScreen({ onBack, onVerified, onNotice }) {
   const [method, setMethod] = useState('DRIVING_LICENSE');
   const [documentNumber, setDocumentNumber] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
@@ -99,7 +98,8 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
       if (next?.documentStatus === 'APPROVED') {
         pendingAadhaarId.current = null;
         setDigilockerNote('');
-        Alert.alert('Aadhaar verified', 'Your Aadhaar identity has been verified through Cashfree Secure ID. You can now book RideOn vehicles.');
+        onNotice?.('Aadhaar verified. You can book RideOn vehicles.');
+        onVerified?.();
       } else if (next?.documentStatus === 'REJECTED') {
         pendingAadhaarId.current = null;
         setDigilockerNote('');
@@ -166,9 +166,10 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
       });
       const next = applyKyc(result?.kyc);
       if (next?.documentStatus === 'APPROVED') {
-        Alert.alert('Identity verified', 'Your Driving Licence has been verified by Cashfree Secure ID. You can now book RideOn vehicles.');
+        onNotice?.('Driving licence verified. You can book RideOn vehicles.');
+        onVerified?.();
       } else {
-        Alert.alert('Verification submitted', 'RideOn is waiting for identity verification confirmation. Booking remains locked until verification is approved.');
+        onNotice?.('Verification submitted. Booking stays locked until it is approved.');
       }
     } catch (e) {
       setError(
@@ -221,7 +222,7 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
       setAadhaarReferenceId(result.referenceId);
       setAadhaarOtpSent(true);
       setAadhaarOtp('');
-      Alert.alert('OTP sent', 'Cashfree sent an OTP to the mobile number linked with your Aadhaar.');
+      onNotice?.('OTP sent to the mobile number linked with this Aadhaar.');
     } catch(e) {
       console.warn('[RideOnKyc][CASHFREE_ERROR]', JSON.stringify({flow:'aadhaar-otp',code:e?.code||null,status:e?.status||null,message:e?.message||null,details:e?.details||null}));
       setError(cashfreeErrorText(e, 'Could not send Aadhaar OTP. Please try again.'));
@@ -245,7 +246,8 @@ export default function KycVerificationScreen({ onBack, onVerified }) {
       const result=await rideOnApi.verifyAadhaarNumberKyc(aadhaarVerificationId,aadhaarOtp.trim());
       const next=applyKyc(result?.kyc);
       if(next?.documentStatus==='APPROVED') {
-        Alert.alert('Aadhaar verified','Your Aadhaar has been verified. You can now book RideOn vehicles.');
+        onNotice?.('Aadhaar verified. You can book RideOn vehicles.');
+        onVerified?.();
       } else if(next?.documentStatus==='REJECTED') {
         setError('Aadhaar verification was not approved. Please start again.');
       } else {
@@ -493,8 +495,8 @@ const styles = StyleSheet.create({
   browserTitle:{fontSize:16,fontWeight:'900',color:C.ink},
   browserClose:{fontSize:16,fontWeight:'800',color:C.orange},
   page:{padding:18,paddingBottom:48},
-  header:{height:58,flexDirection:'row',alignItems:'center',justifyContent:'space-between',borderBottomWidth:1,borderBottomColor:C.line,marginBottom:22},
-  back:{fontSize:36,color:C.ink,lineHeight:38},
+  header:{height:64,flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginBottom:8},
+  back:{width:40,height:40,borderRadius:20,backgroundColor:C.white,textAlign:'center',textAlignVertical:'center',fontSize:28,color:C.ink,lineHeight:40,overflow:'hidden'},
   headerTitle:{fontSize:16,fontWeight:'900',color:C.ink},
   kicker:{fontSize:10,fontWeight:'900',letterSpacing:1.6,color:C.orange},
   title:{fontSize:30,fontWeight:'900',letterSpacing:-1,color:C.ink,marginTop:6},

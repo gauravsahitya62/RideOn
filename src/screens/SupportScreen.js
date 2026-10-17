@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { rideOnApi } from '../services/api';
 
-const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',line:'#E8EAF0',white:'#FFFFFF',navy:'#202B3B',green:'#258565',red:'#C94B4B'};
+const C={ink:'#111827',muted:'#6B7280',orange:'#E56A3D',bg:'#F7F5F1',line:'#E7E2DA',white:'#FFFFFF',navy:'#151D2A',green:'#218765',red:'#C94B4B'};
 const categories=['Payment','Refund','Security Deposit','Booking','Vehicle','Delivery','Pickup/Return','Damage','Cancellation','Account','Technical Issue','Other'];
 const priorities=['low','normal','high','urgent'];
 

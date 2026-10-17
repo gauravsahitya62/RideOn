@@ -3,7 +3,7 @@ import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { authService, normalizeAuthError } from './authService';
 
-const C={ink:'#17202D',muted:'#78818E',orange:'#E85D35',bg:'#F6F7F9',line:'#E8EAF0',white:'#FFFFFF'};
+const C={ink:'#111827',muted:'#6B7280',orange:'#E56A3D',bg:'#F7F5F1',line:'#E7E2DA',white:'#FFFFFF'};
 
 const Field=React.forwardRef(({label,value,onChangeText,placeholder,keyboardType,onFocus,returnKeyType,onSubmitEditing},ref)=>
   <View style={s.fieldWrap}>
@@ -103,56 +103,59 @@ export default function AuthScreen({onAuthenticated}) {
       keyboardDismissMode="interactive"
       automaticallyAdjustKeyboardInsets
       showsVerticalScrollIndicator={false}
-      scrollEventThrottle={16}
-      onContentSizeChange={()=>{ if(otpSent && otp) return; }}
     >
-      <Text style={s.brand}>ride<Text style={{color:C.orange}}>.on</Text></Text>
-      <Text style={s.kicker}>SECURE ACCESS</Text>
-      <Text style={s.title}>{otpSent?'Verify your email':'Welcome to RideOn'}</Text>
-      <Text style={s.sub}>
-        {otpSent?('Enter the 6-digit code sent to '+email+'.'):'Sign in or create your RideOn account with email verification.'}
-      </Text>
+      <View style={s.hero}>
+        <View style={s.mark}><Text style={s.markText}>R</Text></View>
+        <Text style={s.brand}>ride<Text style={{color:C.orange}}>on</Text></Text>
+        <Text style={s.sub}>Bikes and scooters, delivered to you.</Text>
+      </View>
 
-      {!otpSent ? <>
-        <View style={s.tabs}>
-          <TouchableOpacity onPress={()=>setMode('login')} style={[s.tab,mode==='login'&&s.tabActive]}>
-            <Text style={[s.tabText,mode==='login'&&s.tabTextActive]}>Sign in</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={()=>setMode('register')} style={[s.tab,mode==='register'&&s.tabActive]}>
-            <Text style={[s.tabText,mode==='register'&&s.tabTextActive]}>Register</Text>
-          </TouchableOpacity>
-        </View>
+      <View style={s.card}>
+        <Text style={s.title}>{otpSent?'Check your email':mode==='register'?'Create your account':'Welcome back'}</Text>
+        <Text style={s.cardSub}>
+          {otpSent?('Enter the 6-digit code sent to '+email+'.'):'Sign in or create an account with your email.'}
+        </Text>
 
-        {mode==='register'&&<>
-          <Text style={s.sectionTitle}>ACCOUNT TYPE</Text>
-          <View style={s.tabs}>
-            <TouchableOpacity onPress={()=>setAccountType('customer')} style={[s.tab,s.typeTab,accountType==='customer'&&s.tabActive]}>
-              <Text style={[s.tabText,accountType==='customer'&&s.tabTextActive]}>Customer</Text>
+        {!otpSent ? <>
+          <View style={s.segment}>
+            <TouchableOpacity onPress={()=>{setMode('login');setError('');}} style={[s.segmentItem,mode==='login'&&s.segmentItemActive]}>
+              <Text style={[s.segmentText,mode==='login'&&s.segmentTextActive]}>Sign in</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={()=>setAccountType('vendor')} style={[s.tab,s.typeTab,accountType==='vendor'&&s.tabActive]}>
-              <Text style={[s.tabText,accountType==='vendor'&&s.tabTextActive]}>Vendor</Text>
+            <TouchableOpacity onPress={()=>{setMode('register');setError('');}} style={[s.segmentItem,mode==='register'&&s.segmentItemActive]}>
+              <Text style={[s.segmentText,mode==='register'&&s.segmentTextActive]}>Sign up</Text>
             </TouchableOpacity>
           </View>
-          <Field ref={nameRef} label="FULL NAME" value={name} onChangeText={setName} placeholder="Your full name" onFocus={()=>focusField(nameRef)} returnKeyType="next" onSubmitEditing={()=>focusField(phoneRef)}/>
-          <Field ref={phoneRef} label="PHONE NUMBER" value={phone} onChangeText={setPhone} placeholder="+91 9876543210" keyboardType="phone-pad" onFocus={()=>focusField(phoneRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>
+
+          {mode==='register'&&<>
+            <Text style={s.sectionTitle}>I am a</Text>
+            <View style={s.segment}>
+              <TouchableOpacity onPress={()=>setAccountType('customer')} style={[s.segmentItem,accountType==='customer'&&s.segmentItemActive]}>
+                <Text style={[s.segmentText,accountType==='customer'&&s.segmentTextActive]}>Customer</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={()=>setAccountType('vendor')} style={[s.segmentItem,accountType==='vendor'&&s.segmentItemActive]}>
+                <Text style={[s.segmentText,accountType==='vendor'&&s.segmentTextActive]}>Vendor</Text>
+              </TouchableOpacity>
+            </View>
+            <Field ref={nameRef} label="Full name" value={name} onChangeText={setName} placeholder="Your full name" onFocus={()=>focusField(nameRef)} returnKeyType="next" onSubmitEditing={()=>focusField(phoneRef)}/>
+            <Field ref={phoneRef} label="Phone number" value={phone} onChangeText={setPhone} placeholder="98765 43210" keyboardType="phone-pad" onFocus={()=>focusField(phoneRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>
+          </>}
+
+          <Field ref={emailRef} label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" onFocus={()=>focusField(emailRef)} returnKeyType="done"/>
+          <TouchableOpacity disabled={busy} onPress={sendOtp} style={[s.button,busy&&s.disabled]}>
+            <Text style={s.buttonText}>{busy?'Sending code…':mode==='register'?'Create account':'Send sign-in code'}</Text>
+          </TouchableOpacity>
+        </> : <>
+          <Field ref={otpRef} label="Verification code" value={otp} onChangeText={v=>setOtp(v.replace(/\D/g,'').slice(0,6))} placeholder="6-digit code" keyboardType="number-pad" onFocus={()=>focusField(otpRef)} returnKeyType="done"/>
+          <TouchableOpacity disabled={busy} onPress={verifyOtp} style={[s.button,busy&&s.disabled]}>
+            <Text style={s.buttonText}>{busy?'Verifying…':'Continue'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity disabled={busy} onPress={()=>{setOtpSent(false);setOtp('');setError('');}}>
+            <Text style={s.change}>Use a different email</Text>
+          </TouchableOpacity>
         </>}
 
-        <Field ref={emailRef} label="EMAIL ADDRESS" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" onFocus={()=>focusField(emailRef)} returnKeyType="done"/>
-        <TouchableOpacity disabled={busy} onPress={sendOtp} style={[s.button,busy&&s.disabled]}>
-          <Text style={s.buttonText}>{busy?'Sending…':'Send verification code'}</Text>
-        </TouchableOpacity>
-      </> : <>
-        <Field ref={otpRef} label="VERIFICATION CODE" value={otp} onChangeText={v=>setOtp(v.replace(/\D/g,'').slice(0,6))} placeholder="123456" keyboardType="number-pad" onFocus={()=>focusField(otpRef)} returnKeyType="done"/>
-        <TouchableOpacity disabled={busy} onPress={verifyOtp} style={[s.button,busy&&s.disabled]}>
-          <Text style={s.buttonText}>{busy?'Verifying…':'Verify & continue'}</Text>
-        </TouchableOpacity>
-        <TouchableOpacity disabled={busy} onPress={()=>{setOtpSent(false);setOtp('');setError('');}}>
-          <Text style={s.change}>Use a different email</Text>
-        </TouchableOpacity>
-      </>}
-
-      {!!error&&<View style={s.error}><Text style={s.errorText}>{error}</Text></View>}
-      <Text style={s.note}>Authentication is handled by Supabase. RideOn stores only the session token required for authenticated API access.</Text>
+        {!!error&&<View style={s.error}><Text style={s.errorText}>{error}</Text></View>}
+      </View>
     </ScrollView>
     </KeyboardAvoidingView>
   </SafeAreaView>
@@ -161,26 +164,28 @@ export default function AuthScreen({onAuthenticated}) {
 const s=StyleSheet.create({
   safe:{flex:1,backgroundColor:C.bg},
   keyboard:{flex:1},
-  page:{padding:22,paddingTop:46,paddingBottom:40},
-  brand:{fontSize:34,fontWeight:'900',letterSpacing:-1.8,color:C.ink},
-  kicker:{fontSize:10,fontWeight:'900',letterSpacing:2,color:C.muted,marginTop:7},
-  title:{fontSize:30,fontWeight:'900',letterSpacing:-.8,color:C.ink,marginTop:18},
-  sub:{fontSize:13,color:C.muted,lineHeight:20,marginTop:7,marginBottom:22},
-  tabs:{flexDirection:'row',gap:8,marginBottom:18,flexWrap:'wrap'},
-  tab:{paddingHorizontal:18,paddingVertical:10,borderRadius:30,borderWidth:1,borderColor:C.line,backgroundColor:C.white},
-  typeTab:{minWidth:110,alignItems:'center'},
-  tabActive:{backgroundColor:C.ink,borderColor:C.ink},
-  tabText:{fontSize:12,fontWeight:'800',color:C.muted},
-  tabTextActive:{color:C.white},
-  sectionTitle:{fontSize:11,fontWeight:'900',letterSpacing:1,color:'#596371',marginBottom:9},
-  fieldWrap:{marginBottom:15},
-  label:{fontSize:11,fontWeight:'900',letterSpacing:.6,color:'#596371',marginBottom:8},
-  field:{backgroundColor:C.white,borderWidth:1,borderColor:C.line,borderRadius:14,paddingHorizontal:14,paddingVertical:14,fontSize:16,lineHeight:22,color:C.ink,minHeight:54},
-  button:{backgroundColor:C.orange,paddingVertical:15,borderRadius:15,alignItems:'center',marginTop:2},
-  buttonText:{color:C.white,fontSize:14,fontWeight:'900'},
-  change:{color:C.orange,fontSize:12,fontWeight:'800',textAlign:'center',marginTop:18},
-  error:{backgroundColor:'#FFF0F0',borderWidth:1,borderColor:'#F4CCCC',borderRadius:13,padding:12,marginTop:14},
-  errorText:{color:'#B23B3B',fontSize:12,lineHeight:18,fontWeight:'700'},
-  note:{fontSize:10,color:C.muted,lineHeight:16,marginTop:22},
+  page:{padding:20,paddingTop:28,paddingBottom:36},
+  hero:{alignItems:'flex-start',marginBottom:18,paddingHorizontal:4},
+  mark:{width:56,height:56,borderRadius:18,backgroundColor:C.orange,alignItems:'center',justifyContent:'center',marginBottom:16,shadowColor:C.orange,shadowOpacity:.25,shadowRadius:12,shadowOffset:{width:0,height:6},elevation:4},
+  markText:{color:C.white,fontSize:26,fontWeight:'800'},
+  brand:{fontSize:36,fontWeight:'800',letterSpacing:-1.6,color:C.ink},
+  sub:{fontSize:15,color:C.muted,lineHeight:22,marginTop:6},
+  card:{backgroundColor:C.white,borderRadius:28,padding:18,paddingTop:20,shadowColor:'#111827',shadowOpacity:.06,shadowRadius:18,shadowOffset:{width:0,height:8},elevation:3},
+  title:{fontSize:26,fontWeight:'800',letterSpacing:-.6,color:C.ink},
+  cardSub:{fontSize:14,color:C.muted,lineHeight:21,marginTop:6,marginBottom:18},
+  segment:{flexDirection:'row',backgroundColor:C.bg,borderRadius:16,padding:4,marginBottom:16},
+  segmentItem:{flex:1,minHeight:44,borderRadius:13,alignItems:'center',justifyContent:'center'},
+  segmentItemActive:{backgroundColor:C.white,shadowColor:'#111827',shadowOpacity:.08,shadowRadius:8,shadowOffset:{width:0,height:2},elevation:2},
+  segmentText:{fontSize:14,fontWeight:'700',color:C.muted},
+  segmentTextActive:{color:C.ink},
+  sectionTitle:{fontSize:13,fontWeight:'700',color:C.ink,marginBottom:8},
+  fieldWrap:{marginBottom:14},
+  label:{fontSize:13,fontWeight:'700',color:C.ink,marginBottom:8},
+  field:{backgroundColor:C.bg,borderRadius:16,paddingHorizontal:16,paddingVertical:15,fontSize:16,lineHeight:22,color:C.ink,minHeight:54},
+  button:{backgroundColor:C.orange,minHeight:54,borderRadius:16,alignItems:'center',justifyContent:'center',marginTop:4},
+  buttonText:{color:C.white,fontSize:16,fontWeight:'800'},
+  change:{color:C.orange,fontSize:14,fontWeight:'700',textAlign:'center',marginTop:16},
+  error:{backgroundColor:'#FFF0F0',borderRadius:14,padding:12,marginTop:14},
+  errorText:{color:'#B23B3B',fontSize:13,lineHeight:18,fontWeight:'700'},
   disabled:{opacity:.55},
 });

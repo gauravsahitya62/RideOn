@@ -2074,18 +2074,15 @@ app.get('/api/v1/payments/checkout', async (req,res) => {
   const payment=await repository.findPaymentById(token.paymentId,token.customerId);
   if(!payment)return res.status(404).type('html').send(checkoutPage({status:'failed',title:'Payment not found',message:'This payment session is no longer available.',returnUrl:'rideon://payment-return'}));
   if(payment.status==='paid')return res.type('html').send(checkoutPage({status:'paid',title:'Payment already confirmed',message:'RideOn has already confirmed this payment.',returnUrl:'rideon://payment-return'}));
-  if(payment.provider!=='cashfree')return res.status(409).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'This payment is not configured for the active checkout provider.',returnUrl:'rideon://payment-return'}));
+  if(String(payment.provider||'').toLowerCase()!=='cashfree')return res.status(409).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:'This payment is not configured for the active checkout provider.',returnUrl:'rideon://payment-return'}));
   try{
-    let sessionId=payment.providerReference;
-    if(!sessionId && payment.providerOrderId){
-      const refreshed=await payments.createCustomerPayment({orderId:payment.providerOrderId,amountPaise:payment.amountPaise,customerId:token.customerId});
-      sessionId=refreshed.paymentSessionId;
-      await repository.setPaymentProviderReference(payment.id,sessionId);
-    }
-    const config=payments.getCheckoutConfig({providerOrderId:payment.providerOrderId,amountPaise:payment.amountPaise,paymentSessionId:sessionId});
+    const refreshed=await payments.createCustomerPayment({orderId:payment.providerOrderId,amountPaise:payment.amountPaise,customerId:token.customerId,returnUrl:cashfreeReturnUrl||undefined});
+    const sessionId=refreshed.paymentSessionId;
+    await repository.updatePaymentCheckout(payment.id,{providerOrderId:refreshed.providerOrderId,providerReference:sessionId});
+    const config=payments.getCheckoutConfig({providerOrderId:refreshed.providerOrderId,amountPaise:payment.amountPaise,paymentSessionId:sessionId});
     const session=JSON.stringify(config.paymentSessionId).replace(/</g,'\\u003c');
     const environment=JSON.stringify(config.environment==='production'?'production':'sandbox');
-    res.type('html').send('<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1"><script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script><script>const cashfree=Cashfree({mode:'+environment+'});cashfree.checkout({paymentSessionId:'+session+',redirectTarget:"_self"});</script></body></html>');
+    res.type('html').send('<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>RideOn UPI checkout</title></head><body style="margin:0;background:#f7f5f1;font-family:sans-serif"><p id="status" style="padding:28px;color:#6b7280">Opening Cashfree checkout…</p><script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script><script>try{const cashfree=Cashfree({mode:'+environment+'});const started=cashfree.checkout({paymentSessionId:'+session+',redirectTarget:"_self"});if(started&&started.catch)started.catch(function(err){document.getElementById("status").textContent=err&&err.message?err.message:"Cashfree could not open checkout.";});}catch(err){document.getElementById("status").textContent=err&&err.message?err.message:"Cashfree could not open checkout.";}</script></body></html>');
   }catch(error){
     console.error(JSON.stringify({level:'error',event:'payment_checkout_failed',requestId:req.requestId,paymentId:payment.id,providerOrderId:payment.providerOrderId,code:error?.code||'PAYMENT_CHECKOUT_FAILED',message:error?.message||null}));
     res.status(503).type('html').send(checkoutPage({status:'failed',title:'Payment unavailable',message:error?.message || 'RideOn could not start the provider checkout. Return to the app and retry.',returnUrl:'rideon://payment-return'}));

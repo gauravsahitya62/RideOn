@@ -6,7 +6,7 @@ import MapView, { Marker, Polyline } from 'react-native-maps';
 import { rideOnApi, restoreAccessToken } from '../services/api';
 import VehicleConditionEvidence from '../components/VehicleConditionEvidence';
 
-const C={bg:'#F7F5F1',white:'#FFFFFF',ink:'#121A28',muted:'#737D8C',line:'#E7E1D9',orange:'#EF6238',green:'#198C67',red:'#C94B4B',navy:'#101827'};
+const C={bg:'#F7F5F1',white:'#FFFFFF',ink:'#111827',muted:'#6B7280',line:'#E7E2DA',orange:'#E56A3D',green:'#218765',red:'#C94B4B',navy:'#151D2A'};
 const BACKGROUND_TASK='rideon-delivery-background-location';
 const ACTIVE_BOOKING_KEY='rideon_active_delivery_booking';
 const ACTIVE_TOKEN_KEY='rideon_active_delivery_token';

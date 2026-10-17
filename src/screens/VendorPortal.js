@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View, Image, Modal, Alert } from 'react-native';
 
-const C = { ink:'#172033', muted:'#7D8796', orange:'#E95735', bg:'#F5F6F8', line:'#E6E9EF', white:'#FFFFFF', green:'#16845B', pale:'#FFF1EB', blue:'#EAF2FF' };
+const C = { ink:'#111827', muted:'#6B7280', orange:'#E56A3D', bg:'#F7F5F1', line:'#E7E2DA', white:'#FFFFFF', green:'#218765', pale:'#FFF1EB', blue:'#EAF2FF' };
 const PHOTO = {
   classic:'https://images.unsplash.com/photo-1558981806-ec527fa84c39?auto=format&fit=crop&w=1000&q=85',
   scooter:'https://images.unsplash.com/photo-1558981403-c5f9899a28bc?auto=format&fit=crop&w=1000&q=85',
