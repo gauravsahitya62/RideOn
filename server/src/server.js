@@ -470,6 +470,18 @@ const requireRole = (...roles) => (req, res, next) => {
 
 const requireCustomer = requireRole('customer');
 
+const publicKycDisplay = (ocr) => {
+  const source = ocr && typeof ocr === 'object' ? ocr : {};
+  const name = String(source.name || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  const dateOfBirth = String(source.dateOfBirth || '').trim();
+  const maskedAadhaar = String(source.maskedAadhaar || '').trim();
+  const display = {};
+  if (name && !/\d{6,}/.test(name)) display.name = name;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) display.dateOfBirth = dateOfBirth;
+  if (/^XXXX XXXX \d{4}$/.test(maskedAadhaar)) display.maskedAadhaar = maskedAadhaar;
+  return Object.keys(display).length ? display : null;
+};
+
 const publicKycVerification = (verification) => verification ? ({
   id:verification.id,
   documentType:verification.documentType,
@@ -477,6 +489,7 @@ const publicKycVerification = (verification) => verification ? ({
   submittedAt:verification.submittedAt,
   verifiedAt:verification.verifiedAt,
   decisionReason:verification.decisionReason || null,
+  display:publicKycDisplay(verification.ocrDataExtracted),
 }) : null;
 
 const KYC_REQUIRED_RESPONSE = {
@@ -516,7 +529,8 @@ app.get('/api/v1/kyc/status', supabaseRequireAuth, requireCustomer, async (req,r
     const status = await repository.getKycStatus(req.user.id);
     if (!status) return res.status(404).json({error:{code:'USER_NOT_FOUND',message:'RideOn account not found.'}});
     const active = status.activeKycId ? await repository.getKycVerification(status.activeKycId, req.user.id) : null;
-    res.json({kyc:{status:status.status,activeVerification:publicKycVerification(active)}});
+    const documents = await repository.listLatestKycDocuments(req.user.id);
+    res.json({kyc:{status:status.status,activeVerification:publicKycVerification(active),documents:(documents || []).map(publicKycVerification).filter(Boolean)}});
   } catch(error) {
     console.error(JSON.stringify({level:'error',event:'kyc_status_failed',requestId:req.requestId,code:error?.code||'KYC_STATUS_FAILED'}));
     res.status(503).json({error:{code:'KYC_UNAVAILABLE',message:'Identity verification status is temporarily unavailable.'}});
@@ -1065,11 +1079,47 @@ app.get('/api/v1/fleet-orders', supabaseRequireAuth, requireCustomer, async (req
   }catch(error){res.status(503).json({error:{code:'FLEET_ORDERS_UNAVAILABLE',message:'Fleet bookings are temporarily unavailable. Please retry.'}});}
 });
 
+const publicCustomer = (customer, email) => {
+  if (!customer) return null;
+  const { passwordHash, ...safe } = customer;
+  return { ...safe, email: safe.email || email || undefined };
+};
+
+const profilePhone = (value) => {
+  const digits = String(value || '').replace(/\D/g, '');
+  const local = digits.startsWith('91') && digits.length > 10 ? digits.slice(-10) : digits.slice(-10);
+  if (!/^[6-9]\d{9}$/.test(local)) return null;
+  return `+91${local}`;
+};
+
 app.get('/api/v1/me', supabaseRequireAuth, async (req, res) => {
   const customer = await repository.findCustomerById(req.user.id);
   if (!customer) return res.status(404).json({ error:{ code:'USER_NOT_FOUND' } });
-  const user={id:customer.id,name:customer.fullName,email:customer.email||req.user.email,role:req.user.role};
-  res.json({user,customer});
+  const safe = publicCustomer(customer, req.user.email);
+  res.json({user:{id:safe.id,name:safe.fullName,email:safe.email,role:req.user.role},customer:safe});
+});
+
+app.patch('/api/v1/me', supabaseRequireAuth, requireCustomer, async (req, res) => {
+  const parsed = z.object({
+    fullName:z.string().trim().min(2).max(100),
+    phone:z.string().trim().min(10).max(20),
+    dateOfBirth:z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  }).safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error:{ code:'INVALID_PROFILE', message:'Enter your name, a valid mobile number, and a date of birth as YYYY-MM-DD.' } });
+  const phone = profilePhone(parsed.data.phone);
+  if (!phone) return res.status(400).json({ error:{ code:'INVALID_PHONE', message:'Enter a valid 10-digit mobile number.' } });
+  if (parsed.data.dateOfBirth && parsed.data.dateOfBirth > new Date().toISOString().slice(0, 10)) {
+    return res.status(400).json({ error:{ code:'INVALID_DATE_OF_BIRTH', message:'Date of birth cannot be in the future.' } });
+  }
+  try {
+    const customer = await repository.updateCustomerProfile(req.user.id, { fullName:parsed.data.fullName, phone, dateOfBirth:parsed.data.dateOfBirth || null });
+    if (!customer) return res.status(404).json({ error:{ code:'USER_NOT_FOUND', message:'RideOn account not found.' } });
+    const safe = publicCustomer(customer, req.user.email);
+    res.json({ user:{ id:safe.id, name:safe.fullName, email:safe.email, role:req.user.role }, customer:safe });
+  } catch (error) {
+    const status = error?.code === 'PHONE_IN_USE' ? 409 : 503;
+    res.status(status).json({ error:{ code:error?.code || 'PROFILE_UPDATE_FAILED', message:error?.code === 'PHONE_IN_USE' ? 'That mobile number is already used on another RideOn account.' : 'Profile could not be saved. Please retry.' } });
+  }
 });
 
 app.get('/api/v1/fleet', async (req,res)=>{
@@ -2025,6 +2075,26 @@ app.patch('/api/v1/bookings/:id/cancel', supabaseRequireAuth, requireCustomer, a
     if(error.code==='CANCELLATION_NOT_ALLOWED') return res.status(409).json({error:{code:error.code,message:'This booking can no longer be cancelled.'}});
     if(error.code==='INVALID_PAYMENT_STATE') return res.status(409).json({error:{code:error.code,message:'The payment is not in a refundable state.'}});
     throw error;
+  }
+});
+
+app.post('/api/v1/bookings/:id/reschedule', supabaseRequireAuth, requireCustomer, async (req,res) => {
+  const parsed=z.object({startAt:z.string().datetime(),endAt:z.string().datetime(),address:z.string().trim().max(300).optional()}).safeParse(req.body||{});
+  if(!parsed.success) return res.status(400).json({error:{code:'INVALID_BOOKING_WINDOW',message:'Choose a valid pickup and return time.'}});
+  try {
+    const current=await repository.getBooking(req.params.id, req.user.id);
+    if(!current) return res.status(404).json({error:{code:'BOOKING_NOT_FOUND',message:'Booking not found.'}});
+    const vehicle=await repository.getVehicle(current.vehicleId);
+    if(!vehicle) return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
+    const notes=String(current.notes||'');
+    const helmets=Number(notes.match(/(\d+)\s+extra helmet/i)?.[1]||0);
+    const holders=Number(notes.match(/(\d+)\s+mobile holder/i)?.[1]||0);
+    const nextPricing=pricing(vehicle, parsed.data.startAt, parsed.data.endAt, Boolean(current.delivery), {helmets, holders});
+    const result=await repository.rescheduleBooking(req.params.id, req.user.id, {startAt:parsed.data.startAt,endAt:parsed.data.endAt,address:parsed.data.address,pricing:nextPricing});
+    res.json({booking:publicBooking(result.booking),previousTotal:result.previousTotal,newTotal:result.newTotal,quote:nextPricing});
+  } catch(error) {
+    const map={BOOKING_NOT_FOUND:404,VEHICLE_NOT_FOUND:404,RESCHEDULE_NOT_ALLOWED:409,VEHICLE_UNAVAILABLE:409,INVALID_BOOKING_WINDOW:400,RESCHEDULE_PRICE_CHANGED:409};
+    res.status(map[error?.code]||503).json({error:{code:error?.code||'RESCHEDULE_FAILED',message:error?.code==='RESCHEDULE_PRICE_CHANGED'?'Those dates change the amount already paid.':error?.code==='VEHICLE_UNAVAILABLE'?'This vehicle is not available for those dates.':error?.code==='RESCHEDULE_NOT_ALLOWED'?'This booking can no longer be rescheduled.':error?.message||'The booking could not be rescheduled.',details:{previousTotal:error?.previousTotal??null,newTotal:error?.newTotal??null}}});
   }
 });
 

@@ -21,7 +21,7 @@ const dayLabel = (date, time) => {
 };
 const imageOf = vehicle => [...(Array.isArray(vehicle?.images) ? vehicle.images : []), vehicle?.imageUrl, vehicle?.photoUrl].find(value => typeof value === 'string' && /^https?:\/\//i.test(value));
 
-export default function BookingReview({ vehicle, date, pickupTime, returnDate, returnTime, duration, city, delivery, address, quote, helmets = 0, holders = 0, busy, error, onBack, onChangeDetails, onChangeAddons, onConfirm }) {
+export default function BookingReview({ vehicle, date, pickupTime, returnDate, returnTime, duration, city, delivery, address, quote, helmets = 0, holders = 0, busy, error, onBack, onChangeDetails, onChangeLocation, onChangeAddons, onConfirm }) {
   const image = imageOf(vehicle);
   const rental = quote?.rental;
   const deposit = Number(quote?.securityDeposit || 0);
@@ -35,10 +35,13 @@ export default function BookingReview({ vehicle, date, pickupTime, returnDate, r
     <ScrollView contentContainerStyle={styles.page} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
         <TouchableOpacity onPress={onBack} accessibilityRole="button" accessibilityLabel="Go back" style={styles.back}><Text style={styles.backText}>←</Text></TouchableOpacity>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.title}>Booking Review</Text>
           <Text style={styles.sub}>Please review your booking details</Text>
         </View>
+      </View>
+      <View style={styles.steps}>
+        {['Vehicle', 'Review', 'Confirm', 'Payment', 'Done'].map((label, index) => <View key={label} style={styles.step}><View style={[styles.dot, index <= 1 && styles.dotOn]}><Text style={[styles.dotText, index <= 1 && styles.dotTextOn]}>{index + 1}</Text></View><Text style={[styles.stepLabel, index === 1 && styles.stepLabelOn]}>{label}</Text></View>)}
       </View>
 
       <View style={styles.card}>
@@ -61,7 +64,7 @@ export default function BookingReview({ vehicle, date, pickupTime, returnDate, r
       </View>
 
       <View style={styles.card}>
-        <View style={styles.cardHead}><Text style={styles.cardTitle}>Pickup Location</Text><TouchableOpacity onPress={onChangeDetails}><Text style={styles.change}>Change</Text></TouchableOpacity></View>
+        <View style={styles.cardHead}><Text style={styles.cardTitle}>{delivery ? 'Delivery location' : 'Pickup location'}</Text><TouchableOpacity onPress={onChangeLocation || onChangeDetails}><Text style={styles.change}>Change</Text></TouchableOpacity></View>
         <Text style={styles.place}>{place}</Text>
         <Text style={styles.placeSub}>{delivery ? 'Doorstep delivery' : `Collect in ${city || 'your city'}`}</Text>
       </View>
@@ -84,16 +87,30 @@ export default function BookingReview({ vehicle, date, pickupTime, returnDate, r
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Payment Method</Text>
-        <Text style={styles.payName}>UPI payment</Text>
-        <Text style={styles.placeSub}>You complete the payment in secure checkout after confirming.</Text>
+        <Text style={styles.cardTitle}>What's included</Text>
+        {helmets > 0 && <Text style={styles.remember}>• {helmets} extra helmet{helmets === 1 ? '' : 's'}</Text>}
+        {holders > 0 && <Text style={styles.remember}>• {holders} mobile holder{holders === 1 ? '' : 's'}</Text>}
+        {helmets + holders === 0 && <Text style={styles.placeSub}>No extra helmets or holders are added. You can add them above.</Text>}
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Things to remember</Text>
+        <Text style={styles.remember}>• A verified driving licence is required before payment.</Text>
+        <Text style={styles.remember}>• The security deposit stays with the booking until the return inspection.</Text>
+        <Text style={styles.remember}>• Damage found on return can be deducted from the deposit.</Text>
+      </View>
+
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Payment</Text>
+        <Text style={styles.payName}>Cashfree checkout</Text>
+        <Text style={styles.placeSub}>You pay the total above in secure checkout. RideOn does not store a UPI ID here.</Text>
       </View>
 
       {!!error && <Text style={styles.error}>{error}</Text>}
     </ScrollView>
     <View style={styles.footer}>
       <TouchableOpacity style={styles.button} onPress={onConfirm} disabled={busy} accessibilityRole="button">
-        <Text style={styles.buttonText}>{busy ? 'Confirming…' : `Confirm Booking  ·  ${total != null ? money(total) : ''}  →`}</Text>
+        <Text style={styles.buttonText}>{busy ? 'Confirming…' : `Confirm & proceed to payment${total != null ? `  ·  ${money(total)}` : ''}`}</Text>
       </TouchableOpacity>
       <Text style={styles.legal}>By confirming, you agree to the booking terms and the price shown above.</Text>
     </View>
@@ -147,6 +164,15 @@ const styles = StyleSheet.create({
   totalValue: { color: INK, fontSize: 18, fontWeight: '800' },
   refund: { marginTop: 10, color: GREEN, fontSize: 12, lineHeight: 17 },
   payName: { color: INK, fontWeight: '800', marginTop: 8 },
+  remember: { color: '#3E4A54', fontSize: 13, lineHeight: 20, marginTop: 6 },
+  steps: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 14 },
+  step: { alignItems: 'center', flex: 1 },
+  dot: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#E6E8EC', alignItems: 'center', justifyContent: 'center' },
+  dotOn: { backgroundColor: BUTTON },
+  dotText: { color: '#66707A', fontSize: 11, fontWeight: '800' },
+  dotTextOn: { color: '#FFFFFF' },
+  stepLabel: { color: '#8B949E', fontSize: 10, marginTop: 4 },
+  stepLabelOn: { color: GREEN, fontWeight: '800' },
   error: { color: '#B23B3B', fontWeight: '700', marginBottom: 8 },
   footer: { padding: 16, paddingTop: 8, backgroundColor: '#F7F8FA' },
   button: { height: 54, borderRadius: 27, backgroundColor: BUTTON, alignItems: 'center', justifyContent: 'center' },

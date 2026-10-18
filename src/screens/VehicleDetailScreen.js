@@ -42,6 +42,7 @@ export default function VehicleDetailScreen({
   vehicle,
   onBack,
   onBook,
+  onAddToCart,
   pickupDate,
   pickupTime,
   returnDate,
@@ -58,6 +59,7 @@ export default function VehicleDetailScreen({
   onToggleSave,
   selectedDays = 1,
   onSelectDays,
+  availability,
 }) {
   const [activeImage, setActiveImage] = useState(0);
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
@@ -73,7 +75,6 @@ export default function VehicleDetailScreen({
 
   const daily = Number(vehicle.price ?? vehicle.pricePerDay) || 0;
   const quoteTotal = quote?.total ?? quote?.totalPrice ?? quote?.pricing?.total;
-  const shown = quoteTotal != null ? Number(quoteTotal) : daily;
   const chips = [asText(vehicle.fuel), asText(vehicle.transmission), vehicle.seats ? `${vehicle.seats} seats` : null, asText(vehicle.type)].filter(Boolean);
   const moveImage = delta => setActiveImage(current => (current + delta + images.length) % images.length);
   const share = () => Share.share({ message: `${vehicle.name} · ${money(daily)} a day on RideOn` }).catch(() => {});
@@ -97,50 +98,77 @@ export default function VehicleDetailScreen({
       </ScrollView>}
 
       <View style={styles.titleRow}>
-        <Text style={styles.heading}>{vehicle.name || 'Selected vehicle'}</Text>
-      </View>
-      <View style={styles.chips}>
-        {chips.map(chip => <View key={chip} style={styles.chip}><Text style={styles.chipText}>{chip}</Text></View>)}
-      </View>
-
-      <View style={styles.note}><Text style={styles.noteTitle}>Price confirmed on booking</Text><Text style={styles.noteBody}>The amount below is the daily rate. Your dates are checked before payment.</Text></View>
-      {quoteError ? <TouchableOpacity onPress={onRetryQuote}><Text style={styles.errorText}>{quoteError}</Text></TouchableOpacity> : null}
-      {quoteLoading ? <Text style={styles.muted}>Checking the price…</Text> : null}
-
-      <Text style={styles.section}>Pricing</Text>
-      <View style={styles.prices}>
-        {[[1, daily, 'per day'], [3, daily * 3, 'for 3 days'], [7, daily * 7, 'for 7 days']].map(([days, amount, label]) => <TouchableOpacity key={days} style={[styles.priceCard, selectedDays === days && styles.priceOn]} onPress={() => onSelectDays?.(days)} accessibilityRole="button">
-          <Text style={styles.priceValue}>{money(amount)}</Text><Text style={styles.priceLabel}>{label}</Text>
-        </TouchableOpacity>)}
+        <View style={{ flex: 1 }}>
+          <Text style={styles.heading}>{vehicle.name || 'Selected vehicle'}</Text>
+          <Text style={styles.subline}>{[vehicle.type, vehicle.fuel, vehicle.transmission].filter(Boolean).join('  ·  ') || 'RideOn vehicle'}</Text>
+          {!!vehicle.registrationNumber && <Text style={styles.subline}>{vehicle.registrationNumber}</Text>}
+        </View>
+        <Text style={styles.daily}>{money(daily)}<Text style={styles.per}>/day</Text></Text>
       </View>
 
-      <Text style={styles.section}>Select Dates & Time</Text>
+      {!!chips.length && <View style={styles.specRow}>
+        {chips.map(chip => <View key={chip} style={styles.spec}><Text style={styles.specText}>{chip}</Text></View>)}
+      </View>}
+
+      <View style={[styles.banner, availability?.available && styles.bannerOn]}>
+        <Text style={styles.bannerTitle}>{availability?.available ? 'Available for your dates' : 'Selected dates'}</Text>
+        <Text style={styles.bannerBody}>{formatWhen(pickupDate, pickupTime)} – {formatWhen(returnDate, returnTime)}</Text>
+      </View>
+
+      {vehicle.deliveryAvailable ? <View style={styles.deliveryBanner}>
+        <Text style={styles.bannerTitle}>Delivery can be added</Text>
+        <Text style={styles.bannerBody}>{deliveryFeeText(quote)}</Text>
+      </View> : null}
+
+      {!!vehicle.description && <>
+        <Text style={styles.section}>About this vehicle</Text>
+        <Text style={styles.description}>{vehicle.description}</Text>
+      </>}
+
+      <Text style={styles.section}>Pickup & delivery location</Text>
+      <TouchableOpacity style={styles.location} onPress={onEditLocation} accessibilityRole="button">
+        <View style={{ flex: 1 }}>
+          <Text style={styles.locationText} numberOfLines={2}>{location || 'Choose a location'}</Text>
+        </View>
+        <Text style={styles.change}>Change</Text>
+      </TouchableOpacity>
+
+      <Text style={styles.section}>Select dates & time</Text>
       <View style={styles.dates}>
         <TouchableOpacity style={styles.dateCard} onPress={onEditDates} accessibilityRole="button">
-          <Text style={styles.dateLabel}>Pick-up Date & Time</Text>
+          <Text style={styles.dateLabel}>Pickup</Text>
           <Text style={styles.dateValue}>{formatWhen(pickupDate, pickupTime)}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.dateCard} onPress={onEditDates} accessibilityRole="button">
-          <Text style={styles.dateLabel}>Drop-off Date & Time</Text>
+          <Text style={styles.dateLabel}>Return</Text>
           <Text style={styles.dateValue}>{formatWhen(returnDate, returnTime)}</Text>
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.section}>Pickup Location</Text>
-      <TouchableOpacity style={styles.location} onPress={onEditLocation} accessibilityRole="button">
-        <Text style={styles.locationPin}>⌖</Text>
-        <Text style={styles.locationText} numberOfLines={1}>{location || 'Choose a pickup location'}</Text>
-        <Text style={styles.change}>Change</Text>
-      </TouchableOpacity>
+      <Text style={styles.section}>Rental length</Text>
+      <View style={styles.prices}>
+        {[1, 3, 7].map(days => <TouchableOpacity key={days} style={[styles.priceCard, selectedDays === days && styles.priceOn]} onPress={() => onSelectDays?.(days)} accessibilityRole="button">
+          <Text style={styles.priceValue}>{days} day{days === 1 ? '' : 's'}</Text>
+          <Text style={styles.priceLabel}>{money(daily * days)} before fees</Text>
+        </TouchableOpacity>)}
+      </View>
+      {quoteError ? <TouchableOpacity onPress={onRetryQuote}><Text style={styles.errorText}>{quoteError}</Text></TouchableOpacity> : null}
+      {quoteLoading ? <Text style={styles.muted}>Checking the price…</Text> : null}
 
       <ReviewsSection vehicleId={vehicle.id} title="Vehicle reviews" onWriteReview={onWriteReview}/>
     </ScrollView>
 
     <View style={styles.footer}>
-      <TouchableOpacity style={styles.book} onPress={() => onBook?.(vehicle)} disabled={!vehicle.id || quoteLoading} accessibilityRole="button">
-        <Text style={styles.bookText}>Book Now  ·  {money(shown)}  →</Text>
-      </TouchableOpacity>
-      <Text style={styles.cancelNote}>You can review the full price before you pay.</Text>
+      {!!onAddToCart && <TouchableOpacity onPress={() => onAddToCart(vehicle)} disabled={!vehicle.id} accessibilityRole="button"><Text style={styles.cartText}>Add to cart</Text></TouchableOpacity>}
+      <View style={styles.footerRow}>
+        <View style={styles.footerPrice}>
+          <Text style={styles.footerDaily}>{money(daily)}<Text style={styles.per}>/day</Text></Text>
+          <Text style={styles.footerTotal}>{quoteTotal != null ? `Total  ${money(quoteTotal)}` : 'Total is confirmed on review'}</Text>
+        </View>
+        <TouchableOpacity style={[styles.book, { flex: 1 }]} onPress={() => onBook?.(vehicle)} disabled={!vehicle.id || quoteLoading} accessibilityRole="button">
+          <Text style={styles.bookText}>Book Now  →</Text>
+        </TouchableOpacity>
+      </View>
     </View>
 
     <Modal visible={imageViewerOpen} transparent animationType="fade" onRequestClose={() => setImageViewerOpen(false)}>
@@ -151,6 +179,11 @@ export default function VehicleDetailScreen({
       </View>
     </Modal>
   </View>;
+}
+
+function deliveryFeeText(quote) {
+  if (Number(quote?.deliveryFee) > 0) return `Delivery fee on this quote: ${money(quote.deliveryFee)}`;
+  return 'Choose delivery and the fee is added to the booking quote.';
 }
 
 function formatWhen(date, time) {
@@ -181,30 +214,40 @@ const styles = StyleSheet.create({
   thumb: { width: 64, height: 48, borderRadius: 10, overflow: 'hidden', borderWidth: 2, borderColor: 'transparent' },
   thumbOn: { borderColor: '#07A574' },
   thumbImage: { width: 64, height: 48 },
-  titleRow: { paddingHorizontal: 16, marginTop: 14 },
+  titleRow: { paddingHorizontal: 16, marginTop: 14, flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   heading: { color: COLORS.ink, fontSize: 24, fontWeight: '800' },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 16, marginTop: 12 },
-  chip: { backgroundColor: '#F4F6F8', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8 },
-  chipText: { color: '#3E4A54', fontSize: 12, fontWeight: '700' },
-  note: { marginHorizontal: 16, marginTop: 14, backgroundColor: '#F3FBF6', borderRadius: 14, padding: 12 },
-  noteTitle: { color: '#067A4A', fontWeight: '800', fontSize: 13 },
-  noteBody: { color: '#5E6872', fontSize: 12, lineHeight: 17, marginTop: 2 },
+  subline: { color: '#66707A', marginTop: 4, fontSize: 13 },
+  daily: { color: COLORS.ink, fontSize: 20, fontWeight: '800' },
+  per: { color: '#7B848E', fontSize: 12, fontWeight: '600' },
+  specRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 16, marginTop: 14 },
+  spec: { minWidth: 72, backgroundColor: '#F4F6F8', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 10 },
+  specText: { color: '#3E4A54', fontSize: 12, fontWeight: '700', textAlign: 'center' },
+  banner: { marginHorizontal: 16, marginTop: 14, backgroundColor: '#F4F6F8', borderRadius: 14, padding: 12 },
+  bannerOn: { backgroundColor: '#E7F8EC' },
+  bannerTitle: { color: '#067A4A', fontWeight: '800' },
+  bannerBody: { color: '#3E4A54', marginTop: 4, fontSize: 13 },
+  deliveryBanner: { marginHorizontal: 16, marginTop: 10, backgroundColor: '#EEF4FF', borderRadius: 14, padding: 12 },
+  description: { marginHorizontal: 16, marginTop: 8, color: '#3E4A54', lineHeight: 20 },
   section: { marginTop: 18, marginHorizontal: 16, color: COLORS.ink, fontSize: 16, fontWeight: '800' },
   prices: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginTop: 10 },
   priceCard: { flex: 1, borderRadius: 14, borderWidth: 1, borderColor: '#E6E8EC', padding: 10, backgroundColor: '#FFFFFF' },
   priceOn: { backgroundColor: '#E7F8EC', borderColor: '#07A574' },
-  priceValue: { color: COLORS.ink, fontSize: 16, fontWeight: '800' },
+  priceValue: { color: COLORS.ink, fontSize: 15, fontWeight: '800' },
   priceLabel: { color: '#66707A', fontSize: 11, marginTop: 4 },
   dates: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginTop: 10 },
   dateCard: { flex: 1, borderRadius: 14, borderWidth: 1, borderColor: '#E6E8EC', padding: 10 },
   dateLabel: { color: '#7B848E', fontSize: 11 },
   dateValue: { color: COLORS.ink, fontSize: 13, fontWeight: '700', marginTop: 6 },
   location: { marginHorizontal: 16, marginTop: 10, borderRadius: 14, borderWidth: 1, borderColor: '#E6E8EC', padding: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  locationPin: { color: '#07A574', fontSize: 16 },
-  locationText: { flex: 1, color: COLORS.ink, fontWeight: '700' },
+  locationText: { color: COLORS.ink, fontWeight: '700' },
   change: { color: '#07A574', fontWeight: '800' },
-  footer: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 16, backgroundColor: '#FFFFFF' },
-  book: { height: 54, borderRadius: 27, backgroundColor: '#07A574', alignItems: 'center', justifyContent: 'center' },
+  footer: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 16, backgroundColor: '#FFFFFF', borderTopWidth: 1, borderTopColor: '#EEF1F4' },
+  footerRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  footerPrice: { width: 128 },
+  footerDaily: { color: COLORS.ink, fontSize: 18, fontWeight: '800' },
+  footerTotal: { color: '#66707A', fontSize: 12, marginTop: 2 },
+  cartText: { color: '#067A4A', fontSize: 14, fontWeight: '800', textAlign: 'right', marginBottom: 6 },
+  book: { height: 52, borderRadius: 26, backgroundColor: '#07A574', alignItems: 'center', justifyContent: 'center' },
   bookText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
   cancelNote: { textAlign: 'center', color: '#8B949E', fontSize: 12, marginTop: 8 },
   muted: { color: COLORS.muted, marginHorizontal: 16, marginTop: 8 },

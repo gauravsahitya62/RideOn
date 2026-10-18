@@ -26,7 +26,7 @@ const CHIPS = [
   { id: 'Near', label: 'Near Me' },
 ];
 
-export default function HomeScreen({ city, name, search, onSearch, category, onCategory, vehicles, loading, error, onRetry, onCity, onBell, onProfile, onFilter, onOpen, onBook, onMap }) {
+export default function HomeScreen({ city, name, search, onSearch, category, onCategory, vehicles, loading, error, onRetry, onCity, onBell, onProfile, onCart, cartCount = 0, onFilter, onSeeAll, onOpen, onBook, onMap }) {
   const listRef = useRef(null);
   const initials = String(name || 'Guest').split(' ').filter(Boolean).map(part => part[0]).join('').slice(0, 2).toUpperCase();
   const hero = HEROES[city] || HEROES.Udaipur;
@@ -40,6 +40,7 @@ export default function HomeScreen({ city, name, search, onSearch, category, onC
         </View>
       </TouchableOpacity>
       <View style={styles.headerActions}>
+        {!!onCart && <TouchableOpacity style={styles.bell} onPress={onCart} accessibilityRole="button" accessibilityLabel="Cart"><Text style={styles.bellIcon}>🛒</Text>{cartCount > 0 && <View style={styles.bellDot} />}</TouchableOpacity>}
         <TouchableOpacity style={styles.bell} onPress={onBell} accessibilityRole="button" accessibilityLabel="Notifications"><Text style={styles.bellIcon}>🔔</Text><View style={styles.bellDot} /></TouchableOpacity>
         <TouchableOpacity style={styles.avatar} onPress={onProfile} accessibilityRole="button"><Text style={styles.avatarText}>{initials}</Text></TouchableOpacity>
       </View>
@@ -83,7 +84,7 @@ export default function HomeScreen({ city, name, search, onSearch, category, onC
 
     <View style={styles.sectionHead}>
       <Text style={styles.section}>Available Vehicles</Text>
-      <TouchableOpacity onPress={() => onCategory('All')} accessibilityRole="button"><Text style={styles.seeAll}>See All →</Text></TouchableOpacity>
+      <TouchableOpacity onPress={onSeeAll || (() => onCategory('All'))} accessibilityRole="button"><Text style={styles.seeAll}>See All →</Text></TouchableOpacity>
     </View>
     {!!error && <TouchableOpacity onPress={onRetry}><Text style={styles.error}>{error}</Text></TouchableOpacity>}
     {loading && !vehicles.length ? <Text style={styles.empty}>Loading vehicles…</Text> : null}

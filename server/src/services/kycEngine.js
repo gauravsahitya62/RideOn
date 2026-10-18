@@ -29,6 +29,35 @@ const cashfreeRequestSignature = (clientId, publicKeyPem) => {
 
 const redactDigits = (value) => String(value ?? '').replace(/\d{4,}/g, (match) => `${match.length}digits`);
 
+const displayIdentity = (source, { aadhaar = false } = {}) => {
+  if (!source || typeof source !== 'object') return {};
+  const out = {};
+  const name = String(source.name || source.full_name || source.holder_name || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  if (name && !/\d{6,}/.test(name)) out.name = name;
+  const rawDob = String(source.dob || source.date_of_birth || source.dateOfBirth || '').trim();
+  const yearFirst = rawDob.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const dayFirst = rawDob.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (yearFirst) out.dateOfBirth = `${yearFirst[1]}-${yearFirst[2]}-${yearFirst[3]}`;
+  else if (dayFirst) out.dateOfBirth = `${dayFirst[3]}-${dayFirst[2]}-${dayFirst[1]}`;
+  if (aadhaar) {
+    const digits = String(source.uid || source.maskedUid || source.masked_aadhaar || source.aadhaar_number || '').replace(/\D/g, '');
+    if (digits.length >= 4) out.maskedAadhaar = `XXXX XXXX ${digits.slice(-4)}`;
+  }
+  return out;
+};
+
+const displayIdentityFromPayload = (payload, options) => {
+  const sources = [payload, payload?.data, payload?.result, payload?.document, payload?.aadhaar, payload?.details_of_driving_licence].filter(item => item && typeof item === 'object');
+  const merged = {};
+  for (const source of sources) {
+    const next = displayIdentity(source, options);
+    if (!merged.name && next.name) merged.name = next.name;
+    if (!merged.dateOfBirth && next.dateOfBirth) merged.dateOfBirth = next.dateOfBirth;
+    if (!merged.maskedAadhaar && next.maskedAadhaar) merged.maskedAadhaar = next.maskedAadhaar;
+  }
+  return merged;
+};
+
 const redactProviderValue = (value, depth = 0) => {
   if (value == null || depth > 4) return value ?? null;
   if (typeof value === 'string') return redactDigits(value).slice(0, 500);
@@ -391,7 +420,7 @@ class CashfreeVerificationAdapter extends HttpKycProvider {
       status: approved ? 'APPROVED' : rejected ? 'REJECTED' : 'PENDING',
       providerVerificationId: String(payload?.reference_id ?? payload?.verification_id ?? payload?.data?.reference_id ?? ''),
       governmentRefId: null,
-      ocrDataExtracted: {},
+      ocrDataExtracted: displayIdentityFromPayload(payload, { aadhaar:false }),
       livenessScore: null,
       faceMatchScore: null,
       decisionReason: approved
@@ -558,6 +587,7 @@ export class KycEngine {
       verificationId:verification.id,
       status:approved?'APPROVED':rejected?'REJECTED':'PENDING',
       providerVerificationId:String(result?.ref_id || result?.reference_id || ref),
+      ocrDataExtracted:approved ? displayIdentityFromPayload(result, { aadhaar:true }) : {},
       decisionReason:approved?'Cashfree Secure ID Aadhaar OTP verification succeeded.':rejected?'Cashfree Secure ID rejected Aadhaar OTP verification.':'Cashfree Secure ID returned a pending Aadhaar verification result.',
     });
     return applied?.verification || verification;
@@ -637,6 +667,7 @@ export class KycEngine {
     }
     const applied=await this.repository.applyKycVerificationResult({
       verificationId:verification.id,status:'APPROVED',providerVerificationId,
+      ocrDataExtracted:document ? displayIdentityFromPayload(document, { aadhaar:true }) : {},
       decisionReason:'Cashfree Secure ID DigiLocker Aadhaar verification succeeded.',
       governmentRefId:null,
     });
