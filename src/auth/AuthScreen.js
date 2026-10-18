@@ -27,7 +27,6 @@ Field.displayName='Field';
 
 export default function AuthScreen({onAuthenticated}) {
   const [mode,setMode]=useState('login');
-  const [accountType,setAccountType]=useState('customer');
   const [name,setName]=useState('');
   const [phone,setPhone]=useState('');
   const [email,setEmail]=useState('');
@@ -52,7 +51,7 @@ export default function AuthScreen({onAuthenticated}) {
     const e=email.trim().toLowerCase();
     if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) return setError('Enter a valid email address.');
     if(mode==='register'&&name.trim().length<2) return setError('Enter your full name.');
-    if(mode==='register'&&accountType==='vendor'&&!/^\+?[0-9]{10,15}$/.test(phone.trim())) return setError('Enter a valid phone number for vendor registration.');
+    if(mode==='register'&&phone.trim()&&!/^\+?[0-9]{10,15}$/.test(phone.trim())) return setError('Enter a valid phone number.');
     setBusy(true);setError('');
     try{
       await authService.sendEmailOtp({email:e,fullName:mode==='register'?name.trim():undefined});
@@ -69,14 +68,14 @@ export default function AuthScreen({onAuthenticated}) {
     if(!/^\d{6}$/.test(otp.trim())) return setError('Enter the 6-digit verification code.');
     setBusy(true);setError('');
     try{
-      console.log('[RideOnAuth][OTP_VERIFY_START]', JSON.stringify({ email: e, mode, accountType }));
+      console.log('[RideOnAuth][OTP_VERIFY_START]', JSON.stringify({ email: e, mode }));
       const session=await authService.verifyEmailOtp(e,otp.trim());
       console.log('[RideOnAuth][OTP_VERIFY_SUCCESS]', JSON.stringify({ hasAccessToken: Boolean(session?.access_token) }));
       let user;
       if(mode==='register'){
                 const completed=await authService.completeRegistration({
           accessToken:session.access_token,
-          accountType,
+          accountType:'customer',
           fullName:name.trim(),
           phone:phone.trim() || undefined,
         });
@@ -84,7 +83,7 @@ export default function AuthScreen({onAuthenticated}) {
       } else {
         user=await authService.currentUser();
       }
-      if(!user?.id||!['customer','vendor','delivery_staff'].includes(user.role)) throw new Error('We could not determine your RideOn account type.');
+      if(!user?.id||!['customer','admin','support','vendor','delivery_staff'].includes(user.role)) throw new Error('We could not determine your RideOn account type.');
       onAuthenticated({...user,token:session.access_token});
     }catch(x){setError(normalizeAuthError(x));}
     finally{setBusy(false);}
@@ -127,15 +126,6 @@ export default function AuthScreen({onAuthenticated}) {
           </View>
 
           {mode==='register'&&<>
-            <Text style={s.sectionTitle}>I am a</Text>
-            <View style={s.segment}>
-              <TouchableOpacity onPress={()=>setAccountType('customer')} style={[s.segmentItem,accountType==='customer'&&s.segmentItemActive]}>
-                <Text style={[s.segmentText,accountType==='customer'&&s.segmentTextActive]}>Customer</Text>
-              </TouchableOpacity>
-              <TouchableOpacity onPress={()=>setAccountType('vendor')} style={[s.segmentItem,accountType==='vendor'&&s.segmentItemActive]}>
-                <Text style={[s.segmentText,accountType==='vendor'&&s.segmentTextActive]}>Vendor</Text>
-              </TouchableOpacity>
-            </View>
             <Field ref={nameRef} label="Full name" value={name} onChangeText={setName} placeholder="Your full name" onFocus={()=>focusField(nameRef)} returnKeyType="next" onSubmitEditing={()=>focusField(phoneRef)}/>
             <Field ref={phoneRef} label="Phone number" value={phone} onChangeText={setPhone} placeholder="98765 43210" keyboardType="phone-pad" onFocus={()=>focusField(phoneRef)} returnKeyType="next" onSubmitEditing={()=>focusField(emailRef)}/>
           </>}

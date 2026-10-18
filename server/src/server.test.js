@@ -1300,6 +1300,30 @@ test('multi-vehicle checkout rolls back all staged bookings when a selected vehi
   await assert.rejects(()=>repository.createFleetOrder({customerId:customer.customer.id,vendorId:vendor.id,vehicleIds:[one.id,two.id],startAt:futureStart,endAt:futureEnd,delivery:false,address:'Self pickup'}),e=>e.code==='MULTI_VEHICLE_UNAVAILABLE');
 });
 
+test('customers see RideOn inventory and admins can review operations', async () => {
+  const owner=await register('+911234569201','Catalog Vendor');
+  const vendor=await repository.ensureVendorForCustomer(owner.customer.id);
+  await repository.createVendorVehicle(vendor.id,{type:'car',name:'Hidden Vendor Car',make:'Test',model:'H',year:2034,city:'Jaipur',dailyRate:900,securityDeposit:0,transmission:'Manual',fuel:'Petrol',seats:5,registrationNumber:'RJHIDE201',description:'',imageUrls:[],deliveryAvailable:true,active:true});
+  const created=await repository.createRideOnFleetVehicle({name:'Admin City Bike',city:'Jaipur',dailyRate:450,securityDeposit:1000,fleetVehicleClass:'bike',registrationNumber:'RJA201'},owner.customer.id);
+  const hidden=await request('/api/v1/vehicles?q=Hidden%20Vendor%20Car');
+  const hiddenPayload=await hidden.json();
+  assert.equal(hidden.status,200);
+  assert.equal(hiddenPayload.data.find(v=>v.name==='Hidden Vendor Car'),undefined);
+  const visible=await request('/api/v1/vehicles?q=Admin%20City%20Bike');
+  const visiblePayload=await visible.json();
+  assert.ok(visiblePayload.data.find(v=>String(v.id)===String(created.id)));
+  const customer=await legacyLogin('+911234569201');
+  const denied=await request('/api/v1/fleet-ops/overview',{headers:{authorization:'Bearer '+customer.accessToken}});
+  assert.equal(denied.status,403);
+  const adminToken=testAuth.sign({sub:owner.customer.id,role:'admin'});
+  const overview=await request('/api/v1/fleet-ops/overview',{headers:{authorization:'Bearer '+adminToken}});
+  assert.equal(overview.status,200);
+  const body=await overview.json();
+  assert.ok(body.overview.fleet.totalFleet>=1);
+  const car=await jsonRequest('/api/v1/fleet-ops/vehicles','POST',{name:'Admin City Car',fleetVehicleClass:'car',city:'Udaipur',dailyRate:1800,securityDeposit:2000},adminToken);
+  assert.equal(car.status,201);
+});
+
 test.after(async () => {
   try {
     if (server?.listening) {

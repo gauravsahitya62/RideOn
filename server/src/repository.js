@@ -106,6 +106,7 @@ export function createRepository({ databaseUrl, fleet }) {
       const cityValue = city?.trim().toLowerCase();
       const qValue = q?.trim().toLowerCase();
       return [...fleet, ...memory.vehicles.values()].filter((v) =>
+        !v.ownerId &&
         v.active !== false &&
         (!typeValue || typeValue === 'all' || String(v.type).toLowerCase() === typeValue) &&
         (!cityValue || String(v.city || '').trim().toLowerCase() === cityValue) &&
@@ -121,7 +122,7 @@ export function createRepository({ databaseUrl, fleet }) {
     // vehicles schema. Optional vendor metadata must never turn a valid
     // inventory row into a 503.
     const params = [];
-    const where = ['active = true'];
+    const where = ['active = true', 'owner_id is null'];
 
     if (type && type.toLowerCase() !== 'all') {
       params.push(type.toLowerCase());
@@ -2375,14 +2376,16 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
   };
 
   const validateFleetVehicleInput = (input={}) => {
-    const fleetVehicleClass=String(input.fleetVehicleClass||input.vehicleClass||'bike').toLowerCase();
+    const requested=String(input.fleetVehicleClass||input.vehicleClass||input.type||'bike').toLowerCase();
+    const fleetVehicleClass=requested==='scooter'?'scooter':'bike';
+    const type=requested==='car'?'car':'bike';
     const dailyRate=Number(input.dailyRate),deposit=Number(input.securityDeposit||0);
-    if(!['bike','scooter'].includes(fleetVehicleClass)) { const e=new Error('RideOn fleet currently supports bikes and scooters only.');e.code='INVALID_FLEET_VEHICLE';throw e; }
+    if(!['car','bike','scooter'].includes(requested)) { const e=new Error('Choose a car, bike, or scooter.');e.code='INVALID_FLEET_VEHICLE';throw e; }
     if(!String(input.name||'').trim()||!String(input.city||'').trim()||!Number.isFinite(dailyRate)||dailyRate<0||!Number.isFinite(deposit)||deposit<0){const e=new Error('Invalid fleet vehicle details.');e.code='INVALID_FLEET_VEHICLE';throw e;}
     if(input.registrationNumber!=null&&String(input.registrationNumber).trim().length>30){const e=new Error('Registration number is too long.');e.code='INVALID_FLEET_VEHICLE';throw e;}
     if(input.currentOdometer!=null&&(!Number.isInteger(Number(input.currentOdometer))||Number(input.currentOdometer)<0)){const e=new Error('Odometer must be a non-negative integer.');e.code='INVALID_FLEET_VEHICLE';throw e;}
     if(input.currentFuelBattery!=null&&(!Number.isFinite(Number(input.currentFuelBattery))||Number(input.currentFuelBattery)<0||Number(input.currentFuelBattery)>100)){const e=new Error('Fuel/battery level must be between 0 and 100.');e.code='INVALID_FLEET_VEHICLE';throw e;}
-    return {...input,type:'bike',fleetVehicleClass,dailyRate,securityDeposit};
+    return {...input,type,fleetVehicleClass,vehicleKind:requested,dailyRate,securityDeposit:deposit};
   };
 
   async function listRideOnFleet({q='',type='',brand='',model='',city='',minPrice=null,maxPrice=null,sort='recommended',limit=50,offset=0}={}) {
@@ -2395,22 +2398,23 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     const min=minPrice==null||minPrice===''?null:Number(minPrice);
     const max=maxPrice==null||maxPrice===''?null:Number(maxPrice);
     const sortValue=String(sort||'recommended').toLowerCase();
-    const classFilter=typeFilter==='scooter'?'scooter':typeFilter==='bike'?'bike':'';
+    const classFilter=['car','bike','scooter'].includes(typeFilter)?typeFilter:'';
     if(!useDatabase){
-      let rows=[...memory.vehicles.values(),...fleet].filter(v=>v.active!==false);
+      let rows=[...memory.vehicles.values(),...fleet].filter(v=>!v.ownerId&&v.active!==false);
       rows=rows.filter(v=>{
         const vehicleClass=String(v.fleetVehicleClass||v.vehicleClass||((/activa|access|scooty|scooter/i.test(String(v.name||'')+' '+String(v.model||'')))?'scooter':'bike')).toLowerCase();
         const sourceType=String(v.type||'').toLowerCase();
         const text=[v.name,v.make,v.model,v.variant,v.city].filter(Boolean).join(' ').toLowerCase();
         const price=Number(v.pricePerDay??v.dailyRate??0);
-        return (!query||text.includes(query))&&(!classFilter||vehicleClass===classFilter)&&sourceType!=='car'&&(!brandFilter||String(v.make||'').toLowerCase()===brandFilter)&&(!modelFilter||String(v.model||'').toLowerCase()===modelFilter)&&(!cityFilter||String(v.city||'').toLowerCase()===cityFilter)&&(min==null||price>=min)&&(max==null||price<=max)&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&v.maintenanceRequired!==true;
+        const kind=sourceType==='car'?'car':vehicleClass;
+        return (!query||text.includes(query))&&(!classFilter||kind===classFilter)&&(!brandFilter||String(v.make||'').toLowerCase()===brandFilter)&&(!modelFilter||String(v.model||'').toLowerCase()===modelFilter)&&(!cityFilter||String(v.city||'').toLowerCase()===cityFilter)&&(min==null||price>=min)&&(max==null||price<=max)&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='MAINTENANCE'&&String(v.operationalState||'AVAILABLE').toUpperCase()!=='INACTIVE'&&v.maintenanceRequired!==true;
       });
       if(sortValue==='price_asc')rows.sort((a,b)=>Number(a.pricePerDay??a.dailyRate)-Number(b.pricePerDay??b.dailyRate));else if(sortValue==='price_desc')rows.sort((a,b)=>Number(b.pricePerDay??b.dailyRate)-Number(a.pricePerDay??a.dailyRate));else rows.sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')));
       return rows.slice(safeOffset,safeOffset+safeLimit);
     }
-    const params=[];const where=["v.active=true","coalesce(v.type::text,'') <> 'car'","coalesce(v.fleet_vehicle_class,'bike') in ('bike','scooter')","coalesce(v.operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE')","coalesce(v.maintenance_required,false)=false"];
+    const params=[];const where=["v.active=true","v.owner_id is null","coalesce(v.operational_state,'AVAILABLE') not in ('MAINTENANCE','INACTIVE')","coalesce(v.maintenance_required,false)=false"];
     if(query){params.push('%'+query+'%');where.push("lower(coalesce(v.name,'') || ' ' || coalesce(v.make,'') || ' ' || coalesce(v.model,'') || ' ' || coalesce(v.variant,'')) like $"+params.length);}
-    if(classFilter){params.push(classFilter);where.push("lower(coalesce(v.fleet_vehicle_class,'bike'))=$"+params.length);}
+    if(classFilter==='car')where.push("v.type::text='car'");else if(classFilter){params.push(classFilter);where.push("lower(coalesce(v.fleet_vehicle_class,'bike'))=$"+params.length);}
     if(brandFilter){params.push(brandFilter);where.push("lower(coalesce(v.make,''))=$"+params.length);}
     if(modelFilter){params.push(modelFilter);where.push("lower(coalesce(v.model,''))=$"+params.length);}
     if(cityFilter){params.push(cityFilter);where.push("lower(trim(coalesce(v.city,'')))=lower(trim($"+params.length+"))");}
@@ -2444,8 +2448,8 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
   async function listRideOnFleetAdmin({q='',type='',city='',status='',registration='',model='',limit=50,offset=0}={}) {
     const safeLimit=Math.max(1,Math.min(100,Number(limit)||50)),safeOffset=Math.max(0,Number(offset)||0);
     const typeFilter=String(type||'').trim().toLowerCase(),statusFilter=String(status||'').trim().toUpperCase();
-    if(!useDatabase){ let rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car'); rows=rows.filter(v=>(!typeFilter||String(v.fleetVehicleClass||v.vehicleClass||'bike').toLowerCase()===typeFilter)&&(!statusFilter||String(v.operationalState||'AVAILABLE').toUpperCase()===statusFilter)&&(!city||String(v.city||'').toLowerCase()===String(city).toLowerCase())&&(!registration||String(v.registrationNumber||'').toLowerCase().includes(String(registration).toLowerCase()))&&(!model||String(v.model||'').toLowerCase().includes(String(model).toLowerCase()))&&(!q||[v.name,v.make,v.model,v.variant,v.city,v.registrationNumber].filter(Boolean).join(' ').toLowerCase().includes(String(q).toLowerCase()))); return rows.slice(safeOffset,safeOffset+safeLimit); }
-    const params=[],where=["v.type::text<>'car'"];
+    if(!useDatabase){ let rows=[...memory.vehicles.values(),...fleet].filter(v=>!v.ownerId); rows=rows.filter(v=>(!typeFilter||String(v.vehicleKind||v.fleetVehicleClass||v.type||'bike').toLowerCase()===typeFilter)&&(!statusFilter||String(v.operationalState||'AVAILABLE').toUpperCase()===statusFilter)&&(!city||String(v.city||'').toLowerCase()===String(city).toLowerCase())&&(!registration||String(v.registrationNumber||'').toLowerCase().includes(String(registration).toLowerCase()))&&(!model||String(v.model||'').toLowerCase().includes(String(model).toLowerCase()))&&(!q||[v.name,v.make,v.model,v.variant,v.city,v.registrationNumber].filter(Boolean).join(' ').toLowerCase().includes(String(q).toLowerCase()))); return rows.slice(safeOffset,safeOffset+safeLimit); }
+    const params=[],where=['v.owner_id is null'];
     if(typeFilter){params.push(typeFilter);where.push('lower(coalesce(v.fleet_vehicle_class,\'bike\'))=$'+params.length);}
     if(statusFilter){if(!FLEET_STATES.has(statusFilter)){const e=new Error('Invalid fleet status.');e.code='INVALID_FLEET_STATE';throw e;}params.push(statusFilter);where.push('v.operational_state=$'+params.length);}
     if(city){params.push(String(city));where.push('lower(trim(v.city))=lower(trim($'+params.length+'))');}
@@ -2458,15 +2462,16 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
   }
 
   async function getRideOnFleetDashboard() {
-    if(!useDatabase){const rows=[...memory.vehicles.values(),...fleet].filter(v=>String(v.type||'').toLowerCase()!=='car');const count=s=>rows.filter(v=>String(v.operationalState||'AVAILABLE').toUpperCase()===s).length;return {totalFleet:rows.length,available:count('AVAILABLE'),reserved:count('RESERVED'),rented:count('RENTED'),maintenance:count('MAINTENANCE'),inactive:count('INACTIVE')};}
-    const r=await pool.query("select count(*)::int total, count(*) filter(where operational_state='AVAILABLE')::int available, count(*) filter(where operational_state='RESERVED')::int reserved, count(*) filter(where operational_state='RENTED')::int rented, count(*) filter(where operational_state='MAINTENANCE')::int maintenance, count(*) filter(where operational_state='INACTIVE' or active=false)::int inactive from vehicles where type::text<>'car' and coalesce(fleet_vehicle_class,'bike') in ('bike','scooter')");
+    if(!useDatabase){const rows=[...memory.vehicles.values(),...fleet].filter(v=>!v.ownerId);const count=s=>rows.filter(v=>String(v.operationalState||'AVAILABLE').toUpperCase()===s).length;return {totalFleet:rows.length,available:count('AVAILABLE'),reserved:count('RESERVED'),rented:count('RENTED'),maintenance:count('MAINTENANCE'),inactive:count('INACTIVE')};}
+    const r=await pool.query("select count(*)::int total, count(*) filter(where operational_state='AVAILABLE')::int available, count(*) filter(where operational_state='RESERVED')::int reserved, count(*) filter(where operational_state='RENTED')::int rented, count(*) filter(where operational_state='MAINTENANCE')::int maintenance, count(*) filter(where operational_state='INACTIVE' or active=false)::int inactive from vehicles where owner_id is null");
     const x=r.rows[0]||{};return {totalFleet:Number(x.total||0),available:Number(x.available||0),reserved:Number(x.reserved||0),rented:Number(x.rented||0),maintenance:Number(x.maintenance||0),inactive:Number(x.inactive||0)};
   }
 
   async function createRideOnFleetVehicle(input,actorUserId) {
     const data=validateFleetVehicleInput(input); const id=crypto.randomUUID();
     if(!useDatabase){const reg=String(data.registrationNumber||'').trim().toLowerCase();if(reg&&[...memory.vehicles.values()].some(v=>String(v.registrationNumber||'').trim().toLowerCase()===reg))throw Object.assign(new Error('A vehicle with this registration number already exists.'),{code:'VEHICLE_EXISTS'});const v={id,ownerId:null,...data,active:data.active!==false,operationalState:'AVAILABLE',maintenanceRequired:false,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};memory.vehicles.set(id,v);return v;}
-    try{const q=await pool.query('insert into vehicles(id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,variant,color,pickup_location,pickup_latitude,pickup_longitude,service_area,fleet_vehicle_class,operational_state,maintenance_required,current_odometer,current_fuel_battery,active,updated_at) values($1,null,\'bike\',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,\'AVAILABLE\',false,$25,$26,$27,now()) returning *',[id,data.name,data.make||null,data.model||null,data.year||null,data.city,Math.round(data.dailyRate*100),Math.round(data.securityDeposit*100),data.transmission||null,data.fuel||null,data.seats||null,data.registrationNumber||null,data.description||null,data.imageUrls||[],data.deliveryAvailable!==false,data.variant||null,data.color||null,data.pickupLocation||null,data.pickupLatitude??null,data.pickupLongitude??null,data.serviceArea||{},data.fleetVehicleClass,data.currentOdometer??null,data.currentFuelBattery??null,data.active!==false]);await pool.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,next_state,details) values($1,$2,\'vehicle_created\',\'AVAILABLE\',$3)',[id,actorUserId||null,JSON.stringify({registrationNumber:data.registrationNumber||null})]);return mapManagedVehicle(q.rows[0]);}catch(error){if(error.code==='23505')throw Object.assign(new Error('A vehicle with this registration number already exists.'),{code:'VEHICLE_EXISTS'});throw error;}
+    const vehicleType=data.type==='car'?'car':'bike';
+    try{const q=await pool.query('insert into vehicles(id,owner_id,type,name,make,model,year,city,daily_rate_paise,security_deposit_paise,transmission,fuel,seats,registration_number,description,image_urls,delivery_available,variant,color,pickup_location,pickup_latitude,pickup_longitude,service_area,fleet_vehicle_class,operational_state,maintenance_required,current_odometer,current_fuel_battery,active,updated_at) values($1,null,\''+vehicleType+'\',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,\'AVAILABLE\',false,$25,$26,$27,now()) returning *',[id,data.name,data.make||null,data.model||null,data.year||null,data.city,Math.round(data.dailyRate*100),Math.round(data.securityDeposit*100),data.transmission||null,data.fuel||null,data.seats||null,data.registrationNumber||null,data.description||null,data.imageUrls||[],data.deliveryAvailable!==false,data.variant||null,data.color||null,data.pickupLocation||null,data.pickupLatitude??null,data.pickupLongitude??null,data.serviceArea||{},data.fleetVehicleClass,data.currentOdometer??null,data.currentFuelBattery??null,data.active!==false]);await pool.query('insert into fleet_operation_audit(vehicle_id,actor_user_id,action,next_state,details) values($1,$2,\'vehicle_created\',\'AVAILABLE\',$3)',[id,actorUserId||null,JSON.stringify({registrationNumber:data.registrationNumber||null})]);return mapManagedVehicle(q.rows[0]);}catch(error){if(error.code==='23505')throw Object.assign(new Error('A vehicle with this registration number already exists.'),{code:'VEHICLE_EXISTS'});throw error;}
   }
 
   async function updateRideOnFleetVehicle(vehicleId,input,actorUserId) {
@@ -2996,5 +3001,127 @@ async function listVendorCustomerReviewsForBooking({vendorId,bookingId,limit=10,
     } finally { client.release(); }
   }
 
-  return {health,close,settleFleetSecurityDeposit,applyDepositRefundEvent,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,setPaymentProviderReference,updatePaymentCheckout,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,setKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports,listVendorCustomerReviewsForBooking,createReview,getReviewStatus,updateReview,listReviews,listReviewsReceived};
+  function adminBookingView(booking, extra={}) {
+    return {
+      id:String(booking.id),
+      customerId:booking.customerId?String(booking.customerId):undefined,
+      customerName:extra.customerName||booking.customerName||'Customer',
+      customerPhone:extra.customerPhone||booking.customerPhone||'',
+      vehicleId:booking.vehicleId?String(booking.vehicleId):undefined,
+      vehicleName:extra.vehicleName||booking.vehicle?.name||booking.vehicleName||'Vehicle',
+      vehicleType:extra.vehicleType||booking.vehicle?.type||booking.vehicleType||'',
+      startAt:booking.startAt,
+      endAt:booking.endAt,
+      status:booking.status,
+      paymentStatus:extra.paymentStatus||booking.paymentStatus,
+      amount:Number(extra.amount??booking.pricing?.total??booking.total??0),
+      delivery:Boolean(booking.delivery),
+      address:booking.address||'',
+      createdAt:booking.createdAt,
+    };
+  }
+
+  async function getAdminOverview() {
+    const fleetStats=await getRideOnFleetDashboard();
+    if(!useDatabase){
+      const bookings=[...memory.bookings.values()];
+      const payments=[...memory.payments.values()];
+      const customers=[...memory.customers.values()];
+      const count=status=>bookings.filter(b=>b.status===status).length;
+      const sum=predicate=>payments.filter(predicate).reduce((total,payment)=>total+Number(payment.amountPaise||0),0);
+      return {
+        fleet:fleetStats,
+        bookings:{total:bookings.length,requested:count('requested'),confirmed:count('confirmed'),inProgress:count('in_progress'),completed:count('completed'),cancelled:bookings.filter(b=>['cancelled','rejected'].includes(b.status)).length},
+        payments:{count:payments.length,pendingPaise:sum(p=>p.status==='pending'),paidPaise:sum(p=>['paid','held','settled','settlement_pending'].includes(p.status)),refundedPaise:sum(p=>['refunded','refund_pending'].includes(p.status))},
+        customers:{total:customers.length,verified:customers.filter(c=>c.kycStatus==='VERIFIED').length,pending:customers.filter(c=>c.kycStatus==='PENDING').length},
+      };
+    }
+    const bookings=await pool.query("select count(*)::int total, count(*) filter(where status='requested')::int requested, count(*) filter(where status='confirmed')::int confirmed, count(*) filter(where status='in_progress')::int in_progress, count(*) filter(where status='completed')::int completed, count(*) filter(where status in ('cancelled','rejected'))::int cancelled from bookings");
+    const payments=await pool.query("select count(*)::int count, coalesce(sum(amount_paise) filter(where status='pending'),0)::bigint pending, coalesce(sum(amount_paise) filter(where status in ('paid','held','settled','settlement_pending')),0)::bigint paid, coalesce(sum(amount_paise) filter(where status in ('refunded','refund_pending')),0)::bigint refunded from payments");
+    const customers=await pool.query("select count(*)::int total, count(*) filter(where kyc_status='VERIFIED')::int verified, count(*) filter(where kyc_status='PENDING')::int pending from customers");
+    const b=bookings.rows[0]||{}, p=payments.rows[0]||{}, c=customers.rows[0]||{};
+    return {
+      fleet:fleetStats,
+      bookings:{total:Number(b.total||0),requested:Number(b.requested||0),confirmed:Number(b.confirmed||0),inProgress:Number(b.in_progress||0),completed:Number(b.completed||0),cancelled:Number(b.cancelled||0)},
+      payments:{count:Number(p.count||0),pendingPaise:Number(p.pending||0),paidPaise:Number(p.paid||0),refundedPaise:Number(p.refunded||0)},
+      customers:{total:Number(c.total||0),verified:Number(c.verified||0),pending:Number(c.pending||0)},
+    };
+  }
+
+  async function listAdminBookings({limit=50}={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50));
+    if(!useDatabase){
+      return [...memory.bookings.values()].sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0)).slice(0,safeLimit).map(booking=>{
+        const customer=memory.customers.get(String(booking.customerId));
+        const vehicle=memory.vehicles.get(String(booking.vehicleId))||fleet.find(v=>String(v.id)===String(booking.vehicleId));
+        const payment=[...memory.payments.values()].find(item=>String(item.bookingId)===String(booking.id));
+        return adminBookingView(booking,{customerName:customer?.fullName,customerPhone:customer?.phone,vehicleName:vehicle?.name,vehicleType:vehicle?.type,paymentStatus:payment?.status||booking.paymentStatus,amount:booking.pricing?.total});
+      });
+    }
+    const {rows}=await pool.query(`select b.id,b.customer_id,b.vehicle_id,b.start_at,b.end_at,b.status,b.payment_status,b.total_paise,b.delivery_required,b.delivery_address,b.created_at,c.full_name,c.phone,v.name as vehicle_name,v.type as vehicle_type from bookings b join customers c on c.id=b.customer_id left join vehicles v on v.id=b.vehicle_id order by b.created_at desc limit $1`,[safeLimit]);
+    return rows.map(row=>adminBookingView({id:row.id,customerId:row.customer_id,vehicleId:row.vehicle_id,startAt:iso(row.start_at),endAt:iso(row.end_at),status:row.status,paymentStatus:row.payment_status,delivery:row.delivery_required,address:row.delivery_address,createdAt:iso(row.created_at),pricing:{total:Number(row.total_paise||0)/100}},{customerName:row.full_name,customerPhone:row.phone,vehicleName:row.vehicle_name,vehicleType:row.vehicle_type}));
+  }
+
+  async function listAdminPayments({limit=50}={}) {
+    const safeLimit=Math.max(1,Math.min(100,Number(limit)||50));
+    if(!useDatabase){
+      return [...memory.payments.values()].sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0)).slice(0,safeLimit).map(payment=>{
+        const booking=memory.bookings.get(String(payment.bookingId));
+        const customer=booking?memory.customers.get(String(booking.customerId)):null;
+        return {id:String(payment.id),bookingId:String(payment.bookingId),customerName:customer?.fullName||'Customer',amount:Number(payment.amountPaise||0)/100,currency:'INR',status:payment.status,provider:payment.provider,createdAt:payment.createdAt};
+      });
+    }
+    const {rows}=await pool.query(`select p.id,p.booking_id,p.amount_paise,p.currency,p.status,p.provider,p.created_at,c.full_name from payments p join bookings b on b.id=p.booking_id join customers c on c.id=b.customer_id order by p.created_at desc limit $1`,[safeLimit]);
+    return rows.map(row=>({id:String(row.id),bookingId:String(row.booking_id),customerName:row.full_name,amount:Number(row.amount_paise||0)/100,currency:row.currency||'INR',status:row.status,provider:row.provider,createdAt:iso(row.created_at)}));
+  }
+
+  async function listAdminCustomers({limit=100}={}) {
+    const safeLimit=Math.max(1,Math.min(200,Number(limit)||100));
+    if(!useDatabase){
+      return [...memory.customers.values()].slice(0,safeLimit).map(customer=>({id:String(customer.id),fullName:customer.fullName,email:customer.email||'',phone:customer.phone||'',role:customer.role||'customer',kycStatus:customer.kycStatus||'UNVERIFIED'}));
+    }
+    const {rows}=await pool.query('select id,full_name,email,phone,role,kyc_status from customers order by created_at desc limit $1',[safeLimit]);
+    return rows.map(row=>({id:String(row.id),fullName:row.full_name,email:row.email||'',phone:row.phone||'',role:row.role||'customer',kycStatus:row.kyc_status||'UNVERIFIED'}));
+  }
+
+  async function updateAdminBookingStatus(bookingId,nextStatus,note='',actorUserId) {
+    const allowed={requested:['confirmed','rejected'],confirmed:['in_progress','cancelled'],in_progress:['completed'],rejected:[],completed:[],cancelled:[]};
+    if(!allowed[nextStatus]){const e=new Error('Invalid booking status.');e.code='INVALID_BOOKING_STATUS';throw e;}
+    if(!useDatabase){
+      const booking=memory.bookings.get(String(bookingId));
+      if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      if(!allowed[booking.status]?.includes(nextStatus)){const e=new Error('That booking status change is not allowed.');e.code='INVALID_BOOKING_TRANSITION';throw e;}
+      if(nextStatus==='rejected'&&!String(note||'').trim()){const e=new Error('A rejection reason is required.');e.code='REJECTION_REASON_REQUIRED';throw e;}
+      if(nextStatus==='confirmed'&&!['paid','held','settlement_pending','settled'].includes(String(booking.paymentStatus))){const e=new Error('Payment must be confirmed before this booking can be accepted.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;}
+      booking.status=nextStatus;
+      if(nextStatus==='rejected'){booking.cancellationReason=String(note).trim();if(['paid','held','settlement_pending','settled'].includes(String(booking.paymentStatus)))booking.paymentStatus='refund_pending';}
+      if(nextStatus==='completed'&&booking.delivery)booking.deliveryStatus='delivered';
+      if(nextStatus==='completed'&&Number(booking.pricing?.securityDeposit||0)>0)memory.securityDeposits.set(String(booking.id),{bookingId:String(booking.id),customerId:booking.customerId,vendorId:null,originalAmount:Number(booking.pricing.securityDeposit),refundableAmount:Number(booking.pricing.securityDeposit),approvedDeduction:0,status:'review_required'});
+      booking.updatedAt=new Date().toISOString();
+      return adminBookingView(booking);
+    }
+    const client=await pool.connect();
+    try{
+      await client.query('begin');
+      const {rows}=await client.query('select b.*, v.name as v_name, v.type as v_type, v.owner_id from bookings b join vehicles v on v.id=b.vehicle_id where b.id=$1 for update',[bookingId]);
+      if(!rows[0]){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}
+      const current=rows[0].status;
+      if(!allowed[current]?.includes(nextStatus)){const e=new Error('That booking status change is not allowed.');e.code='INVALID_BOOKING_TRANSITION';throw e;}
+      if(nextStatus==='rejected'&&!String(note||'').trim()){const e=new Error('A rejection reason is required.');e.code='REJECTION_REASON_REQUIRED';throw e;}
+      if(nextStatus==='confirmed'&&!['paid','held','settlement_pending','settled'].includes(String(rows[0].payment_status))){const e=new Error('Payment must be confirmed before this booking can be accepted.');e.code='PAYMENT_REQUIRED_FOR_ACCEPTANCE';throw e;}
+      const shouldRefund=['paid','held','settlement_pending','settled'].includes(String(rows[0].payment_status));
+      const nextPaymentStatus=nextStatus==='rejected'&&shouldRefund?'refund_pending':rows[0].payment_status;
+      const cancellationReason=nextStatus==='rejected'?String(note).trim():rows[0].cancellation_reason||null;
+      const {rows:updated}=await client.query("update bookings set status=$2,payment_status=$3,cancellation_reason=$4,cancelled_at=case when $2='rejected' then now() else cancelled_at end,delivery_status=case when $2='completed' and delivery_required then 'delivered' else delivery_status end,updated_at=now() where id=$1 returning *",[bookingId,nextStatus,nextPaymentStatus,cancellationReason]);
+      if(nextPaymentStatus==='refund_pending')await client.query("update payments set status='refund_pending',updated_at=now() where booking_id=$1 and status in ('paid','held','settlement_pending','settled')",[bookingId]);
+      if(nextStatus==='completed'&&Number(rows[0].security_deposit_paise||0)>0){
+        await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$4,$4,'review_required') on conflict (booking_id) do update set status='review_required',updated_at=now()`,[bookingId,rows[0].customer_id,rows[0].owner_id,Number(rows[0].security_deposit_paise)]);
+      }
+      await client.query('insert into booking_status_events(booking_id,previous_status,next_status,actor_type,actor_id,note) values($1,$2,$3,\'admin\',$4,$5)',[bookingId,current,nextStatus,actorUserId||null,note||null]);
+      await client.query('commit');
+      return adminBookingView({...mapBooking(updated[0]),vehicle:{name:rows[0].v_name,type:rows[0].v_type}},{vehicleName:rows[0].v_name,vehicleType:rows[0].v_type});
+    }catch(error){try{await client.query('rollback');}catch{} throw error;}finally{client.release();}
+  }
+
+  return {health,close,settleFleetSecurityDeposit,getAdminOverview,listAdminBookings,listAdminPayments,listAdminCustomers,updateAdminBookingStatus,applyDepositRefundEvent,getCancellationPreview,listVehicles,listLocations,listRideOnFleet,getRideOnFleetVehicle,listRideOnFleetAdmin,getRideOnFleetDashboard,createRideOnFleetVehicle,updateRideOnFleetVehicle,setRideOnFleetVehicleState,recordFleetMaintenance,recordFleetInspection,assignFleetDeliveryStaff,listDeliveryJobs,acceptDeliveryJob,startDeliveryForStaff,getActiveTrackingSessionForStaff,updateDeliveryLocationForStaff,updateTrackingRouteForStaff,completeDeliveryForStaff,requestPickupForStaff,startPickupForStaff,completePickupForStaff,getVehicle,createCustomer,createOrLinkCustomerFromSupabase,findCustomerBySupabaseUserId,findCustomerByPhone,findCustomerByEmail,findCustomerById,findVendorByCustomerId,ensureVendorForCustomer,updateVendor,updateVendorServiceLocation,getVendorServiceLocation,listMarketplaceVendors,getPublicVendorProfile,listPublicVendorVehicles,quoteMultiVehicle,createFleetOrder,loadFleetOrderTx,getFleetOrder,listCustomerFleetOrders,listVendorVehicles,getVendorVehicle,createVendorVehicle,updateVendorVehicle,deactivateVendorVehicle,listVendorBookings,listVendorFleetOrders,updateFleetOrderStatus,getVendorBooking,updateVendorBookingStatus,checkVehicleAvailability,getVehicleState,isVehicleUnavailable,createBooking,getBooking,updateBookingRouteData,startDelivery,updateDeliveryLocation,getActiveTrackingSession,updateTrackingRoute,getTrackingForCustomer,completeDelivery,abortDelivery,listCustomerBookings,cancelBooking,markPaymentRefundPending,claimRefundRequest,markRefundRetryable,completePaymentRefund,applyPaymentEvent,withPaymentLock,findPaymentById,findPaymentByProviderOrder,findPaymentByBooking,createOrGetPaymentOrder,setPaymentProviderReference,updatePaymentCheckout,createFleetOrderPayment,submitPaymentReference,verifyPayment,refundPayment,createOtp,consumeLatestOtp,incrementOtpAttempt,recordSecurityDepositInspection,seedMemoryVehicles,createSupportTicket,listMySupportTickets,getSupportTicket,listSupportMessages,addSupportMessage,closeSupportTicket,reopenSupportTicket,listSupportTickets,assignSupportTicket,updateSupportTicketStatus,resolveSupportTicket,getKycStatus,setKycStatus,createKycVerification,getKycVerification,findKycVerificationById,findKycVerificationByProviderReference,findKycVerificationByProviderEvent,isKycBlacklisted,addKycBlacklist,applyKycVerificationResult,listConditionEvidence,addConditionEvidence,upsertConditionReport,listConditionReports,listVendorCustomerReviewsForBooking,createReview,getReviewStatus,updateReview,listReviews,listReviewsReceived};
 }

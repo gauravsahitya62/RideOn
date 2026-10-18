@@ -3,8 +3,8 @@ import { ActivityIndicator, SafeAreaView, StyleSheet, Text, View } from 'react-n
 import { authService } from './authService';
 import AuthScreen from './AuthScreen';
 import RideOnApp from '../screens/RideOnApp';
-import VendorPortalReady from '../screens/VendorPortalReady';
-import DeliveryStaffPortal from '../screens/DeliveryStaffPortal';
+import AdminEntry from '../screens/AdminEntry';
+import RetiredRole from '../screens/RetiredRole';
 
 export default function AuthGate() {
   const [status, setStatus] = useState('loading');
@@ -30,9 +30,9 @@ export default function AuthGate() {
 
   if (status === 'loading') return <LoadingScreen />;
   if (status === 'unauthenticated') return <AuthScreen onAuthenticated={handleAuthenticated} />;
-  if (!user || !['customer', 'vendor', 'delivery_staff'].includes(user.role)) return <AuthScreen onAuthenticated={handleAuthenticated} />;
-  if (user.role === 'vendor') return <VendorPortalReady user={user} onLogout={signOut} />;
-  if (user.role === 'delivery_staff') return <DeliveryStaffPortal authenticatedUser={user} onLogout={signOut} />;
+  if (user.role === 'vendor' || user.role === 'delivery_staff') return <RetiredRole onLogout={signOut} />;
+  if (user.role === 'admin' || user.role === 'support') return <AdminEntry user={user} onLogout={signOut} />;
+  if (user.role !== 'customer') return <AuthScreen onAuthenticated={handleAuthenticated} />;
   return <RideOnApp authenticatedUser={user} onLogout={signOut} />;
 }
 

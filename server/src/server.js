@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
 import { createServer } from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -42,6 +44,9 @@ app.use((req, res, next) => {
 });
 // Render terminates TLS and forwards requests through its proxy. Trust exactly one proxy hop in production so\n// express-rate-limit can safely resolve the client address from X-Forwarded-For.\napp.set('trust proxy', process.env.NODE_ENV === 'production' ? 1 : (process.env.TRUST_PROXY === 'true' ? 1 : false));
 app.use(helmet());
+const adminDir=path.join(path.dirname(fileURLToPath(import.meta.url)),'../public/admin');
+app.use('/admin',(req,res,next)=>{res.set('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' https: data:; base-uri 'none'; form-action 'self'");next();});
+app.use('/admin',express.static(adminDir,{index:'index.html'}));
 app.disable('x-powered-by');
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || '*')
   .split(',')
@@ -676,10 +681,10 @@ const requireDeliveryStaff = requireRole('delivery_staff');
 
 const fleetVehicleOpsSchema=z.object({
   name:z.string().trim().min(2).max(160), make:z.string().trim().max(80).optional().default(''), model:z.string().trim().max(100).optional().default(''),
-  variant:z.string().trim().max(100).optional().default(''), type:z.literal('bike').default('bike'), fleetVehicleClass:z.enum(['bike','scooter']),
+  variant:z.string().trim().max(100).optional().default(''), type:z.enum(['car','bike']).optional(), fleetVehicleClass:z.enum(['car','bike','scooter']),
   year:z.number().int().min(1980).max(new Date().getFullYear()+1).nullable().optional(), city:z.string().trim().min(2).max(100),
   dailyRate:z.number().min(0), securityDeposit:z.number().min(0).default(0), transmission:z.string().trim().max(30).optional().default(''),
-  fuel:z.string().trim().max(30).optional().default(''), seats:z.number().int().min(1).max(4).nullable().optional(), color:z.string().trim().max(40).optional().default(''),
+  fuel:z.string().trim().max(30).optional().default(''), seats:z.number().int().min(1).max(8).nullable().optional(), color:z.string().trim().max(40).optional().default(''),
   registrationNumber:z.string().trim().max(30).optional().default(''), description:z.string().trim().max(2000).optional().default(''), imageUrls:z.array(z.string().url()).max(12).optional().default([]),
   deliveryAvailable:z.boolean().default(true), pickupLocation:z.string().trim().max(300).optional().default(''), pickupLatitude:z.coerce.number().min(-90).max(90).nullable().optional(),
   pickupLongitude:z.coerce.number().min(-180).max(180).nullable().optional(), serviceArea:z.record(z.any()).optional().default({}),
@@ -687,6 +692,10 @@ const fleetVehicleOpsSchema=z.object({
 });
 
 app.get('/api/v1/fleet-ops/dashboard',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{try{res.json({dashboard:await repository.getRideOnFleetDashboard()});}catch(error){res.status(503).json({error:{code:'FLEET_OPS_UNAVAILABLE',message:'Fleet operations dashboard is temporarily unavailable.'}});}});
+app.get('/api/v1/fleet-ops/overview',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{try{res.json({overview:await repository.getAdminOverview()});}catch(error){res.status(503).json({error:{code:'FLEET_OPS_UNAVAILABLE',message:'The admin overview is temporarily unavailable.'}});}});
+app.get('/api/v1/fleet-ops/payments',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const paymentsList=await repository.listAdminPayments({limit:req.query.limit});res.json({payments:paymentsList,data:paymentsList});}catch(error){res.status(503).json({error:{code:'PAYMENTS_UNAVAILABLE',message:'Payments are temporarily unavailable.'}});}});
+app.get('/api/v1/fleet-ops/customers',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const customers=await repository.listAdminCustomers({limit:req.query.limit});res.json({customers,data:customers});}catch(error){res.status(503).json({error:{code:'CUSTOMERS_UNAVAILABLE',message:'Customers are temporarily unavailable.'}});}});
+app.post('/api/v1/fleet-ops/bookings/:id/status',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({status:z.enum(['confirmed','rejected','cancelled','in_progress','completed']),note:z.string().trim().max(500).optional().default('')}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'INVALID_BOOKING_STATUS',message:'Choose a valid booking status.'}});try{const booking=await repository.updateAdminBookingStatus(req.params.id,p.data.status,p.data.note,req.user.id);res.json({booking});}catch(error){const map={BOOKING_NOT_FOUND:404,INVALID_BOOKING_STATUS:400,INVALID_BOOKING_TRANSITION:409,PAYMENT_REQUIRED_FOR_ACCEPTANCE:409,REJECTION_REASON_REQUIRED:400};res.status(map[error?.code]||503).json({error:{code:error?.code||'BOOKING_STATUS_FAILED',message:error?.message||'The booking could not be updated.'}});}});
 app.get('/api/v1/fleet-ops/vehicles',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const vehicles=await repository.listRideOnFleetAdmin({q:req.query.q,type:req.query.type,city:req.query.city,status:req.query.status,registration:req.query.registration,model:req.query.model,limit:req.query.limit,offset:req.query.offset});res.json({vehicles,data:vehicles,meta:{count:vehicles.length}});}catch(error){res.status(400).json({error:{code:error?.code||'FLEET_LIST_FAILED',message:error?.message||'Could not load fleet.'}});}});
 app.post('/api/v1/fleet-ops/vehicles',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=fleetVehicleOpsSchema.safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid fleet vehicle details.',details:p.error.flatten()}});try{const v=await repository.createRideOnFleetVehicle(p.data,req.user.id);res.status(201).json({vehicle:v,data:v});}catch(error){res.status(error?.code==='VEHICLE_EXISTS'?409:400).json({error:{code:error?.code||'INVALID_FLEET_VEHICLE',message:error?.message||'Could not create fleet vehicle.'}});}});
 app.get('/api/v1/fleet-ops/vehicles/:id',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const v=(await repository.listRideOnFleetAdmin({q:req.params.id,limit:100})).find(x=>String(x.id)===String(req.params.id));if(!v)return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Fleet vehicle not found.'}});res.json({vehicle:v});}catch(error){res.status(503).json({error:{code:'FLEET_VEHICLE_UNAVAILABLE',message:'Fleet vehicle is temporarily unavailable.'}});}});
@@ -787,7 +796,7 @@ app.post('/api/v1/fleet-ops/bookings/:id/handover',supabaseRequireAuth,requireFl
 app.post('/api/v1/bookings/:id/return-request',supabaseRequireAuth,requireCustomer,async(req,res)=>{const p=z.object({returnLocation:z.string().trim().max(300).nullable().optional(),notes:z.string().trim().max(2000).nullable().optional()}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid return request.'}});try{const booking=await repository.requestRentalReturn({bookingId:req.params.id,customerId:req.user.id,...p.data});res.json({booking});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'RETURN_NOT_ALLOWED',message:error?.message||'Return cannot be requested for this rental.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/return',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({returnLocation:z.string().trim().max(300).nullable().optional(),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),returnedCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),notes:z.string().max(2000).optional(),evidencePhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid return details.',details:p.error.flatten()}});try{const booking=await repository.recordRentalReturn({bookingId:req.params.id,staffUserId:req.user.id,...p.data});res.json({booking});}catch(error){res.status(error?.code==='BOOKING_NOT_FOUND'?404:409).json({error:{code:error?.code||'RETURN_FAILED',message:error?.message||'Vehicle return could not be recorded.'}});}});
 app.post('/api/v1/fleet-ops/rentals/overdue/check',supabaseRequireAuth,requireFleetOps,async(_req,res)=>{try{const bookings=await repository.markOverdueRentals();res.json({bookings,count:bookings.length});}catch(error){res.status(503).json({error:{code:'OVERDUE_CHECK_FAILED',message:'Overdue rentals could not be checked.'}});}});
-app.get('/api/v1/fleet-ops/bookings',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const bookings=await repository.getFleetBookingOperations({limit:req.query.limit});res.json({bookings,data:bookings});}catch(error){res.status(503).json({error:{code:'FLEET_OPERATIONS_UNAVAILABLE',message:'Rental operations are temporarily unavailable.'}});}});
+app.get('/api/v1/fleet-ops/bookings',supabaseRequireAuth,requireFleetOps,async(req,res)=>{try{const bookings=await repository.listAdminBookings({limit:req.query.limit});res.json({bookings,data:bookings});}catch(error){res.status(503).json({error:{code:'FLEET_OPERATIONS_UNAVAILABLE',message:'Rental operations are temporarily unavailable.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/inspection',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({vehicleId:z.string().min(1).max(64),inspectionType:z.enum(['pickup','return','maintenance','routine']).default('return'),odometer:z.number().int().min(0).nullable().optional(),fuelBattery:z.number().min(0).max(100).nullable().optional(),exteriorCondition:z.string().max(2000).optional(),damageNotes:z.string().max(2000).optional(),inspectionStatus:z.enum(['pending','passed','failed','damage_review']).default('passed'),conditionPhotos:z.array(z.string().url()).max(12).optional().default([])}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid inspection details.',details:p.error.flatten()}});try{const result=await repository.recordFleetInspection({bookingId:req.params.id,...p.data,actorUserId:req.user.id});res.json(result);}catch(error){res.status(409).json({error:{code:error?.code||'INSPECTION_FAILED',message:error?.message||'Inspection could not be completed.'}});}});
 app.post('/api/v1/fleet-ops/bookings/:id/deposit/settle',supabaseRequireAuth,requireFleetOps,async(req,res)=>{const p=z.object({deductionPaise:z.number().int().min(0).default(0),reason:z.string().max(2000).optional().default(''),evidenceReference:z.string().max(500).optional().default('')}).safeParse(req.body||{});if(!p.success)return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Invalid deposit settlement details.',details:p.error.flatten()}});try{const bookingId=req.params.id;const result=await repository.withPaymentLock('security-deposit:'+bookingId,async()=>{const booking=await repository.getBooking(bookingId,req.user.id);if(!booking){const e=new Error('Booking not found.');e.code='BOOKING_NOT_FOUND';throw e;}const originalPaise=Math.round(Number(booking.pricing?.securityDeposit||0)*100);if(p.data.deductionPaise>originalPaise){const e=new Error('Deposit deduction exceeds the collected deposit.');e.code='DEPOSIT_DEDUCTION_INVALID';throw e;}const refundablePaise=originalPaise-p.data.deductionPaise;let refundReference='';if(refundablePaise>0){const payment=await repository.findPaymentByBooking(bookingId);if(!payment?.providerOrderId){const e=new Error('The original payment order could not be found for the security deposit refund.');e.code='REFUND_PROVIDER_PAYMENT_NOT_FOUND';throw e;}const refund=await payments.refundPayment({amountPaise:refundablePaise,providerOrderId:payment.providerOrderId,idempotencyKey:'security_deposit:'+bookingId+':'+refundablePaise});if(!refund?.confirmed){const e=new Error('Security deposit refund is pending provider confirmation.');e.code='REFUND_PENDING';e.providerReference=refund?.providerReference||'';throw e;}refundReference=String(refund.providerReference||'');}return repository.settleFleetSecurityDeposit({bookingId,actorUserId:req.user.id,...p.data,refundProviderReference:refundReference});});res.json(result);}catch(error){const status=['DEPOSIT_ALREADY_SETTLED','DEPOSIT_SETTLEMENT_NOT_ALLOWED','DEPOSIT_DEDUCTION_INVALID','DEPOSIT_DEDUCTION_DOCUMENTATION_REQUIRED','DEPOSIT_NOT_FOUND'].includes(error?.code)?409:error?.code==='REFUND_PENDING'?202:error?.code==='FORBIDDEN'?403:error?.code==='BOOKING_NOT_FOUND'?404:502;res.status(status).json({error:{code:error?.code||'DEPOSIT_SETTLEMENT_FAILED',message:error?.message||'Security deposit settlement could not be completed.',details:error?.providerReference?{providerReference:error.providerReference}:undefined}});}});
 app.get('/api/v1/payments/capabilities', supabaseRequireAuth, requireCustomer, async (_req,res) => {
@@ -1777,11 +1786,9 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
   const token=header.startsWith('Bearer ')?header.slice(7).trim():'';
   if(!token) return res.status(401).json({error:{code:'AUTH_REQUIRED',message:'Authentication required.'}});
   const parsed=z.object({
-    accountType:z.enum(['customer','vendor']),
+    accountType:z.literal('customer'),
     fullName:z.string().trim().min(2).max(100),
     phone:z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
-  }).superRefine((value,ctx)=>{
-    if(value.accountType==='vendor' && !value.phone) ctx.addIssue({code:z.ZodIssueCode.custom,path:['phone'],message:'Vendor phone number is required.'});
   }).safeParse(req.body);
   if(!parsed.success) return res.status(400).json({error:{code:'VALIDATION_ERROR',message:'Provide a valid account type and registration details.'}});
   try{
@@ -1794,17 +1801,7 @@ app.post('/api/v1/auth/complete-registration', authRateLimit, async (req,res) =>
       supabaseUserId:supa.id,email:supa.email,fullName:parsed.data.fullName,phone:parsed.data.phone,role:parsed.data.accountType,
     });
     console.log('[RideOnAuth][IDENTITY_LINK_SUCCESS]', JSON.stringify({requestId:req.requestId, customerId:customer.id, role:customer.role}));
-    let vendor=null;
-    if(parsed.data.accountType==='vendor'){
-      console.log('[RideOnAuth][VENDOR_PROFILE_START]', JSON.stringify({requestId:req.requestId, customerId:customer.id}));
-      vendor=await repository.ensureVendorForCustomer(customer.id,{
-        businessName:parsed.data.fullName,contactName:parsed.data.fullName,
-        phone:parsed.data.phone,email:supa.email,serviceCity:'Udaipur'
-      });
-      console.log('[RideOnAuth][VENDOR_PROFILE_RESULT]', JSON.stringify({requestId:req.requestId, created:Boolean(vendor)}));
-      if(!vendor) return res.status(500).json({error:{code:'VENDOR_PROFILE_FAILED',message:'We could not create your vendor profile right now.'}});
-    }
-    return res.json({user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},customer,vendor});
+    return res.json({user:{id:customer.id,name:customer.fullName,email:customer.email,role:customer.role},customer,vendor:null});
   }catch(error){
     console.error('[RideOnAuth][COMPLETE_REGISTRATION_ERROR]', JSON.stringify({requestId:req.requestId, code:error?.code, message:error?.message, buildCommit}));
     if(error.code==='ACCOUNT_TYPE_CONFLICT') return res.status(409).json({error:{code:error.code,message:error.message}});
