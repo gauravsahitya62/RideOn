@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Image, Modal, ScrollView, Share, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { ReviewsSection } from '../components';
 
 const COLORS = { ink: '#111827', muted: '#6B7280', orange: '#E56A3D', bg: '#F7F5F1', line: '#E7E2DA', white: '#FFFFFF' };
@@ -38,17 +38,14 @@ const FastImage = ({ uri, style, resizeMode = 'cover' }) => {
   </View>;
 };
 
-/**
- * Reusable vehicle details view. Pass the selected API vehicle, the existing
- * checkout callback, and optional date/location/quote context from RideOnApp.
- * Images are rendered only when the API supplies image URLs.
- */
 export default function VehicleDetailScreen({
   vehicle,
   onBack,
   onBook,
   pickupDate,
+  pickupTime,
   returnDate,
+  returnTime,
   location,
   quote,
   quoteLoading = false,
@@ -57,129 +54,167 @@ export default function VehicleDetailScreen({
   onEditDates,
   onEditLocation,
   onWriteReview,
+  saved = false,
+  onToggleSave,
+  selectedDays = 1,
+  onSelectDays,
 }) {
   const [activeImage, setActiveImage] = useState(0);
   const [imageViewerOpen, setImageViewerOpen] = useState(false);
-  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
-
   const images = useMemo(() => {
     if (!vehicle) return [];
     const raw = Array.isArray(vehicle.images) ? vehicle.images : [];
-    const candidates = [...raw, vehicle.image, vehicle.imageUrl, vehicle.photoUrl]
-      .filter(value => typeof value === 'string' && /^https?:\/\//i.test(value));
-    return [...new Set(candidates)];
+    return [...new Set([...raw, vehicle.image, vehicle.imageUrl, vehicle.photoUrl].filter(value => typeof value === 'string' && /^https?:\/\//i.test(value)))];
   }, [vehicle]);
 
   if (!vehicle) {
-    return <View style={styles.empty}><Text style={styles.heading}>Vehicle unavailable</Text><Text style={styles.muted}>Return to Explore and select a vehicle again.</Text><Action title="Back to Explore" onPress={onBack} /></View>;
+    return <View style={styles.empty}><Text style={styles.heading}>Vehicle unavailable</Text><Text style={styles.muted}>Return to Home and select a vehicle again.</Text><TouchableOpacity style={styles.book} onPress={onBack}><Text style={styles.bookText}>Back</Text></TouchableOpacity></View>;
   }
 
-  const specs = [
-    ['Category', asText(vehicle.type)],
-    ['Brand', asText(vehicle.brand)],
-    ['Model', asText(vehicle.model)],
-    ['Transmission', asText(vehicle.transmission)],
-    ['Fuel', asText(vehicle.fuel)],
-    ['Seats', vehicle.seats ? `${vehicle.seats} seats` : null],
-    ['Engine', asText(vehicle.engine ?? vehicle.engineCapacity)],
-    ['Mileage / range', asText(vehicle.mileage ?? vehicle.range)],
-  ].filter(([, value]) => value);
-  const description = asText(vehicle.description ?? vehicle.detail);
-  const features = Array.isArray(vehicle.features) ? vehicle.features.filter(item => typeof item === 'string' && item.trim()) : [];
-  const rentalDays = Number(quote?.days ?? quote?.pricing?.days);
-  const rentalSubtotal = quote?.rental ?? quote?.pricing?.rental;
+  const daily = Number(vehicle.price ?? vehicle.pricePerDay) || 0;
   const quoteTotal = quote?.total ?? quote?.totalPrice ?? quote?.pricing?.total;
-  const quoteIsEstimate = Boolean(quote?.disclaimer || quote?.estimate || quote?.pricing?.disclaimer);
-
+  const shown = quoteTotal != null ? Number(quoteTotal) : daily;
+  const chips = [asText(vehicle.fuel), asText(vehicle.transmission), vehicle.seats ? `${vehicle.seats} seats` : null, asText(vehicle.type)].filter(Boolean);
   const moveImage = delta => setActiveImage(current => (current + delta + images.length) % images.length);
+  const share = () => Share.share({ message: `${vehicle.name} · ${money(daily)} a day on RideOn` }).catch(() => {});
 
-  return (
-    <View style={styles.root}>
-      <View style={styles.topBar}>
-        <TouchableOpacity onPress={onBack} accessibilityRole="button" accessibilityLabel="Go back" style={styles.back}><Text style={styles.backGlyph}>‹</Text></TouchableOpacity>
-        <Text style={styles.topTitle}>Vehicle details</Text><View style={{ width: 42 }} />
+  return <View style={styles.root}>
+    <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+      <View style={styles.heroWrap}>
+        {images.length ? <TouchableOpacity activeOpacity={0.95} onPress={() => setImageViewerOpen(true)}><FastImage uri={images[Math.min(activeImage, images.length - 1)]} style={styles.heroImage} /></TouchableOpacity> : <View style={styles.imageFallback}><Text style={styles.fallbackIcon}>{vehicle.emoji || '🛵'}</Text></View>}
+        <View style={styles.heroActions}>
+          <TouchableOpacity style={styles.round} onPress={onBack} accessibilityRole="button" accessibilityLabel="Go back"><Text style={styles.roundText}>←</Text></TouchableOpacity>
+          <View style={styles.heroRight}>
+            <TouchableOpacity style={styles.round} onPress={onToggleSave} accessibilityRole="button" accessibilityLabel="Save vehicle"><Text style={styles.roundText}>{saved ? '♥' : '♡'}</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.round} onPress={share} accessibilityRole="button" accessibilityLabel="Share vehicle"><Text style={styles.roundText}>↗</Text></TouchableOpacity>
+          </View>
+        </View>
+        {images.length > 0 && <View style={styles.count}><Text style={styles.countText}>{Math.min(activeImage, images.length - 1) + 1}/{images.length}</Text></View>}
       </View>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <View style={styles.gallery}>
-          {images.length ? <TouchableOpacity activeOpacity={0.95} onPress={() => setImageViewerOpen(true)} accessibilityRole="button" accessibilityLabel="Open larger vehicle image">
-            <FastImage uri={images[Math.min(activeImage, images.length - 1)]} style={styles.heroImage} />
-          </TouchableOpacity> : <View style={styles.imageFallback}><Text style={styles.fallbackIcon}>{vehicle.emoji || '🚘'}</Text><Text style={styles.muted}>Vehicle image not provided</Text></View>}
-          {images.length > 1 && <View style={styles.galleryControls}>
-            <TouchableOpacity onPress={() => moveImage(-1)} style={styles.galleryButton} accessibilityRole="button" accessibilityLabel="Previous image"><Text style={styles.galleryGlyph}>‹</Text></TouchableOpacity>
-            <Text style={styles.imageCount}>{activeImage + 1} / {images.length}</Text>
-            <TouchableOpacity onPress={() => moveImage(1)} style={styles.galleryButton} accessibilityRole="button" accessibilityLabel="Next image"><Text style={styles.galleryGlyph}>›</Text></TouchableOpacity>
-          </View>}
-        </View>
 
-        <Text style={styles.eyebrow}>{[vehicle.brand, vehicle.type, vehicle.city].filter(Boolean).join(' · ').toUpperCase()}</Text>
-        <Text style={styles.heading}>{vehicle.name || [vehicle.brand, vehicle.model].filter(Boolean).join(' ') || 'Selected vehicle'}</Text>
-        <View style={styles.priceRow}><Text style={styles.price}>{money(vehicle.price ?? vehicle.pricePerDay)}</Text><Text style={styles.perDay}>/ day</Text></View>
-        <Text style={styles.notice}>The final price is confirmed on the next step, after your dates are checked.</Text>
+      {images.length > 1 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.thumbs}>
+        {images.map((uri, index) => <TouchableOpacity key={uri} onPress={() => setActiveImage(index)} style={[styles.thumb, index === activeImage && styles.thumbOn]}><FastImage uri={uri} style={styles.thumbImage} /></TouchableOpacity>)}
+      </ScrollView>}
 
-        {(pickupDate || returnDate || location) && <View style={styles.summaryCard}>
-          <View style={styles.sectionHead}><Text style={styles.sectionTitle}>Your trip</Text><TouchableOpacity onPress={onEditDates || onEditLocation}><Text style={styles.link}>Edit</Text></TouchableOpacity></View>
-          {(pickupDate || returnDate) && <Text style={styles.summaryText}>{pickupDate || 'Pickup date not set'}  →  {returnDate || 'Return date not set'}{Number.isFinite(rentalDays) && rentalDays > 0 ? ` · ${rentalDays} day${rentalDays === 1 ? '' : 's'}` : ''}</Text>}
-          {location && <Text style={styles.summaryText}>{location}</Text>}
-        </View>}
+      <View style={styles.titleRow}>
+        <Text style={styles.heading}>{vehicle.name || 'Selected vehicle'}</Text>
+      </View>
+      <View style={styles.chips}>
+        {chips.map(chip => <View key={chip} style={styles.chip}><Text style={styles.chipText}>{chip}</Text></View>)}
+      </View>
 
-        {specs.length > 0 && <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Specifications</Text>
-          <View style={styles.specGrid}>{specs.map(([label, value]) => <View key={label} style={styles.specCell}><Text style={styles.specLabel}>{label}</Text><Text style={styles.specValue} numberOfLines={2}>{value}</Text></View>)}</View>
-        </View>}
+      <View style={styles.note}><Text style={styles.noteTitle}>Price confirmed on booking</Text><Text style={styles.noteBody}>The amount below is the daily rate. Your dates are checked before payment.</Text></View>
+      {quoteError ? <TouchableOpacity onPress={onRetryQuote}><Text style={styles.errorText}>{quoteError}</Text></TouchableOpacity> : null}
+      {quoteLoading ? <Text style={styles.muted}>Checking the price…</Text> : null}
 
-        {description && <View style={styles.section}>
-          <Text style={styles.sectionTitle}>About this vehicle</Text>
-          <Text style={styles.description} numberOfLines={descriptionExpanded ? undefined : 4}>{description}</Text>
-          {description.length > 180 && <TouchableOpacity onPress={() => setDescriptionExpanded(value => !value)} accessibilityRole="button"><Text style={styles.link}>{descriptionExpanded ? 'Show less' : 'Read more'}</Text></TouchableOpacity>}
-        </View>}
+      <Text style={styles.section}>Pricing</Text>
+      <View style={styles.prices}>
+        {[[1, daily, 'per day'], [3, daily * 3, 'for 3 days'], [7, daily * 7, 'for 7 days']].map(([days, amount, label]) => <TouchableOpacity key={days} style={[styles.priceCard, selectedDays === days && styles.priceOn]} onPress={() => onSelectDays?.(days)} accessibilityRole="button">
+          <Text style={styles.priceValue}>{money(amount)}</Text><Text style={styles.priceLabel}>{label}</Text>
+        </TouchableOpacity>)}
+      </View>
 
-        {features.length > 0 && <View style={styles.section}><Text style={styles.sectionTitle}>Features</Text><View style={styles.features}>{features.map((feature, index) => <View key={`${feature}-${index}`} style={styles.feature}><Text style={styles.featureDot}>•</Text><Text style={styles.featureText}>{feature}</Text></View>)}</View></View>}
+      <Text style={styles.section}>Select Dates & Time</Text>
+      <View style={styles.dates}>
+        <TouchableOpacity style={styles.dateCard} onPress={onEditDates} accessibilityRole="button">
+          <Text style={styles.dateLabel}>Pick-up Date & Time</Text>
+          <Text style={styles.dateValue}>{formatWhen(pickupDate, pickupTime)}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.dateCard} onPress={onEditDates} accessibilityRole="button">
+          <Text style={styles.dateLabel}>Drop-off Date & Time</Text>
+          <Text style={styles.dateValue}>{formatWhen(returnDate, returnTime)}</Text>
+        </TouchableOpacity>
+      </View>
 
-        <ReviewsSection vehicleId={vehicle.id} title="Vehicle reviews" onWriteReview={onWriteReview}/>
-        {vehicle.vendorId ? <ReviewsSection vendorId={vehicle.vendorId} title={vehicle.vendorName ? vehicle.vendorName+' · reviews' : 'Vendor reviews'} compact onWriteReview={onWriteReview}/> : null}
+      <Text style={styles.section}>Pickup Location</Text>
+      <TouchableOpacity style={styles.location} onPress={onEditLocation} accessibilityRole="button">
+        <Text style={styles.locationPin}>⌖</Text>
+        <Text style={styles.locationText} numberOfLines={1}>{location || 'Choose a pickup location'}</Text>
+        <Text style={styles.change}>Change</Text>
+      </TouchableOpacity>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Pickup & delivery</Text>
-          <Text style={styles.description}>Pickup or doorstep delivery is subject to the options accepted in checkout. Enter a location there and review any server-provided fee before submitting your booking.</Text>
-          {location && <Text style={styles.summaryText}>Selected location: {location}</Text>}
-        </View>
+      <ReviewsSection vehicleId={vehicle.id} title="Vehicle reviews" onWriteReview={onWriteReview}/>
+    </ScrollView>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Rental estimate</Text>
-          <View style={styles.priceLine}><Text style={styles.muted}>Daily rental</Text><Text style={styles.specValue}>{money(vehicle.price ?? vehicle.pricePerDay)}</Text></View>
-          {rentalSubtotal != null && <View style={styles.priceLine}><Text style={styles.muted}>Rental subtotal{Number.isFinite(rentalDays) && rentalDays > 0 ? ` · ${rentalDays} days` : ''}</Text><Text style={styles.specValue}>{money(rentalSubtotal)}</Text></View>}
-          {quote?.deliveryFee != null && <View style={styles.priceLine}><Text style={styles.muted}>Delivery fee</Text><Text style={styles.specValue}>{money(quote.deliveryFee)}</Text></View>}
-          {quote?.platformFee != null && <View style={styles.priceLine}><Text style={styles.muted}>Platform fee</Text><Text style={styles.specValue}>{money(quote.platformFee)}</Text></View>}
-          {quoteTotal != null && <View style={[styles.priceLine, styles.totalLine]}><Text style={styles.totalLabel}>Quote total</Text><Text style={styles.totalPrice}>{money(quoteTotal)}</Text></View>}
-          {quoteIsEstimate && <Text style={styles.notice}>Estimate only — not a confirmed final charge.</Text>}
-          {quoteError && <View style={styles.errorBox}><Text style={styles.errorText}>{quoteError}</Text>{onRetryQuote && <Action title="Retry quote" onPress={onRetryQuote} />}</View>}
-          {quoteLoading && <Text style={styles.muted}>Checking quote…</Text>}
-        </View>
-      </ScrollView>
-      <View style={styles.footer}><View style={{ flex: 1 }}><Text style={styles.footerPrice}>{money(vehicle.price ?? vehicle.pricePerDay)}<Text style={styles.perDay}>/day</Text></Text></View><Action title="Book now" onPress={() => onBook?.(vehicle)} disabled={!vehicle.id || quoteLoading} /></View>
-
-      <Modal visible={imageViewerOpen} transparent animationType="fade" onRequestClose={() => setImageViewerOpen(false)}>
-        <View style={styles.viewer}><TouchableOpacity style={styles.viewerClose} onPress={() => setImageViewerOpen(false)} accessibilityRole="button" accessibilityLabel="Close image viewer"><Text style={styles.viewerCloseText}>✕</Text></TouchableOpacity>
-          {images.length > 0 && <FastImage uri={images[Math.min(activeImage, images.length - 1)]} style={styles.viewerImage} resizeMode="contain" />}
-          {images.length > 1 && <View style={styles.viewerControls}><Action title="‹ Previous" ghost onPress={() => moveImage(-1)} /><Text style={styles.imageCount}>{activeImage + 1} / {images.length}</Text><Action title="Next ›" ghost onPress={() => moveImage(1)} /></View>}
-        </View>
-      </Modal>
+    <View style={styles.footer}>
+      <TouchableOpacity style={styles.book} onPress={() => onBook?.(vehicle)} disabled={!vehicle.id || quoteLoading} accessibilityRole="button">
+        <Text style={styles.bookText}>Book Now  ·  {money(shown)}  →</Text>
+      </TouchableOpacity>
+      <Text style={styles.cancelNote}>You can review the full price before you pay.</Text>
     </View>
-  );
+
+    <Modal visible={imageViewerOpen} transparent animationType="fade" onRequestClose={() => setImageViewerOpen(false)}>
+      <View style={styles.viewer}>
+        <TouchableOpacity style={styles.viewerClose} onPress={() => setImageViewerOpen(false)} accessibilityRole="button"><Text style={styles.viewerCloseText}>✕</Text></TouchableOpacity>
+        {images.length > 0 && <FastImage uri={images[Math.min(activeImage, images.length - 1)]} style={styles.viewerImage} resizeMode="contain" />}
+        {images.length > 1 && <View style={styles.viewerControls}><TouchableOpacity onPress={() => moveImage(-1)}><Text style={styles.viewerNav}>‹</Text></TouchableOpacity><Text style={styles.viewerCount}>{activeImage + 1} / {images.length}</Text><TouchableOpacity onPress={() => moveImage(1)}><Text style={styles.viewerNav}>›</Text></TouchableOpacity></View>}
+      </View>
+    </Modal>
+  </View>;
 }
 
-function Action({ title, onPress, ghost = false, disabled = false }) {
-  return <TouchableOpacity onPress={onPress} disabled={disabled || !onPress} accessibilityRole="button" style={[styles.action, ghost && styles.actionGhost, (disabled || !onPress) && styles.disabled]}><Text style={[styles.actionText, ghost && styles.actionGhostText]}>{title}</Text></TouchableOpacity>;
+function formatWhen(date, time) {
+  if (!date) return 'Choose date & time';
+  const parsed = new Date(`${date}T${time || '10:00'}:00`);
+  if (Number.isNaN(parsed.getTime())) return date;
+  const day = parsed.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+  let hour = parsed.getHours();
+  const period = hour >= 12 ? 'PM' : 'AM';
+  hour = hour % 12 || 12;
+  return `${day} · ${hour}:${String(parsed.getMinutes()).padStart(2, '0')} ${period}`;
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: COLORS.bg },
-  topBar: { height: 64, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLORS.bg },
-  back: { width: 42, height: 42, borderRadius: 21, backgroundColor: COLORS.white, alignItems: 'center', justifyContent: 'center', shadowColor:'#111827', shadowOpacity:.06, shadowRadius:8, shadowOffset:{width:0,height:2}, elevation:2 },
-  backGlyph: { fontSize: 32, color: COLORS.ink, lineHeight: 34 }, topTitle: { fontSize: 15, fontWeight: '800', color: COLORS.ink },
-  content: { padding: 18, paddingBottom: 32 }, gallery: { borderRadius: 28, overflow: 'hidden', backgroundColor: '#EFEAE3', marginBottom: 18, shadowColor:'#111827', shadowOpacity:.08, shadowRadius:16, shadowOffset:{width:0,height:8}, elevation:3 }, heroImage: { width: '100%', height: 320, backgroundColor: '#EFEAE3' }, imageFallback: { height: 220, alignItems: 'center', justifyContent: 'center', gap: 8 }, fallbackIcon: { fontSize: 76 }, galleryControls: { position: 'absolute', bottom: 12, left: 12, right: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }, galleryButton: { width: 38, height: 38, borderRadius: 19, backgroundColor: '#FFFFFFE8', alignItems: 'center', justifyContent: 'center' }, galleryGlyph: { fontSize: 27, color: COLORS.ink }, imageCount: { color: COLORS.ink, backgroundColor: '#FFFFFFE8', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 8, fontSize: 12, fontWeight: '800', overflow: 'hidden' },
-  eyebrow: { color: COLORS.orange, fontSize: 10, fontWeight: '900', letterSpacing: 1.2, marginBottom: 8 }, heading: { color: COLORS.ink, fontSize: 27, lineHeight: 33, fontWeight: '900' }, priceRow: { flexDirection: 'row', alignItems: 'baseline', marginTop: 12, marginBottom: 12 }, price: { fontSize: 28, color: COLORS.orange, fontWeight: '800' }, perDay: { color: COLORS.muted, fontSize: 12, fontWeight: '600' }, muted: { color: COLORS.muted, fontSize: 12, lineHeight: 18 }, notice: { color: '#7B5526', backgroundColor: '#FFF5E8', borderRadius: 12, padding: 12, fontSize: 11, lineHeight: 16, marginTop: 8 },
-  section: { backgroundColor: COLORS.white, borderRadius: 22, padding: 16, marginTop: 14, shadowColor: '#111827', shadowOpacity: 0.05, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 2 }, sectionHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, sectionTitle: { color: COLORS.ink, fontSize: 16, fontWeight: '800', marginBottom: 12 }, summaryCard: { backgroundColor: COLORS.white, borderRadius: 22, padding: 16, marginTop: 16, shadowColor: '#111827', shadowOpacity: 0.05, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 2 }, summaryText: { color: COLORS.ink, fontSize: 12, lineHeight: 19, marginTop: 4 }, link: { color: COLORS.orange, fontSize: 12, fontWeight: '900', paddingVertical: 5 }, specGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, specCell: { width: '47%', minHeight: 62, backgroundColor: COLORS.bg, borderRadius: 12, padding: 11 }, specLabel: { color: COLORS.muted, fontSize: 10, marginBottom: 5 }, specValue: { color: COLORS.ink, fontSize: 12, fontWeight: '800' }, description: { color: '#535D6A', fontSize: 13, lineHeight: 21 }, features: { gap: 8 }, feature: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 }, featureDot: { color: COLORS.orange, fontSize: 18, lineHeight: 20 }, featureText: { flex: 1, color: '#535D6A', fontSize: 12, lineHeight: 19 }, priceLine: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 9 }, totalLine: { borderTopWidth: 1, borderTopColor: COLORS.line, marginTop: 5, paddingTop: 14 }, totalLabel: { color: COLORS.ink, fontSize: 13, fontWeight: '900' }, totalPrice: { color: COLORS.ink, fontSize: 20, fontWeight: '900' }, errorBox: { marginTop: 10, backgroundColor: '#FFF0F0', borderRadius: 12, padding: 12 }, errorText: { color: '#A22', fontSize: 12, lineHeight: 18 },
-  footer: { padding: 14, paddingBottom: 18, backgroundColor: COLORS.white, flexDirection: 'row', alignItems: 'center', gap: 12, shadowColor: '#111827', shadowOpacity: 0.08, shadowRadius: 16, shadowOffset: { width: 0, height: -4 }, elevation: 8 }, footerLabel: { color: COLORS.muted, fontSize: 10 }, footerPrice: { color: COLORS.ink, fontSize: 18, fontWeight: '800' }, action: { backgroundColor: COLORS.orange, borderRadius: 16, paddingHorizontal: 20, paddingVertical: 16, alignItems: 'center', justifyContent: 'center' }, actionText: { color: COLORS.white, fontSize: 14, fontWeight: '800' }, actionGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: COLORS.line }, actionGhostText: { color: COLORS.ink }, disabled: { opacity: 0.45 }, empty: { flex: 1, padding: 24, justifyContent: 'center', gap: 12 },
-  viewer: { flex: 1, backgroundColor: '#0B0E13', justifyContent: 'center', padding: 14 }, viewerImage: { width: '100%', height: '70%' }, viewerClose: { position: 'absolute', top: 48, right: 22, zIndex: 2, width: 44, height: 44, borderRadius: 22, backgroundColor: '#FFFFFF22', alignItems: 'center', justifyContent: 'center' }, viewerCloseText: { color: '#FFFFFF', fontSize: 20 }, viewerControls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 16 },
+  root: { flex: 1, backgroundColor: '#FFFFFF' },
+  content: { paddingBottom: 24 },
+  heroWrap: { margin: 12, borderRadius: 22, overflow: 'hidden', backgroundColor: '#E8EEF2', height: 250 },
+  heroImage: { width: '100%', height: 250 },
+  imageFallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  fallbackIcon: { fontSize: 72 },
+  heroActions: { position: 'absolute', top: 12, left: 12, right: 12, flexDirection: 'row', justifyContent: 'space-between' },
+  heroRight: { flexDirection: 'row', gap: 8 },
+  round: { width: 38, height: 38, borderRadius: 19, backgroundColor: '#FFFFFFEE', alignItems: 'center', justifyContent: 'center' },
+  roundText: { color: COLORS.ink, fontSize: 18, fontWeight: '700' },
+  count: { position: 'absolute', left: 12, bottom: 12, backgroundColor: '#111827CC', borderRadius: 12, paddingHorizontal: 8, paddingVertical: 4 },
+  countText: { color: '#FFFFFF', fontSize: 12, fontWeight: '700' },
+  thumbs: { paddingHorizontal: 12, gap: 8 },
+  thumb: { width: 64, height: 48, borderRadius: 10, overflow: 'hidden', borderWidth: 2, borderColor: 'transparent' },
+  thumbOn: { borderColor: '#07A574' },
+  thumbImage: { width: 64, height: 48 },
+  titleRow: { paddingHorizontal: 16, marginTop: 14 },
+  heading: { color: COLORS.ink, fontSize: 24, fontWeight: '800' },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 16, marginTop: 12 },
+  chip: { backgroundColor: '#F4F6F8', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 8 },
+  chipText: { color: '#3E4A54', fontSize: 12, fontWeight: '700' },
+  note: { marginHorizontal: 16, marginTop: 14, backgroundColor: '#F3FBF6', borderRadius: 14, padding: 12 },
+  noteTitle: { color: '#067A4A', fontWeight: '800', fontSize: 13 },
+  noteBody: { color: '#5E6872', fontSize: 12, lineHeight: 17, marginTop: 2 },
+  section: { marginTop: 18, marginHorizontal: 16, color: COLORS.ink, fontSize: 16, fontWeight: '800' },
+  prices: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginTop: 10 },
+  priceCard: { flex: 1, borderRadius: 14, borderWidth: 1, borderColor: '#E6E8EC', padding: 10, backgroundColor: '#FFFFFF' },
+  priceOn: { backgroundColor: '#E7F8EC', borderColor: '#07A574' },
+  priceValue: { color: COLORS.ink, fontSize: 16, fontWeight: '800' },
+  priceLabel: { color: '#66707A', fontSize: 11, marginTop: 4 },
+  dates: { flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginTop: 10 },
+  dateCard: { flex: 1, borderRadius: 14, borderWidth: 1, borderColor: '#E6E8EC', padding: 10 },
+  dateLabel: { color: '#7B848E', fontSize: 11 },
+  dateValue: { color: COLORS.ink, fontSize: 13, fontWeight: '700', marginTop: 6 },
+  location: { marginHorizontal: 16, marginTop: 10, borderRadius: 14, borderWidth: 1, borderColor: '#E6E8EC', padding: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  locationPin: { color: '#07A574', fontSize: 16 },
+  locationText: { flex: 1, color: COLORS.ink, fontWeight: '700' },
+  change: { color: '#07A574', fontWeight: '800' },
+  footer: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 16, backgroundColor: '#FFFFFF' },
+  book: { height: 54, borderRadius: 27, backgroundColor: '#07A574', alignItems: 'center', justifyContent: 'center' },
+  bookText: { color: '#FFFFFF', fontSize: 16, fontWeight: '800' },
+  cancelNote: { textAlign: 'center', color: '#8B949E', fontSize: 12, marginTop: 8 },
+  muted: { color: COLORS.muted, marginHorizontal: 16, marginTop: 8 },
+  errorText: { color: '#B23B3B', marginHorizontal: 16, marginTop: 8 },
+  empty: { flex: 1, padding: 24, justifyContent: 'center', gap: 12 },
+  viewer: { flex: 1, backgroundColor: '#0B0E13', justifyContent: 'center', padding: 14 },
+  viewerImage: { width: '100%', height: '70%' },
+  viewerClose: { position: 'absolute', top: 48, right: 22, zIndex: 2, width: 44, height: 44, borderRadius: 22, backgroundColor: '#FFFFFF22', alignItems: 'center', justifyContent: 'center' },
+  viewerCloseText: { color: '#FFFFFF', fontSize: 20 },
+  viewerControls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 16 },
+  viewerNav: { color: '#FFFFFF', fontSize: 28, paddingHorizontal: 12 },
+  viewerCount: { color: '#FFFFFF', fontWeight: '700' },
 });

@@ -192,6 +192,7 @@ export function createRepository({ databaseUrl, fleet }) {
     }
 
     let optionalById = new Map();
+    let classById = new Map();
     try {
       const ids = rows.map(row => String(row.id)).filter(Boolean);
       if (ids.length) {
@@ -205,6 +206,13 @@ export function createRepository({ databaseUrl, fleet }) {
     } catch (optionalError) {
       console.warn(JSON.stringify({level:'warn',event:'vehicle_optional_metadata_unavailable',message:optionalError?.message||'Vehicle metadata unavailable',code:optionalError?.code||null}));
     }
+    try {
+      const ids = rows.map(row => String(row.id)).filter(Boolean);
+      if (ids.length) {
+        const classes = await pool.query('select id::text as id, fleet_vehicle_class from vehicles where id::text = any($1::text[])', [ids]);
+        classById = new Map(classes.rows.map(row => [String(row.id), row.fleet_vehicle_class]));
+      }
+    } catch {}
 
     // Enrich active vehicles with vendor service-location data. Missing location
     // must never hide a valid vehicle from the marketplace.
@@ -234,9 +242,10 @@ export function createRepository({ databaseUrl, fleet }) {
     return rows.map((row) => {
       const extra = optionalById.get(String(row.id)) || {};
       const vendor = vendorByVehicleId.get(String(row.id)) || {};
+      const vehicleClass = String(classById.get(String(row.id)) || '').toLowerCase();
       return {
         id: String(row.id),
-        type: String(row.type),
+        type: vehicleClass === 'scooter' ? 'scooter' : String(row.type),
         name: row.name,
         subtitle: [row.transmission, row.seats ? `${row.seats} seats` : null, row.fuel].filter(Boolean).join(' · '),
         pricePerDay: Number(row.daily_rate_paise || 0) / 100,
@@ -1146,7 +1155,7 @@ export function createRepository({ databaseUrl, fleet }) {
         }
         const vendorServiceLatitude=serviceLocation?.service_latitude == null ? null : Number(serviceLocation.service_latitude);
         const vendorServiceLongitude=serviceLocation?.service_longitude == null ? null : Number(serviceLocation.service_longitude);
-        const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,vendor_service_latitude,vendor_service_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,delivery_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,\'requested\',\'unpaid\',\'scheduled\',$17) returning *',[input.customerId,input.vehicle.id,vehicleCheck.rows[0].owner_id||null,input.startAt,input.endAt,input.delivery,input.address,deliveryLatitude,deliveryLongitude,vendorServiceLatitude,vendorServiceLongitude,Math.round(input.pricing.deliveryFee * 100),Math.round(input.pricing.rental * 100),Math.round(input.pricing.platformFee * 100),Math.round((input.pricing.securityDeposit||0) * 100),Math.round(input.pricing.total * 100),input.notes||null]);
+        const {rows}=await client.query('insert into bookings (customer_id,vehicle_id,vendor_id,start_at,end_at,delivery_required,delivery_address,delivery_latitude,delivery_longitude,vendor_service_latitude,vendor_service_longitude,delivery_fee_paise,rental_total_paise,platform_fee_paise,security_deposit_paise,total_paise,status,payment_status,delivery_status,customer_notes) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,\'requested\',\'unpaid\',\'scheduled\',$17) returning *',[input.customerId,input.vehicle.id,vehicleCheck.rows[0].owner_id||null,input.startAt,input.endAt,input.delivery,input.address,deliveryLatitude,deliveryLongitude,vendorServiceLatitude,vendorServiceLongitude,Math.round(input.pricing.deliveryFee * 100),Math.round(input.pricing.rental * 100),Math.round((Number(input.pricing.platformFee||0) + Number(input.pricing.addonFee||0)) * 100),Math.round((input.pricing.securityDeposit||0) * 100),Math.round(input.pricing.total * 100),input.notes||null]);
         if(input.idempotencyKey) await client.query('insert into booking_idempotency_keys (customer_id,idempotency_key,booking_id) values ($1,$2,$3)',[input.customerId,input.idempotencyKey,rows[0].id]);
         if(Number(input.pricing.securityDeposit||0)>0) await client.query(`insert into security_deposits(booking_id,customer_id,vendor_id,original_amount_paise,refundable_amount_paise,status) values($1,$2,$3,$4,$4,'pending') on conflict (booking_id) do nothing`,[rows[0].id,input.customerId,vehicleCheck.rows[0].owner_id||null,Math.round(Number(input.pricing.securityDeposit||0)*100)]);
         await client.query('insert into booking_status_events (booking_id,next_status,actor_type,actor_id) values ($1,\'requested\',\'customer\',$2)',[rows[0].id,input.customerId]);

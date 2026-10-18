@@ -25,10 +25,10 @@ export default function AuthGate() {
       setUser(null);
       setStatus('unauthenticated');
     });
-    SecureStore.getItemAsync('rideon_welcome_v3').then(value => { if (active) setWelcomeSeen(value === '1'); }).catch(() => { if (active) setWelcomeSeen(true); });
+    SecureStore.getItemAsync('rideon_welcome_v5').then(value => { if (active) setWelcomeSeen(value === '1'); }).catch(() => { if (active) setWelcomeSeen(true); });
     return () => { active = false; };
   }, []);
-  const finishWelcome = async () => { try { await SecureStore.setItemAsync('rideon_welcome_v3', '1'); } catch {} setWelcomeSeen(true); };
+  const finishWelcome = async () => { try { await SecureStore.setItemAsync('rideon_welcome_v5', '1'); } catch {} setWelcomeSeen(true); };
 
   const handleAuthenticated = (nextUser) => { setUser(nextUser); setStatus('authenticated'); };
   const signOut = async () => { await authService.signOut(); setUser(null); setStatus('unauthenticated'); };

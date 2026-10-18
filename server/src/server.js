@@ -71,6 +71,11 @@ const paymentRateLimit = rateLimit({ windowMs: 60_000, limit: 20, standardHeader
 const kycRateLimit = rateLimit({ windowMs: 60 * 60_000, limit: 5, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 const kycWebhookRateLimit = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false, skip: () => process.env.NODE_ENV === 'test' });
 
+const addonsSchema = z.object({
+  helmets: z.number().int().min(0).max(4).optional().default(0),
+  holders: z.number().int().min(0).max(2).optional().default(0),
+}).optional();
+
 const bookingSchema = z.object({
   customerName: z.string().trim().min(2).max(100).optional().default('RideOn guest'),
   phone: z.string().trim().regex(/^\+?[0-9]{10,15}$/).optional(),
@@ -80,6 +85,7 @@ const bookingSchema = z.object({
   delivery: z.boolean().default(true),
   address: z.string().trim().min(8).max(300),
   notes: z.string().max(500).optional(),
+  addons: addonsSchema,
   deliveryLatitude: z.union([z.number(), z.string()]).nullable().optional(),
   deliveryLongitude: z.union([z.number(), z.string()]).nullable().optional(),
   deliveryAddressSource: z.enum(['manual','geocoded','saved']).optional(),
@@ -117,7 +123,13 @@ function validateBookingWindow(startAt,endAt) {
   return { start, end, days };
 }
 
-function pricing(vehicle, startAt, endAt, delivery) {
+function rentalAddons(addons, days) {
+  const helmets = Math.min(4, Math.max(0, Math.floor(Number(addons?.helmets) || 0)));
+  const holders = Math.min(2, Math.max(0, Math.floor(Number(addons?.holders) || 0)));
+  return { helmets, holders, addonFee: helmets * 50 + holders * 50 * days };
+}
+
+function pricing(vehicle, startAt, endAt, delivery, addons) {
   const start = new Date(startAt);
   const end = new Date(endAt);
   const durationMs = end.getTime() - start.getTime();
@@ -131,8 +143,15 @@ function pricing(vehicle, startAt, endAt, delivery) {
   const deliveryFee = delivery ? 199 : 0;
   const platformFee = Math.round(rental * 0.05);
   const securityDeposit = Number(vehicle.securityDeposit || 0);
-  const total = rental + deliveryFee + platformFee + securityDeposit;
-  return { days, rental, deliveryFee, platformFee, securityDeposit, total, currency: 'INR', currencyUnit: 'rupees' };
+  const extras = rentalAddons(addons, days);
+  const total = rental + deliveryFee + platformFee + securityDeposit + extras.addonFee;
+  const quote = { days, rental, deliveryFee, platformFee, securityDeposit, total, currency: 'INR', currencyUnit: 'rupees' };
+  if (extras.addonFee > 0) {
+    quote.addonFee = extras.addonFee;
+    quote.helmets = extras.helmets;
+    quote.holders = extras.holders;
+  }
+  return quote;
 }
 
 const mobileVehicle = (v) => ({
@@ -1878,7 +1897,7 @@ app.get('/api/v1/vehicles/:id/availability', supabaseRequireAuth, requireCustome
 
 app.post('/api/v1/bookings/quote', supabaseRequireAuth, requireCustomer, async (req, res) => {
   const normalized = normalizeBookingInput(req.body);
-  const schema = z.object({ vehicleId: z.string(), startAt: z.string().datetime(), endAt: z.string().datetime(), delivery: z.boolean().default(true) })
+  const schema = z.object({ vehicleId: z.string(), startAt: z.string().datetime(), endAt: z.string().datetime(), delivery: z.boolean().default(true), addons: addonsSchema })
     .refine((x) => new Date(x.endAt) > new Date(x.startAt), { message: 'endAt must be after startAt' });
   const parsed = schema.safeParse(normalized);
   if (!parsed.success) return res.status(400).json({ error: { code: 'INVALID_BOOKING_WINDOW', message:'Please check the booking window.', details: parsed.error.flatten() } });
@@ -1893,7 +1912,7 @@ app.post('/api/v1/bookings/quote', supabaseRequireAuth, requireCustomer, async (
     throw error;
   }
   let quote;
-  try { quote = { vehicleId: vehicle.id, ...pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery) }; } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
+  try { quote = { vehicleId: vehicle.id, ...pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery, parsed.data.addons) }; } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
   res.json({ data: { ...quote, disclaimer: 'Estimate; final availability and fees must be confirmed.' }, quote });
 });
 
@@ -1930,7 +1949,9 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
     return res.status(404).json({error:{code:'VEHICLE_NOT_FOUND',message:'Vehicle not found.'}});
   }
   let pricingData;
-  try { pricingData = pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery); } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
+  try { pricingData = pricing(vehicle, parsed.data.startAt, parsed.data.endAt, parsed.data.delivery, parsed.data.addons); } catch(error) { return res.status(400).json({error:{code:error.code||'INVALID_BOOKING_WINDOW',message:error.message}}); }
+  const addonNote = [pricingData.helmets ? `${pricingData.helmets} extra helmet` : '', pricingData.holders ? `${pricingData.holders} mobile holder` : ''].filter(Boolean).join(', ');
+  const bookingNotes = [parsed.data.notes, addonNote].filter(Boolean).join('. ').slice(0, 500);
 
   const idempotencyKey = req.get('Idempotency-Key')?.trim() || null;
   if (idempotencyKey && idempotencyKey.length > 128) return res.status(400).json({ error: { code: 'INVALID_IDEMPOTENCY_KEY' } });
@@ -1943,12 +1964,13 @@ app.post('/api/v1/bookings', supabaseRequireAuth, requireCustomer, async (req, r
       endAt: parsed.data.endAt,
       delivery: parsed.data.delivery,
       address: parsed.data.address,
-      notes: parsed.data.notes,
+      notes: bookingNotes,
       deliveryLatitude: parsed.data.deliveryLatitude,
       deliveryLongitude: parsed.data.deliveryLongitude,
       pricing: pricingData,
       idempotencyKey,
     });
+    if (pricingData.addonFee && booking?.pricing) booking.pricing = { ...booking.pricing, platformFee: pricingData.platformFee, addonFee: pricingData.addonFee, helmets: pricingData.helmets, holders: pricingData.holders, total: pricingData.total };
     res.status(201).json({ data: publicBooking(booking), booking: publicBooking(booking) });
   } catch (error) {
     if (error.code === 'IDEMPOTENCY_REPLAY') return res.status(200).json({ data: publicBooking(error.booking), booking: publicBooking(error.booking) });

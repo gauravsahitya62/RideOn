@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Platform, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import Constants from 'expo-constants';
@@ -10,6 +10,14 @@ const isExpoGo=Constants.appOwnership==='expo';
 
 const CITY_CENTERS={
   udaipur:{latitude:24.5854,longitude:73.7125},
+  goa:{latitude:15.2993,longitude:74.124},
+  jaipur:{latitude:26.9124,longitude:75.7873},
+  mumbai:{latitude:19.076,longitude:72.8777},
+  bangalore:{latitude:12.9716,longitude:77.5946},
+  bengaluru:{latitude:12.9716,longitude:77.5946},
+  delhi:{latitude:28.6139,longitude:77.209},
+  pune:{latitude:18.5204,longitude:73.8567},
+  hyderabad:{latitude:17.385,longitude:78.4867},
 };
 const DEFAULT_ZOOM={latitudeDelta:0.16,longitudeDelta:0.16};
 const normalizeCityKey=value=>String(value||'').trim().toLowerCase();
@@ -35,6 +43,7 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
   const [routeError,setRouteError]=useState('');
   const [userPoint,setUserPoint]=useState(null);
   const [permissionState,setPermissionState]=useState('unknown');
+  const [fleet,setFleet]=useState([]);
 
   const loadVendors=useCallback(async()=>{
     setLoading(true);setError('');
@@ -47,6 +56,7 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
   },[city]);
 
   useEffect(()=>{loadVendors();},[loadVendors]);
+  useEffect(()=>{let active=true;rideOnApi.listVehicles({city}).then(result=>{if(!active)return;const all=Array.isArray(result?.vehicles)?result.vehicles:Array.isArray(result?.data)?result.data:[];setFleet(all);}).catch(()=>{if(active)setFleet([]);});return()=>{active=false;};},[city]);
 
   const loadVendorVehicles=useCallback(async(vendor)=>{
     if(!vendor)return;
@@ -78,6 +88,7 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
       setRouteError('We could not read your current location. You can select a point on the map instead.');
     }
   },[]);
+  useEffect(()=>{Location.getForegroundPermissionsAsync().then(permission=>{if(permission.status==='granted')requestCurrentLocation();}).catch(()=>{});},[requestCurrentLocation]);
 
   const geocode=useCallback(async()=>{
     const requested=deliveryAddress.trim();
@@ -129,7 +140,7 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
       <View style={styles.mapHint}><Text style={styles.mapHintText}>Tap a RideOn location to see available vehicles. Tap the map to set a delivery point.</Text></View>
       <TouchableOpacity style={styles.locateButton} onPress={requestCurrentLocation}><Text style={styles.locateText}>⌖</Text></TouchableOpacity>
     </View>
-    <View style={styles.sheet}>
+    <ScrollView style={styles.sheet} contentContainerStyle={{paddingBottom:28}} keyboardShouldPersistTaps="handled">
       <Text style={styles.sectionTitle}>Delivery location</Text>
       <View style={styles.searchRow}><TextInput value={deliveryAddress} onChangeText={setDeliveryAddress} placeholder="Enter address or landmark" placeholderTextColor="#A0A7B1" style={styles.input}/><TouchableOpacity onPress={geocode} disabled={routeLoading} style={styles.searchButton}><Text style={styles.searchText}>Find</Text></TouchableOpacity></View>
       <TouchableOpacity onPress={requestCurrentLocation} style={styles.locationLink}><Text style={styles.link}>Use my current location</Text><Text style={styles.muted}>{permissionState==='denied'?'Location denied — map selection still works.':'Optional'}</Text></TouchableOpacity>
@@ -139,13 +150,17 @@ export default function MapsDiscoveryScreen({city,onBack,onBookVehicle}){
         <View style={{flex:1}}><Text style={styles.vendorName}>{selectedVendor.businessName}</Text><Text style={styles.muted}>{selectedVendor.serviceCity||city}{selectedVendor.address?' · '+selectedVendor.address:''}</Text><Text style={styles.vendorMeta}>{selectedVendor.availableVehicleCount} vehicle{selectedVendor.availableVehicleCount===1?'':'s'} available</Text></View>
         {routeLoading?<ActivityIndicator color={C.orange}/>:route?<View style={styles.routeBox}><Text style={styles.routeValue}>{(route.distanceMeters/1000).toFixed(1)} km</Text><Text style={styles.routeLabel}>distance</Text><Text style={styles.routeValue}>{route.estimatedDeliveryMinutes} min</Text><Text style={styles.routeLabel}>estimated delivery</Text></View>:null}
       </View>:<View style={styles.empty}><Text style={styles.sectionTitle}>Select a RideOn location</Text><Text style={styles.muted}>Choose a service marker to browse the vehicles available in this area.</Text></View>}
+      <View style={styles.vehicles}>
+        <Text style={styles.sectionTitle}>Vehicles in {city}</Text>
+        {fleet.length?fleet.map(v=><View key={v.id} style={styles.vehicleRow}><View style={{flex:1}}><Text style={styles.vehicleName}>{v.name}</Text><Text style={styles.muted}>{v.type} · ₹{Number(v.pricePerDay||v.price||0).toLocaleString('en-IN')} / day</Text></View><TouchableOpacity onPress={()=>onBookVehicle?.(v)} style={styles.bookButton}><Text style={styles.bookText}>Book</Text></TouchableOpacity></View>):<Text style={styles.muted}>No RideOn vehicles are listed in {city} right now.</Text>}
+      </View>
       {selectedVendor&&<View style={styles.vehicles}>
         <Text style={styles.sectionTitle}>Available vehicles</Text>
         {vehicleLoading?<Text style={styles.muted}>Loading vehicles…</Text>:
           vehicles.length?vehicles.map(v=><View key={v.id} style={styles.vehicleRow}><View style={{flex:1}}><Text style={styles.vehicleName}>{v.name}</Text><Text style={styles.muted}>{v.type} · ₹{Number(v.pricePerDay||v.price||0).toLocaleString('en-IN')} / day</Text></View><TouchableOpacity onPress={()=>onBookVehicle?.(v)} style={styles.bookButton}><Text style={styles.bookText}>View / book</Text></TouchableOpacity></View>):
           <Text style={styles.muted}>No active RideOn vehicles are currently available at this location.</Text>}
       </View>}
-    </View>
+    </ScrollView>
   </View>;
 }
 
