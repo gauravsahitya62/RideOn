@@ -156,7 +156,7 @@ export default function VehicleDetailScreen({
           {quoteLoading && <Text style={styles.muted}>Checking quote…</Text>}
         </View>
       </ScrollView>
-      <View style={styles.footer}><View style={{ flex: 1 }}><Text style={styles.footerLabel}>Starting at</Text><Text style={styles.footerPrice}>{money(vehicle.price ?? vehicle.pricePerDay)}<Text style={styles.perDay}> / day</Text></Text></View><Action title="Continue to booking →" onPress={() => onBook?.(vehicle)} disabled={!vehicle.id || quoteLoading} /></View>
+      <View style={styles.footer}><View style={{ flex: 1 }}><Text style={styles.footerPrice}>{money(vehicle.price ?? vehicle.pricePerDay)}<Text style={styles.perDay}>/day</Text></Text></View><Action title="Book now" onPress={() => onBook?.(vehicle)} disabled={!vehicle.id || quoteLoading} /></View>
 
       <Modal visible={imageViewerOpen} transparent animationType="fade" onRequestClose={() => setImageViewerOpen(false)}>
         <View style={styles.viewer}><TouchableOpacity style={styles.viewerClose} onPress={() => setImageViewerOpen(false)} accessibilityRole="button" accessibilityLabel="Close image viewer"><Text style={styles.viewerCloseText}>✕</Text></TouchableOpacity>

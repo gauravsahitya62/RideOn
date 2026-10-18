@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 import { authService } from './authService';
 import AuthScreen from './AuthScreen';
+import WelcomeScreen from './WelcomeScreen';
 import RideOnApp from '../screens/RideOnApp';
 import AdminEntry from '../screens/AdminEntry';
 import RetiredRole from '../screens/RetiredRole';
@@ -9,6 +11,7 @@ import RetiredRole from '../screens/RetiredRole';
 export default function AuthGate() {
   const [status, setStatus] = useState('loading');
   const [user, setUser] = useState(null);
+  const [welcomeSeen, setWelcomeSeen] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -22,13 +25,17 @@ export default function AuthGate() {
       setUser(null);
       setStatus('unauthenticated');
     });
+    SecureStore.getItemAsync('rideon_welcome_v3').then(value => { if (active) setWelcomeSeen(value === '1'); }).catch(() => { if (active) setWelcomeSeen(true); });
     return () => { active = false; };
   }, []);
+  const finishWelcome = async () => { try { await SecureStore.setItemAsync('rideon_welcome_v3', '1'); } catch {} setWelcomeSeen(true); };
 
   const handleAuthenticated = (nextUser) => { setUser(nextUser); setStatus('authenticated'); };
   const signOut = async () => { await authService.signOut(); setUser(null); setStatus('unauthenticated'); };
 
   if (status === 'loading') return <LoadingScreen />;
+  if (status === 'unauthenticated' && welcomeSeen === null) return <LoadingScreen />;
+  if (status === 'unauthenticated' && !welcomeSeen) return <WelcomeScreen onDone={finishWelcome} />;
   if (status === 'unauthenticated') return <AuthScreen onAuthenticated={handleAuthenticated} />;
   if (user.role === 'vendor' || user.role === 'delivery_staff') return <RetiredRole onLogout={signOut} />;
   if (user.role === 'admin' || user.role === 'support') return <AdminEntry user={user} onLogout={signOut} />;
